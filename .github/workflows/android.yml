@@ -1,0 +1,79 @@
+name: Android Build & Release
+
+on:
+  push:
+    branches: [main, master, "feature/**", "claude/**", "bluewind201/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install web dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Build web application
+        run: npm run build
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build Android APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KIDS_Photo-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+
+      - name: Publish APK to latest-apk release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk_path=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$apk_path" ]; then
+            echo "No APK found to publish!"
+            exit 1
+          fi
+          cp "$apk_path" KIDS_Photo.apk
+          gh release delete latest-apk --yes --cleanup-tag || true
+          gh release create latest-apk KIDS_Photo.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "KIDS_Photo 최신 APK (토순이네 스마트 액자)" \
+            --notes "자동 빌드 배포 - 브랜치: ${GITHUB_REF_NAME}, 커밋: ${GITHUB_SHA::7}, 빌드번호: ${GITHUB_RUN_NUMBER}"

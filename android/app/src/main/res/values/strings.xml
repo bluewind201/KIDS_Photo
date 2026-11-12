@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">토순이네 스마트 액자</string>
+    <string name="title_activity_main">토순이네 스마트 액자</string>
+    <string name="package_name">com.bluewind.kidsphoto</string>
+    <string name="custom_url_scheme">com.bluewind.kidsphoto</string>
+</resources>

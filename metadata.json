@@ -1,0 +1,6 @@
+{
+  "name": "토순이네 스마트 액자",
+  "description": "구글 드라이브·원드라이브·시놀로지 NAS 사진 폴더 연동 디지털 액자, 맞춤형 AI 음성 호출 비서, 그리고 아이들의 친구 토순이·토실이·토뚱이가 함께하는 패밀리 스마트 프레임",
+  "requestFramePermissions": ["microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

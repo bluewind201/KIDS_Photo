@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Outfit', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Malgun Gothic', sans-serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: linear-gradient(145deg, #d8d3cd 0%, #c4beb6 52%, #b8b1a9 100%);
+    color: #141519;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes ticker-marquee {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes ken-burns-drift {
+  0% {
+    transform: scale(1.02) translate3d(-1.2%, -0.8%, 0);
+  }
+  50% {
+    transform: scale(1.08) translate3d(1.2%, 0.8%, 0);
+  }
+  100% {
+    transform: scale(1.02) translate3d(-1.2%, -0.8%, 0);
+  }
+}
+
+@keyframes frame-sway-float {
+  0% {
+    transform: scale(1.04) translate3d(-1.6%, 0%, 0) rotate(-0.3deg);
+  }
+  50% {
+    transform: scale(1.05) translate3d(1.6%, -0.5%, 0) rotate(0.3deg);
+  }
+  100% {
+    transform: scale(1.04) translate3d(-1.6%, 0%, 0) rotate(-0.3deg);
+  }
+}
+
+.animate-ticker {
+  display: flex;
+  width: max-content;
+  animation: ticker-marquee 42s linear infinite;
+}
+
+.animate-ticker:hover {
+  animation-play-state: paused;
+}
+
+.animate-ken-burns {
+  animation: ken-burns-drift 22s ease-in-out infinite;
+  will-change: transform;
+}
+
+.animate-frame-sway {
+  animation: frame-sway-float 16s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Subtle custom scrollbars for smart-home bento cards */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(20, 21, 25, 0.14);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(20, 21, 25, 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ticker,
+  .animate-ken-burns,
+  .animate-frame-sway {
+    animation: none !important;
+  }
+}
