@@ -1,11 +1,15 @@
 package com.bluewind.kidsphoto;
 
 import android.Manifest;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
+import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
@@ -22,6 +26,7 @@ import android.webkit.PermissionRequest;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -787,6 +792,135 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void stopListening() {
             stopNativeListeningInternal(true);
+        }
+
+        @JavascriptInterface
+        public boolean hasMicPermission() {
+            return (
+                ContextCompat.checkSelfPermission(
+                    MainActivity.this,
+                    Manifest.permission.RECORD_AUDIO
+                ) ==
+                PackageManager.PERMISSION_GRANTED
+            );
+        }
+
+        @JavascriptInterface
+        public void ensureMicPermission() {
+            mainHandler.post(() -> {
+                if (
+                    ContextCompat.checkSelfPermission(
+                        MainActivity.this,
+                        Manifest.permission.RECORD_AUDIO
+                    ) !=
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    ActivityCompat.requestPermissions(
+                        MainActivity.this,
+                        new String[] { Manifest.permission.RECORD_AUDIO },
+                        PERMISSION_REQUEST_CODE
+                    );
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public boolean isPhoneGeminiInstalled() {
+            try {
+                PackageManager pm = getPackageManager();
+                return pm.getLaunchIntentForPackage("com.google.android.apps.bard") != null;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean launchPhoneGeminiLive(String personaPrompt) {
+            final String safePrompt = personaPrompt != null ? personaPrompt.trim() : "";
+            mainHandler.post(() -> {
+                try {
+                    if (!safePrompt.isEmpty()) {
+                        ClipboardManager cb = (ClipboardManager) getSystemService(
+                            Context.CLIPBOARD_SERVICE
+                        );
+                        if (cb != null) {
+                            cb.setPrimaryClip(
+                                ClipData.newPlainText("KIDS_Photo_Character", safePrompt)
+                            );
+                        }
+                    }
+
+                    PackageManager pm = getPackageManager();
+
+                    // 1) Try sending character persona directly to Official Google Gemini App (`com.google.android.apps.bard`)
+                    Intent sendIntent = new Intent(Intent.ACTION_SEND);
+                    sendIntent.setType("text/plain");
+                    sendIntent.setPackage("com.google.android.apps.bard");
+                    if (!safePrompt.isEmpty()) {
+                        sendIntent.putExtra(Intent.EXTRA_TEXT, safePrompt);
+                    }
+                    sendIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (sendIntent.resolveActivity(pm) != null) {
+                        Toast.makeText(
+                            MainActivity.this,
+                            "동물친구 설정이 전달되었습니다! Gemini 우측 Live 아이콘을 눌러 음성대화를 시작해 보세요.",
+                            Toast.LENGTH_LONG
+                        ).show();
+                        startActivity(sendIntent);
+                        return;
+                    }
+
+                    // 2) Try launching Google Gemini App main activity
+                    Intent launchBard = pm.getLaunchIntentForPackage(
+                        "com.google.android.apps.bard"
+                    );
+                    if (launchBard != null) {
+                        launchBard.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        Toast.makeText(
+                            MainActivity.this,
+                            "동물친구 설정이 클립보드에 복사되었습니다! 붙여넣고 Gemini Live 음성대화를 시작해 보세요.",
+                            Toast.LENGTH_LONG
+                        ).show();
+                        startActivity(launchBard);
+                        return;
+                    }
+
+                    // 3) Fallback: System Voice Assistant (`ACTION_VOICE_COMMAND` or `gemini.google.com/app`)
+                    Intent voiceCmd = new Intent(Intent.ACTION_VOICE_COMMAND);
+                    voiceCmd.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    if (voiceCmd.resolveActivity(pm) != null) {
+                        Toast.makeText(
+                            MainActivity.this,
+                            "동물친구 설정이 복사되었습니다! 기기 음성 어시스턴트를 실행합니다.",
+                            Toast.LENGTH_LONG
+                        ).show();
+                        startActivity(voiceCmd);
+                        return;
+                    }
+
+                    Intent webGemini = new Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://gemini.google.com/app")
+                    );
+                    webGemini.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(webGemini);
+                } catch (Exception ignored) {
+                    // Ignore intent error
+                }
+            });
+            return true;
+        }
+
+        @JavascriptInterface
+        public void openExternalUrl(String url) {
+            if (url == null || !url.startsWith("http")) return;
+            mainHandler.post(() -> {
+                try {
+                    Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(browserIntent);
+                } catch (Exception ignored) {}
+            });
         }
     }
 

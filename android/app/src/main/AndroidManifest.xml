@@ -36,8 +36,10 @@
         </provider>
     </application>
 
-    <!-- Android 11+ (API 30+) Package Visibility for System TTS & Speech Recognition Services -->
+    <!-- Android 11+ (API 30+) Package Visibility for System TTS, Speech Recognition & Official Google Gemini App -->
     <queries>
+        <package android:name="com.google.android.apps.bard" />
+        <package android:name="com.google.android.googlequicksearchbox" />
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>

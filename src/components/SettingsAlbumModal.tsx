@@ -9,6 +9,7 @@ import {
   CloudSnow,
   Database,
   Edit3,
+  ExternalLink,
   Folder,
   FolderPlus,
   GraduationCap,
@@ -35,7 +36,18 @@ import {
   X,
 } from 'lucide-react';
 import { PROVIDER_LABELS, SAMPLE_PHOTO_POOL } from '../data/initialAlbums';
-import { TOY_LABELS, VOICE_SPEAKER_LABELS } from '../data/initialCharacters';
+import {
+  ACCESSORY_LABELS,
+  buildKoreanNameCallVariants,
+  DOLL_QUICK_TEMPLATES,
+  EAR_INNER_COLOR_PRESETS,
+  FUR_COLOR_PRESETS,
+  OUTFIT_COLOR_PRESETS,
+  SPECIES_EMOJIS,
+  SPECIES_LABELS,
+  TOY_LABELS,
+  VOICE_SPEAKER_LABELS,
+} from '../data/initialCharacters';
 import {
   getVaultDisplayObjectUrl,
   getVaultStorageSummary,
@@ -65,6 +77,7 @@ import {
   saveGeminiApiKey,
 } from '../utils/standaloneApi';
 import {
+  AnimalSpecies,
   BunnyAccessoryType,
   BunnyBehaviorStatus,
   BunnyCharacterConfig,
@@ -74,7 +87,9 @@ import {
   BunnyVoiceSpeaker,
   ChildGrowthStage,
   DigitalAlbum,
+  EnglishFrequencyMode,
   FrameTransitionMode,
+  GeminiVoiceMode,
   LayoutSide,
   MartTickerItem,
   PhotoAnalysisProgress,
@@ -93,12 +108,16 @@ interface SettingsAlbumModalProps {
   characters: BunnyCharacterConfig[];
   bunnies: Record<BunnyId, BunnyIndividualState>;
   childAgeStage: ChildGrowthStage;
+  englishFrequency: EnglishFrequencyMode;
+  englishWaitSeconds: number;
+  geminiVoiceMode: GeminiVoiceMode;
+  isGeminiLiveActive?: boolean;
   growthStars: number;
   powerSchedule: PowerScheduleConfig;
   menuPosition: LayoutSide;
   weatherPosition: LayoutSide;
   weatherEffectMode: WeatherEffectMode;
-  wakeWord: string;
+  wakeWord?: string;
   slideIntervalSec: number;
   transitionMode: FrameTransitionMode;
   ttsEnabled: boolean;
@@ -125,6 +144,9 @@ interface SettingsAlbumModalProps {
   onDeleteAlbum: (albumId: string) => void;
   onUpdateCharacters: (chars: BunnyCharacterConfig[]) => void;
   onChangeChildAgeStage: (stage: ChildGrowthStage) => void;
+  onChangeEnglishFrequency: (mode: EnglishFrequencyMode) => void;
+  onChangeEnglishWaitSeconds: (sec: number) => void;
+  onChangeGeminiVoiceMode: (mode: GeminiVoiceMode) => void;
   onChangePowerSchedule: (cfg: PowerScheduleConfig) => void;
   onEnterSleepNow: () => void;
   onSendCharacterOutNow: (id: BunnyId) => void;
@@ -132,7 +154,7 @@ interface SettingsAlbumModalProps {
   onChangeMenuPosition: (side: LayoutSide) => void;
   onChangeWeatherPosition: (side: LayoutSide) => void;
   onChangeWeatherEffectMode: (mode: WeatherEffectMode) => void;
-  onChangeWakeWord: (word: string) => void;
+  onChangeWakeWord?: (word: string) => void;
   onChangeSlideInterval: (sec: number) => void;
   onChangeTransitionMode: (mode: FrameTransitionMode) => void;
   onChangeTtsEnabled: (enabled: boolean) => void;
@@ -140,34 +162,21 @@ interface SettingsAlbumModalProps {
   onUpdateMartItems: (items: MartTickerItem[]) => void;
 }
 
-const ACCESSORY_LABELS: Record<BunnyAccessoryType, string> = {
-  ribbon: '귀여운 리본 핀',
-  clover: '행운 네잎클로버',
-  backpack: '미니 가방 & 당근',
-  star: '반짝 별 머리핀',
-  scarf: '포근한 목도리',
-};
-
-const COLOR_THEMES: Array<{ label: string; outfitHex: string; accentHex: string }> = [
-  { label: '코랄 핑크', outfitHex: '#FFE4E8', accentHex: '#FB7185' },
-  { label: '민트 클로버', outfitHex: '#D1FAE5', accentHex: '#10B981' },
-  { label: '버터 옐로우', outfitHex: '#FEF3C7', accentHex: '#F59E0B' },
-  { label: '라벤더 스타', outfitHex: '#EDE9FE', accentHex: '#8B5CF6' },
-  { label: '스카이 블루', outfitHex: '#E0F2FE', accentHex: '#0EA5E9' },
-];
-
 export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   initialTab,
   albums,
   characters,
   bunnies,
   childAgeStage,
+  englishFrequency,
+  englishWaitSeconds,
+  geminiVoiceMode,
+  isGeminiLiveActive = false,
   growthStars,
   powerSchedule,
   menuPosition,
   weatherPosition,
   weatherEffectMode,
-  wakeWord,
   slideIntervalSec,
   transitionMode,
   ttsEnabled,
@@ -190,6 +199,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   onDeleteAlbum,
   onUpdateCharacters,
   onChangeChildAgeStage,
+  onChangeEnglishFrequency,
+  onChangeEnglishWaitSeconds,
+  onChangeGeminiVoiceMode,
   onChangePowerSchedule,
   onEnterSleepNow,
   onSendCharacterOutNow,
@@ -197,7 +209,6 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   onChangeMenuPosition,
   onChangeWeatherPosition,
   onChangeWeatherEffectMode,
-  onChangeWakeWord,
   onChangeSlideInterval,
   onChangeTransitionMode,
   onChangeTtsEnabled,
@@ -323,23 +334,83 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     });
   }, [activeTab, albums, albumThumbBlobs]);
 
-  // 3D Character Roster State
+  // 3D Plush Animal Character Roster & Customizer State
   const [editingCharId, setEditingCharId] = useState<BunnyId | null>(null);
   const [showNewCharForm, setShowNewCharForm] = useState(false);
+  const [newCharSpecies, setNewCharSpecies] = useState<AnimalSpecies>('puppy');
   const [newCharName, setNewCharName] = useState('');
-  const [newCharCallWord, setNewCharCallWord] = useState('');
   const [newCharGreeting, setNewCharGreeting] = useState('');
+  const [newCharFurHex, setNewCharFurHex] = useState('#D99B66');
+  const [newCharEarInnerHex, setNewCharEarInnerHex] = useState('#F3C6A8');
+  const [newCharShowOutfit, setNewCharShowOutfit] = useState(true);
+  const [newCharOutfitHex, setNewCharOutfitHex] = useState('#FEF3C7');
+  const [newCharAccentHex, setNewCharAccentHex] = useState('#F59E0B');
   const [newCharToy, setNewCharToy] = useState<BunnyToyType>('ball');
-  const [newCharAccessory, setNewCharAccessory] = useState<BunnyAccessoryType>('ribbon');
-  const [newCharThemeIdx, setNewCharThemeIdx] = useState(0);
+  const [newCharAccessory, setNewCharAccessory] = useState<BunnyAccessoryType>('bowtie');
+  const [newCharVoiceSpeaker, setNewCharVoiceSpeaker] = useState<BunnyVoiceSpeaker>('toddungi');
 
-  // Voice & Gemini API Key State
-  const [wakeWordDraft, setWakeWordDraft] = useState(wakeWord);
-  useEffect(() => {
-    setWakeWordDraft(wakeWord);
-  }, [wakeWord]);
+  // Gemini Live & Phone Gemini Subscription App Integration State
   const [geminiKeyDraft, setGeminiKeyDraft] = useState(() => getSavedGeminiApiKey());
   const [geminiKeySavedToast, setGeminiKeySavedToast] = useState(false);
+  const [selectedPhoneCharId, setSelectedPhoneCharId] = useState<string>(
+    () => characters[0]?.id ?? 'tosuni'
+  );
+  const [phoneGeminiToast, setPhoneGeminiToast] = useState<string | null>(null);
+  const isPhoneGeminiInstalled = Boolean(
+    window.AndroidSpeechBridge?.isPhoneGeminiInstalled?.()
+  );
+
+  const openExternalUrlSafe = (url: string) => {
+    try {
+      if (window.AndroidSpeechBridge?.openExternalUrl) {
+        window.AndroidSpeechBridge.openExternalUrl(url);
+        return;
+      }
+    } catch {
+      // Fallback to window.open
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleLaunchPhoneGeminiForCharacter = (char: BunnyCharacterConfig) => {
+    const speciesLabel = SPECIES_LABELS[char.species || 'bunny']?.replace(/^[^\s]+\s*/, '') || '동물친구';
+    const stageDesc =
+      childAgeStage === 'age_3_4'
+        ? '만 3~4세 유아 눈높이로 아주 쉽고 짧은 반말'
+        : childAgeStage === 'age_6_7'
+        ? '만 6~7세 어린이 눈높이로 호기심을 키우는 다정한 반말'
+        : '만 5세 어린이 눈높이로 따뜻하고 신나는 반말';
+    const engDesc =
+      englishFrequency === 'off'
+        ? '영어 단어는 섞지 말고 순수 한국어로만 대화해 줘.'
+        : '대화는 한국어 위주로 하고, 아이가 원할 때만 아주 가끔씩 쉬운 영어 단어를 알려줘.';
+    const persona = [
+      `너는 우리 아이의 애착인형 친구인 ${speciesLabel} "${char.name}"야!`,
+      char.personaPrompt,
+      `${stageDesc}로 한 번에 1~2문장씩 실제 사람 친구처럼 자연스럽게 음성 대화를 나눠줘.`,
+      engDesc,
+      `지금 "${char.greeting || `안녕! 나는 ${char.name}야! 우리 같이 재미있게 이야기하자!`}"라고 인사하며 먼저 말을 걸어줘!`,
+    ].join(' ');
+
+    try {
+      const launched = window.AndroidSpeechBridge?.launchPhoneGeminiLive?.(persona);
+      if (launched) {
+        setPhoneGeminiToast(
+          `내 핸드폰 Gemini 앱을 열었어요! 프롬프트가 자동 복사·전달되었으니 마이크(Live) 버튼을 눌러 ${char.name}와 대화해 보세요!`
+        );
+        window.setTimeout(() => setPhoneGeminiToast(null), 5000);
+        return;
+      }
+    } catch {
+      // Fall through to web/clipboard fallback
+    }
+    navigator.clipboard?.writeText(persona).catch(() => {});
+    openExternalUrlSafe('https://gemini.google.com/app');
+    setPhoneGeminiToast(
+      `"${char.name}" 캐릭터 설정이 복사되었어요! 열린 Gemini 화면에 붙여넣고 음성대화(Live)를 시작해 보세요.`
+    );
+    window.setTimeout(() => setPhoneGeminiToast(null), 5000);
+  };
 
   // Location & Mart Ticker State
   const [cityQuery, setCityQuery] = useState(currentCity);
@@ -853,7 +924,16 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   };
 
   const handlePatchCharacter = (id: string, patch: Partial<BunnyCharacterConfig>) => {
-    onUpdateCharacters(characters.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+    onUpdateCharacters(
+      characters.map((c) => {
+        if (c.id !== id) return c;
+        const next = { ...c, ...patch };
+        if (typeof patch.name === 'string' && patch.name.trim()) {
+          next.callWord = buildKoreanNameCallVariants(patch.name.trim()).primaryCall;
+        }
+        return next;
+      })
+    );
   };
 
   const handleDeleteCharacter = (id: string) => {
@@ -861,40 +941,46 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     onUpdateCharacters(characters.filter((c) => c.id !== id));
   };
 
+  const applyQuickTemplateToNewChar = (tpl: (typeof DOLL_QUICK_TEMPLATES)[number]) => {
+    setNewCharSpecies(tpl.species);
+    setNewCharFurHex(tpl.furHex);
+    setNewCharEarInnerHex(tpl.earInnerHex);
+    setNewCharOutfitHex(tpl.outfitHex);
+    setNewCharAccentHex(tpl.accentHex);
+    setNewCharAccessory(tpl.accessory);
+    setNewCharShowOutfit(tpl.showOutfit);
+  };
+
   const handleCreateNewCharacter = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedName = newCharName.trim();
     if (!trimmedName) return;
 
-    const theme = COLOR_THEMES[newCharThemeIdx] ?? COLOR_THEMES[0];
-    const call = newCharCallWord.trim() || `${trimmedName}아`;
+    const speciesText = SPECIES_LABELS[newCharSpecies]?.replace(/^[^\s]+\s*/, '') || '동물친구';
+    const { primaryCall } = buildKoreanNameCallVariants(trimmedName);
     const newChar: BunnyCharacterConfig = {
-      id: `bunny-custom-${Date.now()}`,
+      id: `doll-${newCharSpecies}-${Date.now()}`,
+      species: newCharSpecies,
       name: trimmedName,
-      callWord: call,
-      personaPrompt: `너는 디지털 액자 옆 작은 집에 사는 귀여운 아기 토끼 "${trimmedName}"야. 3~7세 어린이 눈높이로 다정하고 신나는 반말로 이야기해.`,
-      greeting: newCharGreeting.trim() || `우와~ 안녕! ${trimmedName} 불렀어? 왜 불렀어~?`,
-      furHex: '#FFFCFA',
-      outfitHex: theme.outfitHex,
-      accentHex: theme.accentHex,
+      callWord: primaryCall,
+      personaPrompt: `너는 우리 아이가 아끼는 애착인형과 꼭 닮은 귀여운 ${speciesText} 친구 "${trimmedName}"야. 다정하고 신나는 반말로 아이의 눈높이에 맞춰 이야기해.`,
+      greeting:
+        newCharGreeting.trim() ||
+        `우와~ 안녕! ${trimmedName} 불렀어? 나랑 같이 신나게 이야기하자!`,
+      furHex: newCharFurHex,
+      earInnerHex: newCharEarInnerHex,
+      showOutfit: newCharShowOutfit,
+      outfitHex: newCharOutfitHex,
+      accentHex: newCharAccentHex,
       accessory: newCharAccessory,
       favoriteToy: newCharToy,
-      voiceSpeaker:
-        newCharAccessory === 'clover'
-          ? 'tosili'
-          : newCharAccessory === 'backpack'
-          ? 'toddungi'
-          : newCharAccessory === 'star'
-          ? 'tobyeori'
-          : newCharAccessory === 'scarf'
-          ? 'togureum'
-          : 'tosuni',
+      voiceSpeaker: newCharVoiceSpeaker,
       enabled: true,
     };
 
     onUpdateCharacters([...characters, newChar]);
     setNewCharName('');
-    setNewCharCallWord('');
+    setNewCharGreeting('');
     setShowNewCharForm(false);
   };
 
@@ -1127,12 +1213,12 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         {/* Navigation Tabs (모바일·태블릿 어느 화면 크기에서도 모든 메뉴 탭이 한눈에 보이도록 flex-wrap 적용) */}
         <div className="flex flex-wrap items-center gap-1.5 px-4 sm:px-6 py-2.5 border-b border-zinc-100 bg-[#F9FAFB] shrink-0">
           {[
-            { id: 'characters', label: `3D 캐릭터 · 성장단계 (${enabledCharCount}/${characters.length})` },
+            { id: 'characters', label: `🐾 동물친구 · 인형커스텀 · 영어 (${enabledCharCount}/${characters.length})` },
+            { id: 'voice', label: '⚡ Gemini 실시간음성 · 구독연동' },
             { id: 'power', label: '절전 · 예약 켜짐' },
             { id: 'layout', label: '화면 배치 · 날씨 효과' },
             { id: 'cloud', label: '클라우드 · 시놀로지 연동' },
             { id: 'albums', label: `디지털 앨범 (${albums.length})` },
-            { id: 'voice', label: 'AI 호출 명령어 · 음성' },
             { id: 'life', label: '📅 캘린더 · 위치 · 마트' },
           ].map((tab) => (
             <button
@@ -1153,20 +1239,20 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           {/* ===============================================================
-              TAB: 3D CHARACTERS ROSTER MANAGEMENT
+              TAB: 3D ANIMAL CHARACTERS, PLUSH CUSTOMIZATION & ENGLISH PACING
           =============================================================== */}
           {activeTab === 'characters' && (
             <div className="space-y-5">
-              {/* Child Developmental Stage & Voice-First English Growth Card */}
-              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-4 space-y-3">
+              {/* Child Developmental Stage + English Frequency + Wait Time Controls */}
+              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-4 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <h3 className="text-sm font-bold text-[#141519] flex items-center gap-1.5">
                       <GraduationCap className="w-4 h-4 text-[#141519]" />
-                      아이 연령 · 성장 단계 맞춤 대화 및 영어 가이드 설정
+                      아이 연령 · 영어 등장 빈도 · 대답 기다리는 시간 설정
                     </h3>
                     <p className="mt-0.5 text-xs text-zinc-500">
-                      아이가 토끼와 말을 걸 때 성장 단계에 맞춰 어휘와 대형 단어카드 난이도를 조절하며, 음성으로 말할 때까지 1분간 기다린 뒤 자연스럽게 다음 대화를 이어갑니다.
+                      영어 단어가 너무 자주 나오지 않도록 빈도수를 조절하고, 아이가 영어 단어나 대답을 말할 때까지 기다리는 시간도 자유롭게 설정할 수 있습니다.
                     </p>
                   </div>
                   <div className="text-xs font-semibold text-zinc-700 tabular-nums">
@@ -1174,6 +1260,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   </div>
                 </div>
 
+                {/* 1) Child Age Stage */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   {(
                     [
@@ -1200,7 +1287,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         key={st.id}
                         type="button"
                         onClick={() => onChangeChildAgeStage(st.id)}
-                        className={`rounded-2xl p-3.5 border text-left transition-colors ${
+                        className={`rounded-2xl p-3 border text-left transition-colors ${
                           active
                             ? 'bg-[#141519] border-[#141519] text-white'
                             : 'bg-white border-zinc-200 text-[#141519] hover:bg-zinc-50'
@@ -1221,112 +1308,460 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     );
                   })}
                 </div>
+
+                {/* 2) English Word/Card Frequency Control */}
+                <div className="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <span className="text-xs font-bold text-[#141519]">
+                      🔤 영어 단어 · 영어 표현 등장 빈도 조절
+                    </span>
+                    <span className="text-[11px] text-indigo-600 font-semibold">
+                      {englishFrequency === 'off'
+                        ? '순수 한국어 대화만 진행'
+                        : englishFrequency === 'rare'
+                        ? '대화 8번마다 1번만 자연스럽게 등장 (권장)'
+                        : englishFrequency === 'normal'
+                        ? '대화 5번마다 1번 등장'
+                        : '대화 3번마다 1번 자주 등장'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {(
+                      [
+                        {
+                          id: 'off',
+                          label: '끄기 (한국어만)',
+                          sub: '영어 단어·카드 안 나옴',
+                        },
+                        {
+                          id: 'rare',
+                          label: '드물게 (권장)',
+                          sub: '대화 8번마다 1번 가끔',
+                        },
+                        {
+                          id: 'normal',
+                          label: '보통',
+                          sub: '대화 5번마다 1번',
+                        },
+                        {
+                          id: 'often',
+                          label: '자주',
+                          sub: '대화 3번마다 1번',
+                        },
+                      ] as const
+                    ).map((opt) => {
+                      const selected = englishFrequency === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => onChangeEnglishFrequency(opt.id)}
+                          className={`rounded-xl p-2.5 border text-left transition-colors ${
+                            selected
+                              ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                              : 'bg-[#F7F8FA] border-zinc-200 text-[#141519] hover:bg-zinc-100'
+                          }`}
+                        >
+                          <div className="text-xs font-bold flex items-center justify-between">
+                            <span>{opt.label}</span>
+                            {selected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </div>
+                          <div
+                            className={`text-[10px] mt-0.5 ${
+                              selected ? 'text-indigo-100' : 'text-zinc-500'
+                            }`}
+                          >
+                            {opt.sub}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 3) Adjustable Wait Duration for Kid's English / Voice Reply */}
+                <div className="rounded-xl bg-white border border-zinc-200 p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-xs font-bold text-[#141519]">
+                        ⏱️ 아이 영어 단어 · 대답 기다리는 시간 조절
+                      </span>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">
+                        캐릭터가 말하거나 영어 단어를 알려준 뒤 아이가 따라 말할 때까지 기다리는 시간입니다.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-[#141519] text-white px-3 py-1 text-xs font-bold tabular-nums">
+                      현재 {englishWaitSeconds}초 대기
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[10, 15, 20, 30, 45, 60, 90, 120].map((sec) => {
+                      const active = englishWaitSeconds === sec;
+                      return (
+                        <button
+                          key={sec}
+                          type="button"
+                          onClick={() => onChangeEnglishWaitSeconds(sec)}
+                          className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                            active
+                              ? 'bg-[#141519] text-white'
+                              : 'bg-[#F5F6F8] hover:bg-zinc-200 text-zinc-700'
+                          }`}
+                        >
+                          {sec}초{sec === 30 ? ' (권장)' : ''}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-1">
+                    <span className="text-[10px] font-semibold text-zinc-400">10초</span>
+                    <input
+                      type="range"
+                      min={10}
+                      max={120}
+                      step={5}
+                      value={englishWaitSeconds}
+                      onChange={(e) => onChangeEnglishWaitSeconds(Number(e.target.value))}
+                      className="flex-1 accent-indigo-600"
+                    />
+                    <span className="text-[10px] font-semibold text-zinc-400">120초</span>
+                  </div>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-4">
+              {/* Header + Add New Plush Animal Character Button */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-amber-50/90 via-white to-rose-50/70 border border-amber-200/80 p-4">
                 <div>
                   <h3 className="text-sm font-bold text-[#141519] flex items-center gap-1.5">
-                    <Sparkles className="w-4 h-4 text-[#141519]" />
-                    화면으로 내보낼 3D 동물친구 리스트 관리
+                    <Sparkles className="w-4 h-4 text-amber-600" />
+                    아이들의 애착인형 맞춤 3D 동물친구 커스텀 ({characters.length}마리)
                   </h3>
-                  <p className="mt-0.5 text-xs text-zinc-500">
-                    원하는 캐릭터만 선택해 내보내거나, 각 캐릭터의 이름·호출어·선호 3D 장난감을 업데이트할 수 있습니다.
+                  <p className="mt-0.5 text-xs text-zinc-600">
+                    토끼·강아지·곰돌이·고양이·여우·햄스터·펭귄·아기공룡 8종 동물과 털 색상, 귀 안쪽/배 색상, 옷 색상, 13종 착용 아이템을 자유롭게 조합해 아이의 실제 인형과 똑같이 맞춰주세요! 별도 호출어 없이 <strong>캐릭터 이름을 부르면 바로 응답</strong>합니다.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowNewCharForm((v) => !v)}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap shrink-0 shadow-sm"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  {showNewCharForm ? '추가 창 닫기' : '새 캐릭터 추가'}
+                  {showNewCharForm ? '인형 만들기 닫기' : '+ 아이 인형 맞춤 새 캐릭터 만들기'}
                 </button>
               </div>
 
-              {/* Add New 3D Bunny Character Form */}
+              {/* Add New Plush Animal Character Customizer Form */}
               {showNewCharForm && (
                 <form
                   onSubmit={handleCreateNewCharacter}
-                  className="rounded-2xl bg-[#F7F8FA] border border-zinc-300 p-4 space-y-3"
+                  className="rounded-2xl bg-white border-2 border-indigo-200 p-5 space-y-4 shadow-sm"
                 >
-                  <h4 className="text-xs font-bold text-[#141519]">새로운 3D 토끼 친구 등록</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    <input
-                      type="text"
-                      value={newCharName}
-                      onChange={(e) => setNewCharName(e.target.value)}
-                      placeholder="캐릭터 이름 (예: 토몽이)"
-                      className={`${inputCls} bg-white`}
-                    />
-                    <input
-                      type="text"
-                      value={newCharCallWord}
-                      onChange={(e) => setNewCharCallWord(e.target.value)}
-                      placeholder="호출 명령어 (예: 토몽아)"
-                      className={`${inputCls} bg-white`}
-                    />
-                    <select
-                      value={newCharToy}
-                      onChange={(e) => setNewCharToy(e.target.value as BunnyToyType)}
-                      className={`${inputCls} bg-white`}
-                    >
-                      {(Object.keys(TOY_LABELS) as BunnyToyType[]).map((tKey) => (
-                        <option key={tKey} value={tKey}>
-                          장난감: {TOY_LABELS[tKey]}
-                        </option>
-                      ))}
-                    </select>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-sm font-bold text-[#141519]">
+                      🧸 아이 애착인형 닮은 새 3D 동물친구 만들기
+                    </h4>
+                    <span className="text-[11px] font-semibold text-indigo-600">
+                      🎙️ 이름을 등록하면 "{buildKoreanNameCallVariants(newCharName || '코코').primaryCall}" 하고 부를 때 바로 대답해요!
+                    </span>
                   </div>
 
+                  {/* Quick 1-Click Doll Templates */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-zinc-600">
+                      ✨ 원클릭 인형 빠른 스타일 (선택 후 아래에서 색상·아이템 세부 조정 가능)
+                    </label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {DOLL_QUICK_TEMPLATES.map((tpl) => (
+                        <button
+                          key={tpl.label}
+                          type="button"
+                          onClick={() => applyQuickTemplateToNewChar(tpl)}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-[#F7F8FA] hover:bg-indigo-50 border border-zinc-200 hover:border-indigo-300 px-3 py-1.5 text-xs font-semibold text-[#141519] transition-colors"
+                        >
+                          <span
+                            className="w-3 h-3 rounded-full border border-black/15"
+                            style={{ backgroundColor: tpl.furHex }}
+                          />
+                          <span>{tpl.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Step 1: 8 Animal Species Grid */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-zinc-600">
+                      1. 동물 인형 종류 선택 (8종)
+                    </label>
+                    <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                      {(Object.keys(SPECIES_LABELS) as AnimalSpecies[]).map((sp) => {
+                        const selected = newCharSpecies === sp;
+                        return (
+                          <button
+                            key={sp}
+                            type="button"
+                            onClick={() => setNewCharSpecies(sp)}
+                            className={`rounded-xl py-2 px-1.5 border text-center transition-all ${
+                              selected
+                                ? 'bg-[#141519] border-[#141519] text-white shadow-sm scale-[1.02]'
+                                : 'bg-[#F7F8FA] border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+                            }`}
+                          >
+                            <div className="text-base leading-none">{SPECIES_EMOJIS[sp]}</div>
+                            <div className="text-[10px] font-bold mt-1 truncate">
+                              {SPECIES_LABELS[sp].replace(/^[^\s]+\s*/, '')}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Step 2: Name, Voice, Toy */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    <select
-                      value={newCharAccessory}
-                      onChange={(e) => setNewCharAccessory(e.target.value as BunnyAccessoryType)}
-                      className={`${inputCls} bg-white`}
-                    >
-                      {(Object.keys(ACCESSORY_LABELS) as BunnyAccessoryType[]).map((aKey) => (
-                        <option key={aKey} value={aKey}>
-                          소품: {ACCESSORY_LABELS[aKey]}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={newCharThemeIdx}
-                      onChange={(e) => setNewCharThemeIdx(Number(e.target.value))}
-                      className={`${inputCls} bg-white`}
-                    >
-                      {COLOR_THEMES.map((th, idx) => (
-                        <option key={th.label} value={idx}>
-                          색상 테마: {th.label}
-                        </option>
-                      ))}
-                    </select>
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-600 mb-1">
+                        2. 아이 인형 이름 (부르면 응답!)
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={newCharName}
+                        onChange={(e) => setNewCharName(e.target.value)}
+                        placeholder="예: 초코, 보리, 콩이, 핑핑이"
+                        className={`w-full ${inputCls} bg-[#F7F8FA]`}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-600 mb-1">
+                        전용 목소리 선택
+                      </label>
+                      <select
+                        value={newCharVoiceSpeaker}
+                        onChange={(e) => setNewCharVoiceSpeaker(e.target.value as BunnyVoiceSpeaker)}
+                        className={`w-full ${inputCls} bg-[#F7F8FA]`}
+                      >
+                        {(Object.keys(VOICE_SPEAKER_LABELS) as BunnyVoiceSpeaker[]).map((vKey) => (
+                          <option key={vKey} value={vKey}>
+                            {VOICE_SPEAKER_LABELS[vKey]}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-zinc-600 mb-1">
+                        좋아하는 3D 장난감
+                      </label>
+                      <select
+                        value={newCharToy}
+                        onChange={(e) => setNewCharToy(e.target.value as BunnyToyType)}
+                        className={`w-full ${inputCls} bg-[#F7F8FA]`}
+                      >
+                        {(Object.keys(TOY_LABELS) as BunnyToyType[]).map((tKey) => (
+                          <option key={tKey} value={tKey}>
+                            {TOY_LABELS[tKey]}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Step 3: Fur, Ear/Belly, Outfit & Item Colors */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl bg-[#F7F8FA] border border-zinc-200/80 p-3.5">
+                    {/* Fur Color */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-700">
+                          🎨 인형 털 / 몸통 색상
+                        </span>
+                        <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-500 cursor-pointer">
+                          <span>직접 선택</span>
+                          <input
+                            type="color"
+                            value={newCharFurHex}
+                            onChange={(e) => setNewCharFurHex(e.target.value)}
+                            className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {FUR_COLOR_PRESETS.map((c) => (
+                          <button
+                            key={c.hex}
+                            type="button"
+                            onClick={() => setNewCharFurHex(c.hex)}
+                            title={c.label}
+                            className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                              newCharFurHex.toLowerCase() === c.hex.toLowerCase()
+                                ? 'border-[#141519] scale-115 shadow'
+                                : 'border-zinc-300'
+                            }`}
+                            style={{ backgroundColor: c.hex }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Ear Inner & Belly Color */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-zinc-700">
+                          🩷 귀 안쪽 · 배 패치 색상
+                        </span>
+                        <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-500 cursor-pointer">
+                          <span>직접 선택</span>
+                          <input
+                            type="color"
+                            value={newCharEarInnerHex}
+                            onChange={(e) => setNewCharEarInnerHex(e.target.value)}
+                            className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {EAR_INNER_COLOR_PRESETS.map((c) => (
+                          <button
+                            key={c.hex}
+                            type="button"
+                            onClick={() => setNewCharEarInnerHex(c.hex)}
+                            title={c.label}
+                            className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                              newCharEarInnerHex.toLowerCase() === c.hex.toLowerCase()
+                                ? 'border-[#141519] scale-115 shadow'
+                                : 'border-zinc-300'
+                            }`}
+                            style={{ backgroundColor: c.hex }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Outfit Toggle + Colors */}
+                    <div className="sm:col-span-2 pt-2 border-t border-zinc-200/80 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-bold text-zinc-700">
+                            👗 옷 입히기 & 아이템 포인트 색상
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setNewCharShowOutfit((v) => !v)}
+                            className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold transition-colors ${
+                              newCharShowOutfit
+                                ? 'bg-[#141519] text-white'
+                                : 'bg-zinc-200 text-zinc-700'
+                            }`}
+                          >
+                            {newCharShowOutfit ? '옷 입힘 ON' : '옷 벗김 (알몸 봉제인형)'}
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-3 text-[10px] font-semibold text-zinc-500">
+                          {newCharShowOutfit && (
+                            <label className="inline-flex items-center gap-1 cursor-pointer">
+                              <span>옷 색상</span>
+                              <input
+                                type="color"
+                                value={newCharOutfitHex}
+                                onChange={(e) => setNewCharOutfitHex(e.target.value)}
+                                className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                              />
+                            </label>
+                          )}
+                          <label className="inline-flex items-center gap-1 cursor-pointer">
+                            <span>아이템 색상</span>
+                            <input
+                              type="color"
+                              value={newCharAccentHex}
+                              onChange={(e) => setNewCharAccentHex(e.target.value)}
+                              className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5">
+                        {OUTFIT_COLOR_PRESETS.map((th) => (
+                          <button
+                            key={th.label}
+                            type="button"
+                            onClick={() => {
+                              setNewCharOutfitHex(th.outfitHex);
+                              setNewCharAccentHex(th.accentHex);
+                            }}
+                            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold border transition-all ${
+                              newCharAccentHex.toLowerCase() === th.accentHex.toLowerCase()
+                                ? 'bg-[#141519] text-white border-[#141519]'
+                                : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100'
+                            }`}
+                          >
+                            <span
+                              className="w-3 h-3 rounded-full border border-black/10"
+                              style={{ backgroundColor: th.accentHex }}
+                            />
+                            <span>{th.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 4: 13 Wearable Items */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-zinc-600">
+                      🎀 착용 아이템 선택 (13종 · 아이 인형 소품에 맞춰 선택)
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      {(Object.keys(ACCESSORY_LABELS) as BunnyAccessoryType[]).map((aKey) => {
+                        const selected = newCharAccessory === aKey;
+                        return (
+                          <button
+                            key={aKey}
+                            type="button"
+                            onClick={() => setNewCharAccessory(aKey)}
+                            className={`rounded-xl px-2.5 py-2 border text-left text-xs font-semibold transition-colors truncate ${
+                              selected
+                                ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                                : 'bg-[#F7F8FA] border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+                            }`}
+                          >
+                            {ACCESSORY_LABELS[aKey]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Greeting + Submit */}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 pt-1">
                     <input
                       type="text"
                       value={newCharGreeting}
                       onChange={(e) => setNewCharGreeting(e.target.value)}
-                      placeholder="첫 인사말"
-                      className={`${inputCls} bg-white`}
+                      placeholder="이름을 불렀을 때 첫 인사말 (선택 입력)"
+                      className={`flex-1 ${inputCls} bg-[#F7F8FA]`}
                     />
-                  </div>
-
-                  <div className="flex justify-end">
                     <button
                       type="submit"
-                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-5 py-2 text-xs font-semibold text-white"
+                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-6 py-2.5 text-xs font-bold text-white whitespace-nowrap shadow-sm"
                     >
-                      리스트에 캐릭터 추가하기
+                      ✨ 우리 아이 인형 캐릭터 등록하기
                     </button>
                   </div>
                 </form>
               )}
 
-              {/* Character Roster Cards */}
+              {/* Character Roster Cards with Full Plush Customization Drawer */}
               <div className="space-y-3">
                 {characters.map((char) => {
                   const runtimeState = bunnies[char.id];
                   const isEditing = editingCharId === char.id;
                   const isOutdoors = runtimeState && runtimeState.status !== 'IN_HOUSE';
+                  const spKey: AnimalSpecies = char.species || 'bunny';
+                  const autoCall = buildKoreanNameCallVariants(char.name).primaryCall;
 
                   return (
                     <div
@@ -1334,27 +1769,32 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       className={`rounded-2xl border p-4 transition-colors ${
                         char.enabled
                           ? 'bg-white border-zinc-200 shadow-[0_2px_10px_rgba(0,0,0,0.025)]'
-                          : 'bg-[#F7F8FA] border-zinc-200/60 opacity-75'
+                          : 'bg-[#F7F8FA] border-zinc-200/60 opacity-80'
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-3 min-w-0">
                           <div
-                            className="w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 border border-black/5"
-                            style={{ backgroundColor: char.outfitHex }}
+                            className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border-2 shadow-inner text-lg relative"
+                            style={{
+                              backgroundColor: char.furHex,
+                              borderColor: char.accentHex,
+                            }}
+                            title={SPECIES_LABELS[spKey]}
                           >
+                            <span>{SPECIES_EMOJIS[spKey]}</span>
                             <span
-                              className="w-3.5 h-3.5 rounded-full"
+                              className="w-3 h-3 rounded-full absolute -bottom-1 -right-1 border border-white"
                               style={{ backgroundColor: char.accentHex }}
                             />
                           </div>
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span className="text-sm font-bold text-[#141519] truncate">
                                 {char.name}
                               </span>
-                              <span className="text-xs font-semibold text-zinc-500">
-                                · "{char.callWord}"
+                              <span className="rounded-full bg-indigo-50 border border-indigo-200 px-2 py-0.5 text-[10px] font-bold text-indigo-700">
+                                🎙️ "{autoCall}" 부르면 응답
                               </span>
                               {char.enabled && (
                                 <span className="text-[11px] font-medium text-emerald-600">
@@ -1363,13 +1803,14 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                               )}
                             </div>
                             <div className="mt-0.5 text-xs text-zinc-500 truncate">
-                              {ACCESSORY_LABELS[char.accessory]} · {VOICE_SPEAKER_LABELS[char.voiceSpeaker] || '토순이 목소리'}
+                              {SPECIES_LABELS[spKey]} · {ACCESSORY_LABELS[char.accessory] || '기본 인형'} ·{' '}
+                              {char.showOutfit === false ? '봉제인형(옷 없음)' : '옷 착용'} ·{' '}
+                              {VOICE_SPEAKER_LABELS[char.voiceSpeaker] || '다정한 목소리'}
                             </div>
                           </div>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                          {/* Test Bunny Voice Preview Button */}
                           <button
                             type="button"
                             onClick={() => {
@@ -1381,13 +1822,26 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                               );
                             }}
                             className="inline-flex items-center gap-1 rounded-full bg-amber-50 hover:bg-amber-100 border border-amber-200 px-3 py-1.5 text-xs font-semibold text-amber-900"
-                            title={`${char.name} 전용 음성 들어보기`}
+                            title={`${char.name} 목소리 들어보기`}
                           >
                             <Volume2 className="w-3.5 h-3.5" />
-                            목소리 듣기
+                            목소리
                           </button>
 
-                          {/* Toggle Enable / Disable Character */}
+                          <button
+                            type="button"
+                            onClick={() => setEditingCharId(isEditing ? null : char.id)}
+                            className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                              isEditing
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200'
+                            }`}
+                            title="동물 종류·털 색상·아이템 커스텀"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            인형 커스텀
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => handleToggleCharacterEnabled(char.id)}
@@ -1397,10 +1851,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                                 : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'
                             }`}
                           >
-                            {char.enabled ? '활성화됨' : '비활성'}
+                            {char.enabled ? '화면 표시 ON' : '집에 쉬기'}
                           </button>
 
-                          {/* Instant Send Out / Call Home Controls */}
                           {char.enabled && (
                             <>
                               <button
@@ -1410,7 +1863,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                                 title="지금 즉시 집 밖 화면으로 내보내기"
                               >
                                 <Play className="w-3 h-3" />
-                                밖으로 내보내기
+                                내보내기
                               </button>
                               {isOutdoors && (
                                 <button
@@ -1426,16 +1879,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                             </>
                           )}
 
-                          <button
-                            type="button"
-                            onClick={() => setEditingCharId(isEditing ? null : char.id)}
-                            className="h-8 w-8 rounded-full bg-[#F4F5F7] hover:bg-zinc-200 flex items-center justify-center text-zinc-700"
-                            title="캐릭터 정보·장난감 수정"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-
-                          {!['tosuni', 'tosili', 'toddungi'].includes(char.id) && (
+                          {characters.length > 1 && (
                             <button
                               type="button"
                               onClick={() => handleDeleteCharacter(char.id)}
@@ -1448,80 +1892,77 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         </div>
                       </div>
 
-                      {/* Inline Edit Drawer for Character */}
+                      {/* Full Plush Doll Customizer Drawer */}
                       {isEditing && (
-                        <div className="mt-3.5 pt-3.5 border-t border-zinc-100 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="mt-4 pt-4 border-t border-zinc-100 space-y-4">
+                          {/* Species Picker */}
                           <div>
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              캐릭터 이름
+                            <label className="block text-[11px] font-bold text-zinc-600 mb-1.5">
+                              동물 종류 변경 (8종 3D 인형)
                             </label>
-                            <input
-                              type="text"
-                              value={char.name}
-                              onChange={(e) => handlePatchCharacter(char.id, { name: e.target.value })}
-                              className={`w-full ${inputCls}`}
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              음성 호출어
-                            </label>
-                            <input
-                              type="text"
-                              value={char.callWord}
-                              onChange={(e) =>
-                                handlePatchCharacter(char.id, { callWord: e.target.value })
-                              }
-                              className={`w-full ${inputCls}`}
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              선호 야외 3D 장난감
-                            </label>
-                            <select
-                              value={char.favoriteToy}
-                              onChange={(e) =>
-                                handlePatchCharacter(char.id, {
-                                  favoriteToy: e.target.value as BunnyToyType,
-                                })
-                              }
-                              className={`w-full ${inputCls}`}
-                            >
-                              {(Object.keys(TOY_LABELS) as BunnyToyType[]).map((tKey) => (
-                                <option key={tKey} value={tKey}>
-                                  {TOY_LABELS[tKey]}
-                                </option>
-                              ))}
-                            </select>
+                            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                              {(Object.keys(SPECIES_LABELS) as AnimalSpecies[]).map((sKey) => {
+                                const activeSp = (char.species || 'bunny') === sKey;
+                                return (
+                                  <button
+                                    key={sKey}
+                                    type="button"
+                                    onClick={() => handlePatchCharacter(char.id, { species: sKey })}
+                                    className={`rounded-xl py-1.5 px-1 border text-center transition-colors ${
+                                      activeSp
+                                        ? 'bg-[#141519] border-[#141519] text-white'
+                                        : 'bg-[#F7F8FA] border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+                                    }`}
+                                  >
+                                    <div className="text-sm leading-none">{SPECIES_EMOJIS[sKey]}</div>
+                                    <div className="text-[10px] font-bold mt-1 truncate">
+                                      {SPECIES_LABELS[sKey].replace(/^[^\s]+\s*/, '')}
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
 
-                          <div>
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              3D 액세서리 소품
-                            </label>
-                            <select
-                              value={char.accessory}
-                              onChange={(e) =>
-                                handlePatchCharacter(char.id, {
-                                  accessory: e.target.value as BunnyAccessoryType,
-                                })
-                              }
-                              className={`w-full ${inputCls}`}
-                            >
-                              {(Object.keys(ACCESSORY_LABELS) as BunnyAccessoryType[]).map((aKey) => (
-                                <option key={aKey} value={aKey}>
-                                  {ACCESSORY_LABELS[aKey]}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
+                          {/* Name, Toy, Voice */}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <div>
+                              <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
+                                인형 이름 (이름 부르면 자동 응답)
+                              </label>
+                              <input
+                                type="text"
+                                value={char.name}
+                                onChange={(e) => handlePatchCharacter(char.id, { name: e.target.value })}
+                                className={`w-full ${inputCls}`}
+                              />
+                            </div>
 
-                          <div className="sm:col-span-2">
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              토끼 전용 음성 캐릭터 (목소리 톤)
-                            </label>
-                            <div className="flex items-center gap-2">
+                            <div>
+                              <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
+                                야외 3D 장난감
+                              </label>
+                              <select
+                                value={char.favoriteToy}
+                                onChange={(e) =>
+                                  handlePatchCharacter(char.id, {
+                                    favoriteToy: e.target.value as BunnyToyType,
+                                  })
+                                }
+                                className={`w-full ${inputCls}`}
+                              >
+                                {(Object.keys(TOY_LABELS) as BunnyToyType[]).map((tKey) => (
+                                  <option key={tKey} value={tKey}>
+                                    {TOY_LABELS[tKey]}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div>
+                              <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
+                                전용 목소리
+                              </label>
                               <select
                                 value={char.voiceSpeaker}
                                 onChange={(e) =>
@@ -1529,7 +1970,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                                     voiceSpeaker: e.target.value as BunnyVoiceSpeaker,
                                   })
                                 }
-                                className={`flex-1 ${inputCls}`}
+                                className={`w-full ${inputCls}`}
                               >
                                 {(Object.keys(VOICE_SPEAKER_LABELS) as BunnyVoiceSpeaker[]).map(
                                   (vKey) => (
@@ -1539,66 +1980,223 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                                   )
                                 )}
                               </select>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  speakText(
-                                    char.greeting || `안녕! 나는 ${char.name}야!`,
-                                    char.voiceSpeaker,
-                                    true
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 rounded-xl bg-[#141519] text-white px-3 py-2 text-xs font-semibold whitespace-nowrap shrink-0"
-                              >
-                                <Volume2 className="w-3.5 h-3.5" />
-                                들어보기
-                              </button>
                             </div>
                           </div>
 
-                          <div className="sm:col-span-3">
-                            <label className="block text-[11px] font-semibold text-zinc-500 mb-1">
-                              부르면 말하는 인사말
+                          {/* Fur Color, Ear/Belly Color, Outfit Toggle & Colors */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-xl bg-[#F7F8FA] border border-zinc-200/80 p-3.5">
+                            {/* Fur Color */}
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold text-zinc-700">
+                                  🎨 인형 털 / 몸통 색상
+                                </span>
+                                <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-500 cursor-pointer">
+                                  <span>직접 선택</span>
+                                  <input
+                                    type="color"
+                                    value={char.furHex}
+                                    onChange={(e) =>
+                                      handlePatchCharacter(char.id, { furHex: e.target.value })
+                                    }
+                                    className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                                  />
+                                </label>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {FUR_COLOR_PRESETS.map((c) => (
+                                  <button
+                                    key={c.hex}
+                                    type="button"
+                                    onClick={() =>
+                                      handlePatchCharacter(char.id, { furHex: c.hex })
+                                    }
+                                    title={c.label}
+                                    className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                                      char.furHex.toLowerCase() === c.hex.toLowerCase()
+                                        ? 'border-[#141519] scale-115 shadow'
+                                        : 'border-zinc-300'
+                                    }`}
+                                    style={{ backgroundColor: c.hex }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Ear Inner & Belly Color */}
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold text-zinc-700">
+                                  🩷 귀 안쪽 · 배 패치 색상
+                                </span>
+                                <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-500 cursor-pointer">
+                                  <span>직접 선택</span>
+                                  <input
+                                    type="color"
+                                    value={char.earInnerHex || '#FFD5DC'}
+                                    onChange={(e) =>
+                                      handlePatchCharacter(char.id, {
+                                        earInnerHex: e.target.value,
+                                      })
+                                    }
+                                    className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                                  />
+                                </label>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {EAR_INNER_COLOR_PRESETS.map((c) => (
+                                  <button
+                                    key={c.hex}
+                                    type="button"
+                                    onClick={() =>
+                                      handlePatchCharacter(char.id, { earInnerHex: c.hex })
+                                    }
+                                    title={c.label}
+                                    className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                                      (char.earInnerHex || '').toLowerCase() ===
+                                      c.hex.toLowerCase()
+                                        ? 'border-[#141519] scale-115 shadow'
+                                        : 'border-zinc-300'
+                                    }`}
+                                    style={{ backgroundColor: c.hex }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Outfit ON/OFF + Outfit & Item Accent Color */}
+                            <div className="sm:col-span-2 pt-2 border-t border-zinc-200/80 space-y-2">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] font-bold text-zinc-700">
+                                    👗 옷 입히기 & 아이템 색상
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handlePatchCharacter(char.id, {
+                                        showOutfit: char.showOutfit === false ? true : false,
+                                      })
+                                    }
+                                    className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold transition-colors ${
+                                      char.showOutfit !== false
+                                        ? 'bg-[#141519] text-white'
+                                        : 'bg-zinc-200 text-zinc-700'
+                                    }`}
+                                  >
+                                    {char.showOutfit !== false
+                                      ? '옷 입힘 ON'
+                                      : '옷 벗김 (알몸 봉제인형)'}
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center gap-3 text-[10px] font-semibold text-zinc-500">
+                                  {char.showOutfit !== false && (
+                                    <label className="inline-flex items-center gap-1 cursor-pointer">
+                                      <span>옷 색상</span>
+                                      <input
+                                        type="color"
+                                        value={char.outfitHex}
+                                        onChange={(e) =>
+                                          handlePatchCharacter(char.id, {
+                                            outfitHex: e.target.value,
+                                          })
+                                        }
+                                        className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                                      />
+                                    </label>
+                                  )}
+                                  <label className="inline-flex items-center gap-1 cursor-pointer">
+                                    <span>아이템 색상</span>
+                                    <input
+                                      type="color"
+                                      value={char.accentHex}
+                                      onChange={(e) =>
+                                        handlePatchCharacter(char.id, {
+                                          accentHex: e.target.value,
+                                        })
+                                      }
+                                      className="w-5 h-5 rounded cursor-pointer border-0 p-0 bg-transparent"
+                                    />
+                                  </label>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap gap-1.5">
+                                {OUTFIT_COLOR_PRESETS.map((th) => (
+                                  <button
+                                    key={th.label}
+                                    type="button"
+                                    onClick={() =>
+                                      handlePatchCharacter(char.id, {
+                                        outfitHex: th.outfitHex,
+                                        accentHex: th.accentHex,
+                                      })
+                                    }
+                                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold border transition-all ${
+                                      char.accentHex.toLowerCase() === th.accentHex.toLowerCase()
+                                        ? 'bg-[#141519] text-white border-[#141519]'
+                                        : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-100'
+                                    }`}
+                                  >
+                                    <span
+                                      className="w-3 h-3 rounded-full border border-black/10"
+                                      style={{ backgroundColor: th.accentHex }}
+                                    />
+                                    <span>{th.label}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* 13 Wearable Accessories */}
+                          <div>
+                            <label className="block text-[11px] font-bold text-zinc-600 mb-1.5">
+                              🎀 착용 아이템 선택 (13종 · 실시간 3D 반영)
                             </label>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                              {(Object.keys(ACCESSORY_LABELS) as BunnyAccessoryType[]).map(
+                                (aKey) => {
+                                  const selected = char.accessory === aKey;
+                                  return (
+                                    <button
+                                      key={aKey}
+                                      type="button"
+                                      onClick={() =>
+                                        handlePatchCharacter(char.id, { accessory: aKey })
+                                      }
+                                      className={`rounded-xl px-2.5 py-1.5 border text-left text-xs font-semibold transition-colors truncate ${
+                                        selected
+                                          ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm'
+                                          : 'bg-[#F7F8FA] border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+                                      }`}
+                                    >
+                                      {ACCESSORY_LABELS[aKey]}
+                                    </button>
+                                  );
+                                }
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Greeting + Done */}
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-1">
                             <input
                               type="text"
                               value={char.greeting}
                               onChange={(e) =>
                                 handlePatchCharacter(char.id, { greeting: e.target.value })
                               }
-                              className={`w-full ${inputCls}`}
+                              placeholder="부르면 말하는 첫 인사말"
+                              className={`flex-1 ${inputCls}`}
                             />
-                          </div>
-
-                          <div className="sm:col-span-3 flex items-center justify-between pt-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[11px] font-semibold text-zinc-500">의상 색상:</span>
-                              {COLOR_THEMES.map((th) => (
-                                <button
-                                  key={th.label}
-                                  type="button"
-                                  onClick={() =>
-                                    handlePatchCharacter(char.id, {
-                                      outfitHex: th.outfitHex,
-                                      accentHex: th.accentHex,
-                                    })
-                                  }
-                                  className={`w-6 h-6 rounded-full border-2 transition-transform ${
-                                    char.accentHex === th.accentHex
-                                      ? 'border-[#141519] scale-110'
-                                      : 'border-white shadow-sm'
-                                  }`}
-                                  style={{ backgroundColor: th.accentHex }}
-                                  title={th.label}
-                                />
-                              ))}
-                            </div>
                             <button
                               type="button"
                               onClick={() => setEditingCharId(null)}
-                              className="rounded-full bg-[#141519] text-white px-4 py-1.5 text-xs font-semibold"
+                              className="rounded-full bg-[#141519] text-white px-5 py-2 text-xs font-bold shrink-0"
                             >
-                              업데이트 완료
+                              인형 커스텀 완료
                             </button>
                           </div>
                         </div>
@@ -2891,63 +3489,210 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: Custom Wake Word & Voice Settings */}
+          {/* TAB 3: Real-Time Gemini Live Native Voice, Phone Gemini Subscription & Character Name Calling */}
           {activeTab === 'voice' && (
             <div className="space-y-5">
-              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
+              {/* 1. Character Name Direct Calling Banner (Separate Wake-Word Removed!) */}
+              <div className="rounded-2xl bg-emerald-50/80 border border-emerald-200/80 p-4 space-y-2.5">
                 <div className="flex items-center gap-2">
-                  <Mic className="w-4 h-4 text-[#141519]" />
-                  <h3 className="text-sm font-bold text-[#141519]">AI 액자 음성 호출 명령어 사용자 지정</h3>
+                  <Mic className="w-4 h-4 text-emerald-700" />
+                  <h3 className="text-sm font-bold text-emerald-950">
+                    별도 호출언어 없음 · 캐릭터 이름을 부르면 즉시 응답!
+                  </h3>
                 </div>
-                <p className="text-xs text-zinc-500 leading-relaxed">
-                  마이크 호출 대기 상태에서 지정한 명령어(예: "하이 액자", "우리집 비서")를 말하면 날씨·일정·길안내 소요시간(자동차/도보/대중교통)을 화면 절반에 2분간 표시합니다.
+                <p className="text-xs text-emerald-900/80 leading-relaxed">
+                  "하이 액자" 같은 어색한 호출 명령어를 없앴습니다! 마이크가 켜진 상태에서 아이가{' '}
+                  <strong>캐릭터 이름만 자연스럽게 부르면</strong> 해당 동물친구가 즉시 달려와 자기 목소리로 대답합니다.{' '}
+                  (예: <em>"코코야 오늘 날씨 어때?"</em>, <em>"토순아 놀자!"</em>, <em>"뾰뾰야 바다 사진 보여줘!"</em>)
                 </p>
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {characters
+                    .filter((c) => c.enabled)
+                    .map((c) => {
+                      const callLabel = buildKoreanNameCallVariants(c.name).primaryCall;
+                      return (
+                        <span
+                          key={c.id}
+                          className="inline-flex items-center gap-1 rounded-full bg-white border border-emerald-200 px-2.5 py-1 text-xs font-bold text-emerald-950"
+                        >
+                          <span>{SPECIES_EMOJIS[c.species || 'bunny']}</span>
+                          <span>"{callLabel}!"</span>
+                        </span>
+                      );
+                    })}
+                </div>
+              </div>
 
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={wakeWordDraft}
-                    onChange={(e) => setWakeWordDraft(e.target.value)}
-                    placeholder="예: 하이 액자"
-                    className={`flex-1 ${inputCls} bg-white`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (wakeWordDraft.trim()) onChangeWakeWord(wakeWordDraft.trim());
-                    }}
-                    className="rounded-full bg-[#141519] hover:bg-zinc-800 px-5 py-2 text-xs font-semibold text-white whitespace-nowrap"
-                  >
-                    호출어 저장
-                  </button>
+              {/* 2. Gemini Live Real-Time Voice Mode & Phone Gemini Subscription Integration */}
+              <div className="rounded-2xl bg-gradient-to-br from-indigo-950 via-[#181B26] to-indigo-950 border border-indigo-400/30 p-5 text-white space-y-4 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 max-w-2xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
+                      <h3 className="text-sm font-bold text-white">
+                        ⚡ 제미나이 음성대화(Gemini Live) 모드 & 내 핸드폰 구독모델 연동
+                      </h3>
+                      {isGeminiLiveActive && (
+                        <span className="rounded-full bg-emerald-500 text-white px-2.5 py-0.5 text-[10px] font-bold">
+                          실시간 Live 연결 중
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-indigo-100/85 leading-relaxed">
+                      기존 TTS 읽어주기 방식 대신, 핸드폰 제미나이 앱의 음성대화처럼{' '}
+                      <strong>양방향 네이티브 오디오 스트리밍(Gemini Live)</strong>으로 숨소리·감정·억양·중간에 말 걸기까지 사람처럼 자연스럽게 실시간 대화를 나눕니다!
+                    </p>
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap gap-1.5">
-                  {['하이 액자', '헤이 프레임', '스마트 액자', '우리집 비서'].map((preset) => (
+                {/* 3-Way Voice Mode Selector */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {(
+                    [
+                      {
+                        id: 'gemini_live',
+                        title: '⚡ Gemini Live 실시간 음성대화 (권장)',
+                        desc: '제미나이 음성대화처럼 딜레이 없이 감정·호흡이 살아있는 실시간 양방향 대화',
+                      },
+                      {
+                        id: 'pro_model',
+                        title: '🧠 Gemini 2.5 Pro 고성능 대화',
+                        desc: '구독급 Pro 추론 모델 두뇌로 깊이 있는 답변 생성 + 고품질 한국어 음성',
+                      },
+                      {
+                        id: 'standard',
+                        title: '🔊 기본 경량 음성 모드',
+                        desc: 'API 키 없이도 동작하는 내장 대화 엔진 + 한국어 성우/Supertone 음성',
+                      },
+                    ] as const
+                  ).map((m) => {
+                    const active = geminiVoiceMode === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => onChangeGeminiVoiceMode(m.id)}
+                        className={`rounded-2xl p-3.5 border text-left transition-all ${
+                          active
+                            ? 'bg-white text-[#141519] border-white shadow-md'
+                            : 'bg-white/10 text-white border-white/15 hover:bg-white/15'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-extrabold">{m.title}</span>
+                          {active && <Check className="w-4 h-4 text-indigo-600 shrink-0" />}
+                        </div>
+                        <p
+                          className={`mt-1 text-[11px] leading-snug ${
+                            active ? 'text-zinc-600' : 'text-indigo-100/75'
+                          }`}
+                        >
+                          {m.desc}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Google Gemini Key + Phone Subscription Guide */}
+                <div className="rounded-xl bg-white/10 border border-white/15 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-amber-300">
+                      🔑 방법 1: 앱 안에서 3D 동물친구들이 Gemini Live 음성으로 직접 말하게 하기
+                    </div>
                     <button
-                      key={preset}
+                      type="button"
+                      onClick={() => openExternalUrlSafe('https://aistudio.google.com/apikey')}
+                      className="inline-flex items-center gap-1 rounded-full bg-amber-300 hover:bg-amber-200 px-3 py-1 text-[11px] font-extrabold text-[#141519] transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      내 구글 계정으로 AI Studio 키 1분 발급 열기
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-indigo-100/80 leading-relaxed">
+                    구글 보안 정책상 스마트폰 <em>Google One / Gemini Advanced</em> 월 구독권 토큰은 외부 앱이 직접 빼올 수 없도록 잠겨 있지만, 구독 중인 동일한 구글 계정으로 <strong>Google AI Studio</strong>에서 키를 발급해 아래에 한 번만 넣어두면 액자 속 3D 동물친구들이 <strong>제미나이 실시간 Live 음성</strong>으로 직접 대화합니다! (무료 등급에서도 Gemini Live 음성대화 지원)
+                  </p>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <input
+                      type="password"
+                      value={geminiKeyDraft}
+                      onChange={(e) => setGeminiKeyDraft(e.target.value)}
+                      placeholder="AIzaSy... (키 입력 시 ⚡ Gemini Live 실시간 음성대화 즉시 활성화!)"
+                      className="flex-1 rounded-xl bg-white px-3.5 py-2 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none"
+                    />
+                    <button
                       type="button"
                       onClick={() => {
-                        setWakeWordDraft(preset);
-                        onChangeWakeWord(preset);
+                        saveGeminiApiKey(geminiKeyDraft);
+                        setGeminiKeySavedToast(true);
+                        window.setTimeout(() => setGeminiKeySavedToast(false), 2500);
                       }}
-                      className="rounded-full bg-white hover:bg-zinc-100 border border-zinc-200 px-3 py-1 text-xs text-zinc-700"
+                      className="rounded-full bg-emerald-500 hover:bg-emerald-400 px-5 py-2 text-xs font-extrabold text-[#141519] whitespace-nowrap"
                     >
-                      "{preset}"
+                      {geminiKeySavedToast ? '✅ 저장 완료!' : 'API 키 저장 · 연결'}
                     </button>
-                  ))}
+                  </div>
+                </div>
+
+                {/* Direct Launch Installed Phone Google Gemini Subscription App */}
+                <div className="rounded-xl bg-white/10 border border-white/15 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-sky-300">
+                      📱 방법 2: 내 핸드폰에 설치된 공식 Gemini 구독 앱(Live)으로 캐릭터 바로 열기
+                    </div>
+                    <span className="rounded-full bg-white/15 px-2.5 py-0.5 text-[10px] font-semibold text-indigo-100">
+                      {isPhoneGeminiInstalled
+                        ? '핸드폰 Gemini 앱 감지됨'
+                        : 'Gemini 앱 / 웹 연동 가능'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-indigo-100/80 leading-relaxed">
+                    API 키 발급 없이 내 핸드폰에 로그인된 <strong>Gemini Advanced / Pro 구독 모델</strong>을 그대로 쓰고 싶을 때, 아래에서 아이의 동물친구를 고르고 버튼을 누르면 해당 캐릭터의 성격·연령·한국어 설정을 담은 채로 핸드폰의 공식 Gemini 앱을 즉시 실행합니다.
+                  </p>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <select
+                      value={selectedPhoneCharId}
+                      onChange={(e) => setSelectedPhoneCharId(e.target.value)}
+                      className="rounded-xl bg-white px-3 py-2 text-xs font-bold text-[#141519] focus:outline-none"
+                    >
+                      {characters.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {SPECIES_EMOJIS[c.species || 'bunny']} {c.name} 캐릭터 설정으로 열기
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const chosen =
+                          characters.find((c) => c.id === selectedPhoneCharId) ?? characters[0];
+                        if (chosen) handleLaunchPhoneGeminiForCharacter(chosen);
+                      }}
+                      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-sky-400 hover:bg-sky-300 px-4 py-2 text-xs font-extrabold text-[#141519] whitespace-nowrap transition-colors"
+                    >
+                      <Smartphone className="w-3.5 h-3.5" />
+                      내 핸드폰 Gemini 구독 앱으로 캐릭터 대화 열기
+                    </button>
+                  </div>
+
+                  {phoneGeminiToast && (
+                    <div className="rounded-xl bg-emerald-500/20 border border-emerald-400/40 px-3 py-2 text-xs font-semibold text-emerald-200">
+                      {phoneGeminiToast}
+                    </div>
+                  )}
                 </div>
               </div>
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (사람 목소리 AI 성우 TTS & 효과음)</h3>
+                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (AI 실시간 음성 & 한국인 성우 백업 TTS)</h3>
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5 pr-3">
                     <span className="block text-xs font-semibold text-zinc-700">
-                      AI 브리핑 및 5종 토끼 캐릭터 자연스러운 한국인 사람 목소리 출력
+                      동물친구 음성 대화 및 날씨·일정 브리핑 소리 출력
                     </span>
                     <span className="block text-[11px] text-zinc-500">
-                      기계적인 피치 변조를 제거하고 실제 한국어 성우 호흡(SunHi / Hyunsu / InJoon + Gemini Studio + Supertone 오픈소스 엔진)으로 자연스럽게 말합니다.
+                      Gemini Live 실시간 네이티브 오디오를 최우선 사용하며, 오프라인이나 키 미입력 시에도 실제 한국인 성우 호흡(SunHi / Hyunsu / InJoon + Supertone 엔진)으로 자연스럽게 말합니다.
                     </span>
                   </div>
                   <button
@@ -2969,7 +3714,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     <div className="flex flex-wrap items-center gap-2">
                       <Volume2 className="w-4 h-4 text-indigo-600 shrink-0" />
                       <h3 className="text-sm font-bold text-[#141519]">
-                        GitHub 오픈소스 사람 음성 엔진 (Supertone Supertonic-2 한국어 AI 보이스)
+                        오프라인 보조 사람 음성 엔진 (Supertone Supertonic-2 한국어 AI 보이스)
                       </h3>
                       <span
                         className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
@@ -2990,9 +3735,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       </span>
                     </div>
                     <p className="text-xs text-zinc-600 leading-relaxed">
-                      한국 대표 음성 AI 기업 <strong>Supertone</strong>의 GitHub 오픈소스(
-                      <code>supertone-inc/supertonic</code>) 온디바이스 한국어 사람 음성 모델입니다. API 키 없이 5종 토끼가 각기 다른 실제 한국인 성우 음색(
-                      <code>F1~F5, M1</code>)으로 사람처럼 자연스럽게 대화하며, 1회 다운로드 후 오프라인에서도 영구 동작합니다.
+                      인터넷이나 API 키가 없을 때도 자연스러운 사람 목소리를 내어주는 <strong>Supertone</strong>의 GitHub 오픈소스(
+                      <code>supertone-inc/supertonic</code>) 온디바이스 한국어 모델입니다.
                     </p>
                   </div>
 
@@ -3096,38 +3840,6 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               {renderGeminiAnalysisCard()}
-
-              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-[#141519]" />
-                  <h3 className="text-sm font-bold text-[#141519]">
-                    모바일 단독 모드용 Google Gemini API 키 설정 (선택사항)
-                  </h3>
-                </div>
-                <p className="text-xs text-zinc-500 leading-relaxed">
-                  API 키 없이도 내장 한국어 스마트 비서(날씨·미세먼지·길안내·일정) 및 3D 토끼 대화·영어 단어카드 기능이 100% 동작합니다. 더욱 풍부한 실시간 자유 대화를 원하시면 무료 Gemini API 키(AI Studio)를 저장해 두세요.
-                </p>
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                  <input
-                    type="password"
-                    value={geminiKeyDraft}
-                    onChange={(e) => setGeminiKeyDraft(e.target.value)}
-                    placeholder="AIzaSy... (비워두면 기본 내장 AI 대화 엔진 사용)"
-                    className={`flex-1 ${inputCls} bg-white`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      saveGeminiApiKey(geminiKeyDraft);
-                      setGeminiKeySavedToast(true);
-                      window.setTimeout(() => setGeminiKeySavedToast(false), 2500);
-                    }}
-                    className="rounded-full bg-[#141519] hover:bg-zinc-800 px-5 py-2 text-xs font-semibold text-white whitespace-nowrap"
-                  >
-                    {geminiKeySavedToast ? '저장 완료!' : 'API 키 저장'}
-                  </button>
-                </div>
-              </div>
             </div>
           )}
 

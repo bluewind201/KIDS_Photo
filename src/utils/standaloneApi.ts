@@ -4,6 +4,8 @@ import { pickRandomFlashcard } from '../data/englishFlashcards';
 import {
   AssistantInquiryResult,
   ChildGrowthStage,
+  EnglishFrequencyMode,
+  GeminiVoiceMode,
   PhotoItem,
   RemoteFolderItem,
   ScheduleItem,
@@ -514,6 +516,9 @@ export async function askBunnyChatUnified(params: {
   userMessage: string;
   weatherCondition: string;
   childAgeStage: ChildGrowthStage;
+  englishFrequency?: EnglishFrequencyMode;
+  allowEnglishThisTurn?: boolean;
+  geminiVoiceMode?: GeminiVoiceMode;
   growthStars: number;
   userTurnCount: number;
   isAutoFollowUpAfterSilence: boolean;
@@ -530,12 +535,29 @@ export async function askBunnyChatUnified(params: {
     assetUrl?: string;
   }>;
 }): Promise<BunnyChatReplyPayload> {
-  const backend = await tryBackendJson<BunnyChatReplyPayload>('/api/gemini/bunny-chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  }, 9000);
+  const englishFreq: EnglishFrequencyMode = params.englishFrequency ?? 'rare';
+  const allowEnglish =
+    !params.isAutoFollowUpAfterSilence &&
+    englishFreq !== 'off' &&
+    (params.allowEnglishThisTurn ?? false);
+
+  const backend = await tryBackendJson<BunnyChatReplyPayload>(
+    '/api/gemini/bunny-chat',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...params, englishFrequency: englishFreq, allowEnglishThisTurn: allowEnglish }),
+    },
+    9000
+  );
   if (backend.ok && backend.data.replyText) {
+    if (!allowEnglish) {
+      return {
+        ...backend.data,
+        shouldSuggestEnglishReask: false,
+        shouldShowFlashcard: false,
+      };
+    }
     return backend.data;
   }
 
@@ -550,58 +572,86 @@ export async function askBunnyChatUnified(params: {
   // Try direct client-side Gemini if API key is saved
   const ai = getClientGemini();
   if (ai) {
-    try {
-      const photoCatalogText = params.photos
-        .slice(0, 25)
-        .map(
-          (p) =>
-            `- ID: "${p.id}" | 제목: ${p.title} | 날짜: ${p.date} | 장소: ${p.location} | 태그: ${p.tags.join(', ')} | 설명: ${p.aiSummary}`
-        )
-        .join('\n');
+    const modelCandidates =
+      params.geminiVoiceMode === 'pro_model'
+        ? ['gemini-2.5-pro', 'gemini-2.5-flash']
+        : ['gemini-2.5-flash'];
 
-      const resp = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `${params.characterPersona || `너는 디지털 액자 속 다정한 아기 토끼 "${name}"야.`}
+    const photoCatalogText = params.photos
+      .slice(0, 25)
+      .map(
+        (p) =>
+          `- ID: "${p.id}" | 제목: ${p.title} | 날짜: ${p.date} | 장소: ${p.location} | 태그: ${p.tags.join(', ')} | 설명: ${p.aiSummary}`
+      )
+      .join('\n');
+
+    const englishPromptRule = params.isAutoFollowUpAfterSilence
+      ? '(아이가 대답 대기 시간 동안 말이 없었어. 영어유도/단어카드는 모두 false로 하고 다정하게 새로운 한국어 질문을 건네줘!)'
+      : !allowEnglish
+      ? '(중요: 이번 대화 턴은 영어 쿨타임 또는 영어 끄기 모드야! replyText에 영어 단어를 섞지 말고 100% 자연스럽고 재미있는 한국어 반말로만 대화하며, shouldSuggestEnglishReask=false, shouldShowFlashcard=false 로 설정해!)'
+      : '(이번 턴에는 대화 소재와 어울리는 아주 쉬운 영어 표현 1개(shouldSuggestEnglishReask=true) 또는 큰 그림 단어카드(shouldShowFlashcard=true) 중 딱 하나만 자연스럽게 제안해도 좋아!)';
+
+    for (const modelName of modelCandidates) {
+      try {
+        const resp = await ai.models.generateContent({
+          model: modelName,
+          contents: `${params.characterPersona || `너는 디지털 액자 속 다정한 동물 인형 친구 "${name}"야.`}
 아이 성장 단계: ${params.childAgeStage} (모은 별: ${params.growthStars}개)
 현재 날씨: ${params.weatherCondition}
 이전 대화: ${params.history.slice(-6).map((h) => `${h.role}: ${h.text}`).join(' / ')}
 아이의 방금 말: "${trimmedMsg}"
-${params.isAutoFollowUpAfterSilence ? '(아이가 1분간 대답이 없어 다정하게 다음 화제를 꺼내줘. 영어유도/단어카드는 false)' : ''}
+${englishPromptRule}
 
 [등록된 가족 사진 목록]
 ${photoCatalogText}
 
-2~3문장의 다정한 반말(replyText)로 대답해줘! 사진/추억 질문이면 isPhotoMemoryQuery=true와 matchedPhotoIds를 채워줘.`,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              replyText: { type: Type.STRING },
-              isPhotoMemoryQuery: { type: Type.BOOLEAN },
-              matchedPhotoIds: { type: Type.ARRAY, items: { type: Type.STRING } },
-              memoryHeadline: { type: Type.STRING },
-              shouldSuggestEnglishReask: { type: Type.BOOLEAN },
-              englishPhrase: { type: Type.STRING },
-              koreanPhonetic: { type: Type.STRING },
-              englishNudgeText: { type: Type.STRING },
-              shouldShowFlashcard: { type: Type.BOOLEAN },
-              flashcardKorean: { type: Type.STRING },
-              flashcardEnglish: { type: Type.STRING },
-              flashcardPhonetic: { type: Type.STRING },
-              flashcardEmoji: { type: Type.STRING },
-              flashcardHint: { type: Type.STRING },
-              flashcardExampleEn: { type: Type.STRING },
-              flashcardChoices: { type: Type.ARRAY, items: { type: Type.STRING } },
+진짜 살아있는 다정한 친구처럼 감탄사와 자연스러운 호흡을 담아 1~2문장의 한국어 반말(replyText)로 대답해줘! 사진/추억 질문이면 isPhotoMemoryQuery=true와 matchedPhotoIds를 채워줘.`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                replyText: { type: Type.STRING },
+                isPhotoMemoryQuery: { type: Type.BOOLEAN },
+                matchedPhotoIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+                memoryHeadline: { type: Type.STRING },
+                shouldSuggestEnglishReask: { type: Type.BOOLEAN },
+                englishPhrase: { type: Type.STRING },
+                koreanPhonetic: { type: Type.STRING },
+                englishNudgeText: { type: Type.STRING },
+                shouldShowFlashcard: { type: Type.BOOLEAN },
+                flashcardKorean: { type: Type.STRING },
+                flashcardEnglish: { type: Type.STRING },
+                flashcardPhonetic: { type: Type.STRING },
+                flashcardEmoji: { type: Type.STRING },
+                flashcardHint: { type: Type.STRING },
+                flashcardExampleEn: { type: Type.STRING },
+                flashcardChoices: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: [
+                'replyText',
+                'isPhotoMemoryQuery',
+                'matchedPhotoIds',
+                'shouldSuggestEnglishReask',
+                'shouldShowFlashcard',
+              ],
             },
-            required: ['replyText', 'isPhotoMemoryQuery', 'matchedPhotoIds', 'shouldSuggestEnglishReask', 'shouldShowFlashcard'],
           },
-        },
-      });
-      const parsed = JSON.parse((resp.text ?? '{}').trim()) as BunnyChatReplyPayload;
-      if (parsed.replyText) return parsed;
-    } catch {
-      // fall through to built-in bunny engine
+        });
+        const parsed = JSON.parse((resp.text ?? '{}').trim()) as BunnyChatReplyPayload;
+        if (parsed.replyText) {
+          if (!allowEnglish) {
+            return {
+              ...parsed,
+              shouldSuggestEnglishReask: false,
+              shouldShowFlashcard: false,
+            };
+          }
+          return parsed;
+        }
+      } catch {
+        // Try next model or fall through to built-in engine
+      }
     }
   }
 
@@ -727,8 +777,25 @@ ${photoCatalogText}
     };
   }
 
-  // Show a fun stage-appropriate flashcard every 2nd turn
-  if (params.userTurnCount >= 2 && params.userTurnCount % 2 === 0) {
+  // When English is NOT due on this turn (or turned off), reply in 100% natural warm Korean!
+  if (!allowEnglish) {
+    const followUps = [
+      `${charStyle.lead} 너랑 이야기하니까 정말 재미있어! 그다음엔 어떤 일이 있었어?`,
+      `${charStyle.lead} 우와 진짜? ${name}도 상상하니까 너무 신난다! 또 들려줘~`,
+      `${charStyle.lead} 헤헤~ 너는 이야기를 참 재미있게 해! 오늘 제일 좋았던 건 뭐야?`,
+      `${charStyle.lead} 맞장구치느라 귀가 쫑긋쫑긋해! 우리 가족 사진 이야기도 같이 볼까?`,
+    ];
+    return {
+      replyText: followUps[params.userTurnCount % followUps.length],
+      isPhotoMemoryQuery: false,
+      matchedPhotoIds: [],
+      shouldSuggestEnglishReask: false,
+      shouldShowFlashcard: false,
+    };
+  }
+
+  // English IS due on this turn: alternate cleanly between a picture flashcard and a spoken phrase!
+  if (params.userTurnCount % 2 === 0) {
     const card = pickRandomFlashcard(undefined, params.childAgeStage);
     return {
       replyText: `${charStyle.lead} ${name}랑 이야기하니까 정말 즐거워! 짜잔, 우리 "${card.koreanWord}"를 영어로 어떻게 말하는지 큰 그림카드로 같이 해볼까?`,
@@ -748,7 +815,7 @@ ${photoCatalogText}
 
   const phrases =
     params.childAgeStage === 'age_3_4'
-      ? { en: 'Hi bunny!', ko: '하이 버니!' }
+      ? { en: 'Hi friend!', ko: '하이 프렌드!' }
       : params.childAgeStage === 'age_6_7'
       ? { en: 'Let us play together!', ko: '렛 어스 플레이 투게더!' }
       : { en: 'I am so happy!', ko: '아이 엠 쏘 해피!' };

@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { Check, Mic, Send, Snowflake, Sparkles, Volume2, X } from 'lucide-react';
+import { Check, Mic, Radio, Send, Snowflake, Sparkles, Volume2, X } from 'lucide-react';
+import { SPECIES_EMOJIS } from '../data/initialCharacters';
 import {
+  AnimalSpecies,
   BunnyBehaviorStatus,
   BunnyCharacterConfig,
   BunnyChatMessage,
@@ -20,6 +22,7 @@ interface Bunny3DOverlayProps {
   activeChatBunny: BunnyId | null;
   chatWaitSeconds: number;
   isVoiceListening: boolean;
+  isGeminiLiveActive?: boolean;
   isPaused?: boolean;
   photos: PhotoItem[];
   weatherEffectMode: WeatherEffectMode;
@@ -774,13 +777,29 @@ function buildInteractiveSnowball(shadowTex: THREE.Texture): {
   return { snowballRoot, snowballBall, snowballShadow };
 }
 
+function computeCharacterRigSignature(cfg: BunnyCharacterConfig): string {
+  return [
+    cfg.species || 'bunny',
+    cfg.furHex || '#FFFCFA',
+    cfg.earInnerHex || '#FDA4AF',
+    cfg.outfitHex || '#FFE4E8',
+    cfg.accentHex || '#FB7185',
+    cfg.showOutfit !== false ? '1' : '0',
+    cfg.accessory || 'none',
+  ].join('|');
+}
+
 /**
- * Petite, slender, ultra-cute 3D baby bunny model + Outdoor Toys + Sunny Grass + Snowball Fight/Roll Props!
+ * Multi-Species Plush Doll 3D Builder (`bunny`, `puppy`, `bear`, `kitty`, `fox`, `hamster`, `penguin`, `dino`)
+ * + Full Fur/Ear/Outfit/Accent Color Customization + 13 Wearable Items + Outdoor Toys & Weather Props!
  */
 function buildCuteSlender3DBunny(
   cfg: BunnyCharacterConfig,
   shadowTex: THREE.Texture
 ): BunnyRig {
+  const species: AnimalSpecies = cfg.species || 'bunny';
+  const showOutfit = cfg.showOutfit !== false;
+
   const root = new THREE.Group();
   const bodyGroup = new THREE.Group();
   const squashGroup = new THREE.Group();
@@ -810,15 +829,20 @@ function buildCuteSlender3DBunny(
     metalness: 0.05,
   });
   const innerEarMat = new THREE.MeshStandardMaterial({
-    color: 0xfecdd3,
+    color: new THREE.Color(cfg.earInnerHex || '#FDA4AF'),
     roughness: 0.76,
+    metalness: 0.01,
+  });
+  const creamWhiteMat = new THREE.MeshStandardMaterial({
+    color: 0xfffdf9,
+    roughness: 0.82,
     metalness: 0.01,
   });
   const blushMat = new THREE.MeshStandardMaterial({
     color: 0xff9ebb,
     roughness: 0.72,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.74,
   });
   const eyeMat = new THREE.MeshStandardMaterial({
     color: 0x16161a,
@@ -827,48 +851,119 @@ function buildCuteSlender3DBunny(
   });
   const glintMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 
-  // 1. Petite Slender Torso + Cute Pastel A-Line Tunic Dress
-  const upperTorso = new THREE.Mesh(new THREE.CapsuleGeometry(0.142, 0.13, 12, 20), furMat);
-  upperTorso.scale.set(0.95, 1.0, 0.88);
-  upperTorso.position.set(0, -0.13, 0);
-  squashGroup.add(upperTorso);
+  // 1. Torso: Either Cute Pastel Outfit Dress OR Pure Huggable Plush Doll Body + Belly Patch!
+  if (showOutfit) {
+    const upperTorso = new THREE.Mesh(new THREE.CapsuleGeometry(0.142, 0.13, 12, 20), furMat);
+    upperTorso.scale.set(0.95, 1.0, 0.88);
+    upperTorso.position.set(0, -0.13, 0);
+    squashGroup.add(upperTorso);
 
-  const tunic = new THREE.Mesh(new THREE.ConeGeometry(0.215, 0.25, 24), outfitMat);
-  tunic.scale.set(1.0, 1.0, 0.88);
-  tunic.position.set(0, -0.22, 0.01);
-  squashGroup.add(tunic);
+    const tunic = new THREE.Mesh(new THREE.ConeGeometry(0.215, 0.25, 24), outfitMat);
+    tunic.scale.set(1.0, 1.0, 0.88);
+    tunic.position.set(0, -0.22, 0.01);
+    squashGroup.add(tunic);
 
-  const collarRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.138, 0.024, 10, 24),
-    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 })
-  );
-  collarRing.rotation.x = Math.PI / 2;
-  collarRing.position.set(0, -0.07, 0.01);
-  squashGroup.add(collarRing);
-
-  [-0.15, -0.22].forEach((by) => {
-    const btn = new THREE.Mesh(
-      new THREE.SphereGeometry(0.018, 10, 10),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 })
+    const collarRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.138, 0.024, 10, 24),
+      creamWhiteMat
     );
-    btn.position.set(0, by, 0.165);
-    squashGroup.add(btn);
-  });
+    collarRing.rotation.x = Math.PI / 2;
+    collarRing.position.set(0, -0.07, 0.01);
+    squashGroup.add(collarRing);
 
-  const tail = new THREE.Mesh(new THREE.SphereGeometry(0.075, 14, 14), furMat);
-  tail.position.set(0, -0.28, -0.2);
-  squashGroup.add(tail);
+    [-0.15, -0.22].forEach((by) => {
+      const btn = new THREE.Mesh(new THREE.SphereGeometry(0.018, 10, 10), creamWhiteMat);
+      btn.position.set(0, by, 0.165);
+      squashGroup.add(btn);
+    });
+  } else {
+    // Pure Stuffed-Animal Plush Body (for kids matching naked teddy bears, puppies, dinos, penguins!)
+    const plushBody = new THREE.Mesh(new THREE.SphereGeometry(0.205, 24, 20), furMat);
+    plushBody.scale.set(0.98, 1.16, 0.9);
+    plushBody.position.set(0, -0.2, 0);
+    squashGroup.add(plushBody);
+
+    const bellyMat = species === 'penguin' || species === 'fox' ? creamWhiteMat : innerEarMat;
+    const bellyPatch = new THREE.Mesh(new THREE.SphereGeometry(0.138, 20, 16), bellyMat);
+    bellyPatch.scale.set(0.92, 1.12, 0.42);
+    bellyPatch.position.set(0, -0.205, 0.142);
+    squashGroup.add(bellyPatch);
+  }
+
+  // Species-Specific Plush Tail
+  if (species === 'kitty') {
+    const kittyTailGroup = new THREE.Group();
+    const tailSeg1 = new THREE.Mesh(new THREE.CapsuleGeometry(0.032, 0.18, 8, 12), furMat);
+    tailSeg1.position.set(0, 0.06, -0.06);
+    tailSeg1.rotation.x = -0.7;
+    tailSeg1.rotation.z = -0.35;
+    const tailTip = new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 10), innerEarMat);
+    tailTip.position.set(0.055, 0.14, -0.13);
+    kittyTailGroup.add(tailSeg1, tailTip);
+    kittyTailGroup.position.set(0.04, -0.28, -0.15);
+    squashGroup.add(kittyTailGroup);
+  } else if (species === 'fox') {
+    const foxTailGroup = new THREE.Group();
+    const mainFluff = new THREE.Mesh(new THREE.CapsuleGeometry(0.065, 0.16, 10, 14), furMat);
+    mainFluff.rotation.x = -0.85;
+    mainFluff.rotation.z = -0.28;
+    const whiteTip = new THREE.Mesh(new THREE.ConeGeometry(0.064, 0.13, 12), creamWhiteMat);
+    whiteTip.position.set(0.045, 0.09, -0.11);
+    whiteTip.rotation.x = -0.85;
+    whiteTip.rotation.z = -0.28;
+    foxTailGroup.add(mainFluff, whiteTip);
+    foxTailGroup.position.set(0.03, -0.26, -0.19);
+    squashGroup.add(foxTailGroup);
+  } else if (species === 'puppy') {
+    const pupTail = new THREE.Mesh(new THREE.CapsuleGeometry(0.036, 0.11, 8, 12), furMat);
+    pupTail.position.set(0, -0.23, -0.21);
+    pupTail.rotation.x = -0.75;
+    squashGroup.add(pupTail);
+  } else if (species === 'dino') {
+    const dinoTail = new THREE.Mesh(new THREE.ConeGeometry(0.095, 0.26, 14), furMat);
+    dinoTail.position.set(0, -0.27, -0.24);
+    dinoTail.rotation.x = -1.15;
+    squashGroup.add(dinoTail);
+
+    // Cute pastel dorsal spikes down back & tail!
+    [
+      [0, -0.08, -0.17, 0.042],
+      [0, -0.18, -0.2, 0.046],
+      [0, -0.25, -0.27, 0.038],
+    ].forEach(([sx, sy, sz, sr]) => {
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(sr, sr * 2.1, 10), accentMat);
+      spike.position.set(sx, sy, sz);
+      spike.rotation.x = -1.25;
+      squashGroup.add(spike);
+    });
+  } else {
+    const tail = new THREE.Mesh(
+      new THREE.SphereGeometry(species === 'hamster' ? 0.048 : 0.072, 14, 14),
+      furMat
+    );
+    tail.position.set(0, -0.28, -0.19);
+    squashGroup.add(tail);
+  }
+
+  const penguinBeakMat = new THREE.MeshStandardMaterial({
+    color: 0xfbbf24,
+    roughness: 0.36,
+  });
 
   const buildFootPivot = (side: -1 | 1) => {
     const fPivot = new THREE.Group();
     fPivot.position.set(side * 0.105, -0.39, 0.04);
-    const foot = new THREE.Mesh(new THREE.SphereGeometry(0.078, 16, 14), furMat);
-    foot.scale.set(0.88, 0.58, 1.32);
+    const footMatToUse = species === 'penguin' ? penguinBeakMat : furMat;
+    const foot = new THREE.Mesh(new THREE.SphereGeometry(0.078, 16, 14), footMatToUse);
+    foot.scale.set(species === 'penguin' ? 1.05 : 0.88, 0.54, 1.32);
     foot.position.set(0, -0.02, 0.025);
-    const pawPad = new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 10), innerEarMat);
-    pawPad.scale.set(1.0, 0.35, 1.1);
-    pawPad.position.set(0, -0.055, 0.045);
-    fPivot.add(foot, pawPad);
+    fPivot.add(foot);
+    if (species !== 'penguin') {
+      const pawPad = new THREE.Mesh(new THREE.SphereGeometry(0.036, 10, 10), innerEarMat);
+      pawPad.scale.set(1.0, 0.35, 1.1);
+      pawPad.position.set(0, -0.055, 0.045);
+      fPivot.add(pawPad);
+    }
     squashGroup.add(fPivot);
     return fPivot;
   };
@@ -878,6 +973,7 @@ function buildCuteSlender3DBunny(
   const leftArmPivot = new THREE.Group();
   leftArmPivot.position.set(-0.165, -0.09, 0.03);
   const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.048, 0.125, 8, 14), furMat);
+  if (species === 'penguin') leftArm.scale.set(0.58, 1.12, 1.15);
   leftArm.position.set(-0.045, -0.065, 0.03);
   leftArm.rotation.z = 0.38;
   leftArmPivot.add(leftArm);
@@ -886,6 +982,7 @@ function buildCuteSlender3DBunny(
   const rightArmPivot = new THREE.Group();
   rightArmPivot.position.set(0.165, -0.09, 0.03);
   const rightArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.048, 0.125, 8, 14), furMat);
+  if (species === 'penguin') rightArm.scale.set(0.58, 1.12, 1.15);
   rightArm.position.set(0.045, -0.065, 0.03);
   rightArm.rotation.z = -0.38;
   rightArmPivot.add(rightArm);
@@ -901,27 +998,97 @@ function buildCuteSlender3DBunny(
 
   squashGroup.add(rightArmPivot);
 
-  // 2. Soft Baby Bunny Head
+  // 2. Plush Head & Species Facial Features
   const headGroup = new THREE.Group();
   headGroup.position.set(0, 0.18, 0.02);
   squashGroup.add(headGroup);
 
   const headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.272, 28, 24), furMat);
-  headMesh.scale.set(1.05, 0.96, 0.96);
+  headMesh.scale.set(
+    species === 'hamster' ? 1.12 : 1.05,
+    species === 'dino' ? 0.98 : 0.96,
+    0.96
+  );
   headGroup.add(headMesh);
 
-  const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.082, 16, 14), furMat);
-  muzzle.scale.set(1.18, 0.82, 0.65);
-  muzzle.position.set(0, -0.055, 0.235);
-  headGroup.add(muzzle);
+  if (species === 'penguin') {
+    // White face heart patch for baby penguin!
+    const facePatch = new THREE.Mesh(new THREE.SphereGeometry(0.225, 22, 18), creamWhiteMat);
+    facePatch.scale.set(0.95, 0.86, 0.45);
+    facePatch.position.set(0, -0.025, 0.175);
+    headGroup.add(facePatch);
+  } else if (species === 'fox') {
+    // Fluffy white fox cheek ruffs!
+    [-1, 1].forEach((side) => {
+      const cheekTuft = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.16, 12), creamWhiteMat);
+      cheekTuft.position.set(side * 0.255, -0.065, 0.08);
+      cheekTuft.rotation.z = side * -1.18;
+      headGroup.add(cheekTuft);
+    });
+  } else if (species === 'hamster') {
+    // Chubby stuffed hamster cheek pouches!
+    [-1, 1].forEach((side) => {
+      const pouch = new THREE.Mesh(new THREE.SphereGeometry(0.115, 16, 14), creamWhiteMat);
+      pouch.scale.set(1.05, 0.88, 0.85);
+      pouch.position.set(side * 0.185, -0.075, 0.165);
+      headGroup.add(pouch);
+    });
+  } else if (species === 'dino') {
+    // Cute pastel spikes along top of dino head!
+    [
+      [0, 0.27, 0.05, 0.15],
+      [0, 0.245, -0.09, -0.35],
+      [0, 0.16, -0.21, -0.85],
+    ].forEach(([dx, dy, dz, rotX]) => {
+      const crest = new THREE.Mesh(new THREE.ConeGeometry(0.048, 0.105, 10), accentMat);
+      crest.position.set(dx, dy, dz);
+      crest.rotation.x = rotX;
+      headGroup.add(crest);
+    });
+  }
 
-  const nose = new THREE.Mesh(
-    new THREE.SphereGeometry(0.028, 14, 12),
-    new THREE.MeshStandardMaterial({ color: 0xfb7185, roughness: 0.38 })
-  );
-  nose.scale.set(1.18, 0.82, 0.72);
-  nose.position.set(0, -0.032, 0.282);
-  headGroup.add(nose);
+  if (species === 'penguin') {
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.052, 0.1, 14), penguinBeakMat);
+    beak.scale.set(1.25, 1.0, 0.78);
+    beak.rotation.x = Math.PI / 2;
+    beak.position.set(0, -0.042, 0.295);
+    headGroup.add(beak);
+  } else {
+    const muzzleMat =
+      species === 'bear' || species === 'puppy' || species === 'fox' ? creamWhiteMat : furMat;
+    const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.086, 16, 14), muzzleMat);
+    muzzle.scale.set(
+      species === 'bear' ? 1.28 : species === 'dino' ? 1.35 : 1.18,
+      species === 'dino' ? 0.95 : 0.84,
+      species === 'bear' || species === 'puppy' ? 0.78 : 0.65
+    );
+    muzzle.position.set(0, -0.055, 0.236);
+    headGroup.add(muzzle);
+
+    const darkNoseSpecies = species === 'puppy' || species === 'bear' || species === 'fox';
+    const nose = new THREE.Mesh(
+      new THREE.SphereGeometry(darkNoseSpecies ? 0.033 : 0.028, 14, 12),
+      new THREE.MeshStandardMaterial({
+        color: darkNoseSpecies ? 0x27201c : 0xfb7185,
+        roughness: 0.32,
+      })
+    );
+    nose.scale.set(1.2, 0.85, 0.76);
+    nose.position.set(0, -0.03, 0.288);
+    headGroup.add(nose);
+  }
+
+  if (species === 'kitty') {
+    const whiskerMat = new THREE.MeshStandardMaterial({ color: 0x52525b, roughness: 0.5 });
+    [-1, 1].forEach((side) => {
+      [-0.14, 0, 0.14].forEach((ang, wi) => {
+        const wMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.0045, 0.0045, 0.11, 6), whiskerMat);
+        wMesh.rotation.z = Math.PI / 2 + side * ang;
+        wMesh.position.set(side * 0.195, -0.046 + (wi - 1) * 0.022, 0.245);
+        headGroup.add(wMesh);
+      });
+    });
+  }
 
   const mouthMesh = new THREE.Mesh(
     new THREE.SphereGeometry(0.034, 14, 12),
@@ -951,28 +1118,72 @@ function buildCuteSlender3DBunny(
     headGroup.add(blush);
   });
 
-  const buildSlenderEar = (side: -1 | 1) => {
+  // 3. Species-Specific 3D Ears
+  const buildSpeciesEar = (side: -1 | 1) => {
     const pivot = new THREE.Group();
-    pivot.position.set(side * 0.108, 0.22, -0.01);
-    pivot.rotation.z = side * -0.11;
 
-    const outerEar = new THREE.Mesh(new THREE.CapsuleGeometry(0.068, 0.29, 10, 18), furMat);
-    outerEar.scale.set(0.95, 1.0, 0.52);
-    outerEar.position.set(0, 0.19, 0);
-    pivot.add(outerEar);
-
-    const innerEar = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.21, 8, 14), innerEarMat);
-    innerEar.scale.set(0.95, 1.0, 0.3);
-    innerEar.position.set(0, 0.18, 0.032);
-    pivot.add(innerEar);
+    if (species === 'bunny') {
+      pivot.position.set(side * 0.108, 0.22, -0.01);
+      pivot.rotation.z = side * -0.11;
+      const outerEar = new THREE.Mesh(new THREE.CapsuleGeometry(0.068, 0.29, 10, 18), furMat);
+      outerEar.scale.set(0.95, 1.0, 0.52);
+      outerEar.position.set(0, 0.19, 0);
+      const innerEar = new THREE.Mesh(new THREE.CapsuleGeometry(0.04, 0.21, 8, 14), innerEarMat);
+      innerEar.scale.set(0.95, 1.0, 0.3);
+      innerEar.position.set(0, 0.18, 0.032);
+      pivot.add(outerEar, innerEar);
+    } else if (species === 'puppy') {
+      // Adorable floppy droopy puppy ears on sides of head!
+      pivot.position.set(side * 0.235, 0.12, 0.02);
+      pivot.rotation.z = side * 0.28;
+      const flopEar = new THREE.Mesh(new THREE.CapsuleGeometry(0.072, 0.17, 10, 16), innerEarMat);
+      flopEar.scale.set(0.55, 1.05, 0.88);
+      flopEar.position.set(side * 0.035, -0.1, 0.02);
+      pivot.add(flopEar);
+    } else if (species === 'bear' || species === 'hamster') {
+      const isHamster = species === 'hamster';
+      pivot.position.set(side * (isHamster ? 0.195 : 0.205), isHamster ? 0.19 : 0.205, -0.01);
+      pivot.rotation.z = side * -0.42;
+      const earRadius = isHamster ? 0.072 : 0.098;
+      const outerRound = new THREE.Mesh(new THREE.SphereGeometry(earRadius, 16, 14), furMat);
+      outerRound.scale.set(1.0, 1.0, 0.52);
+      outerRound.position.set(0, 0.04, 0);
+      const innerRound = new THREE.Mesh(
+        new THREE.SphereGeometry(earRadius * 0.58, 12, 12),
+        innerEarMat
+      );
+      innerRound.scale.set(1.0, 1.0, 0.35);
+      innerRound.position.set(0, 0.038, 0.032);
+      pivot.add(outerRound, innerRound);
+    } else if (species === 'kitty' || species === 'fox') {
+      const isFox = species === 'fox';
+      pivot.position.set(side * 0.168, 0.205, 0.0);
+      pivot.rotation.z = side * -0.34;
+      const coneH = isFox ? 0.24 : 0.185;
+      const coneR = isFox ? 0.105 : 0.092;
+      const outerCone = new THREE.Mesh(new THREE.ConeGeometry(coneR, coneH, 14), furMat);
+      outerCone.scale.set(1.0, 1.0, 0.56);
+      outerCone.position.set(0, coneH * 0.42, 0);
+      const innerCone = new THREE.Mesh(
+        new THREE.ConeGeometry(coneR * 0.56, coneH * 0.68, 12),
+        innerEarMat
+      );
+      innerCone.scale.set(1.0, 1.0, 0.34);
+      innerCone.position.set(0, coneH * 0.38, 0.028);
+      pivot.add(outerCone, innerCone);
+    } else {
+      // `penguin` or `dino`: smooth round head without mammal ears (keep lightweight pivot for rig animation)
+      pivot.position.set(side * 0.12, 0.22, 0);
+    }
 
     headGroup.add(pivot);
     return pivot;
   };
 
-  const leftEarPivot = buildSlenderEar(-1);
-  const rightEarPivot = buildSlenderEar(1);
+  const leftEarPivot = buildSpeciesEar(-1);
+  const rightEarPivot = buildSpeciesEar(1);
 
+  // 4. 13 Customizable Wearable Doll Items (`cfg.accessory`)
   if (cfg.accessory === 'ribbon') {
     const bowGroup = new THREE.Group();
     const lLoop = new THREE.Mesh(new THREE.SphereGeometry(0.065, 14, 14), accentMat);
@@ -981,14 +1192,25 @@ function buildCuteSlender3DBunny(
     const rLoop = new THREE.Mesh(new THREE.SphereGeometry(0.065, 14, 14), accentMat);
     rLoop.scale.set(1.22, 0.82, 0.5);
     rLoop.position.set(0.062, 0, 0);
-    const knot = new THREE.Mesh(
-      new THREE.SphereGeometry(0.038, 12, 12),
-      new THREE.MeshStandardMaterial({ color: 0xfff1f2, roughness: 0.4 })
-    );
+    const knot = new THREE.Mesh(new THREE.SphereGeometry(0.038, 12, 12), creamWhiteMat);
     bowGroup.add(lLoop, rLoop, knot);
-    bowGroup.position.set(-0.155, 0.23, 0.11);
+    bowGroup.position.set(-0.145, 0.235, 0.115);
     bowGroup.rotation.z = 0.24;
     headGroup.add(bowGroup);
+  } else if (cfg.accessory === 'bowtie') {
+    const tieGroup = new THREE.Group();
+    const lWing = new THREE.Mesh(new THREE.ConeGeometry(0.052, 0.095, 12), accentMat);
+    lWing.rotation.z = -Math.PI / 2;
+    lWing.scale.set(1, 1, 0.52);
+    lWing.position.set(-0.046, 0, 0);
+    const rWing = new THREE.Mesh(new THREE.ConeGeometry(0.052, 0.095, 12), accentMat);
+    rWing.rotation.z = Math.PI / 2;
+    rWing.scale.set(1, 1, 0.52);
+    rWing.position.set(0.046, 0, 0);
+    const centerKnot = new THREE.Mesh(new THREE.SphereGeometry(0.028, 12, 12), creamWhiteMat);
+    tieGroup.add(lWing, rWing, centerKnot);
+    tieGroup.position.set(0, -0.072, 0.175);
+    squashGroup.add(tieGroup);
   } else if (cfg.accessory === 'clover') {
     const cloverGroup = new THREE.Group();
     [
@@ -1002,7 +1224,7 @@ function buildCuteSlender3DBunny(
       leaf.position.set(lx, ly, 0);
       cloverGroup.add(leaf);
     });
-    cloverGroup.position.set(0.16, 0.24, 0.11);
+    cloverGroup.position.set(0.155, 0.235, 0.115);
     cloverGroup.rotation.z = -0.22;
     headGroup.add(cloverGroup);
   } else if (cfg.accessory === 'backpack') {
@@ -1010,13 +1232,11 @@ function buildCuteSlender3DBunny(
     miniBag.position.set(0, -0.18, -0.15);
     squashGroup.add(miniBag);
 
-    const miniCarrot = new THREE.Mesh(
-      new THREE.ConeGeometry(0.036, 0.11, 12),
-      new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.45 })
-    );
-    miniCarrot.rotation.z = Math.PI * 0.85;
-    miniCarrot.position.set(0.06, -0.15, 0.17);
-    squashGroup.add(miniCarrot);
+    const strapL = new THREE.Mesh(new THREE.CapsuleGeometry(0.018, 0.16, 6, 10), accentMat);
+    strapL.position.set(-0.095, -0.15, 0.125);
+    const strapR = new THREE.Mesh(new THREE.CapsuleGeometry(0.018, 0.16, 6, 10), accentMat);
+    strapR.position.set(0.095, -0.15, 0.125);
+    squashGroup.add(strapL, strapR);
   } else if (cfg.accessory === 'star') {
     const starGroup = new THREE.Group();
     const starMat = new THREE.MeshStandardMaterial({
@@ -1033,7 +1253,7 @@ function buildCuteSlender3DBunny(
     }
     const center = new THREE.Mesh(new THREE.SphereGeometry(0.036, 12, 12), starMat);
     starGroup.add(center);
-    starGroup.position.set(-0.16, 0.22, 0.12);
+    starGroup.position.set(-0.155, 0.225, 0.12);
     headGroup.add(starGroup);
   } else if (cfg.accessory === 'scarf') {
     const muffler = new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.038, 12, 24), accentMat);
@@ -1045,6 +1265,104 @@ function buildCuteSlender3DBunny(
     scarfTail.position.set(0.09, -0.14, 0.155);
     scarfTail.rotation.z = -0.2;
     squashGroup.add(scarfTail);
+  } else if (cfg.accessory === 'crown') {
+    const crownGroup = new THREE.Group();
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: 0xfacc15,
+      roughness: 0.28,
+      metalness: 0.38,
+    });
+    const baseBand = new THREE.Mesh(new THREE.CylinderGeometry(0.105, 0.095, 0.055, 18), goldMat);
+    crownGroup.add(baseBand);
+    for (let i = 0; i < 5; i++) {
+      const ang = (i * Math.PI * 2) / 5;
+      const prong = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.068, 8), goldMat);
+      prong.position.set(Math.cos(ang) * 0.082, 0.052, Math.sin(ang) * 0.082);
+      const jewel = new THREE.Mesh(new THREE.SphereGeometry(0.014, 8, 8), accentMat);
+      jewel.position.set(Math.cos(ang) * 0.082, 0.088, Math.sin(ang) * 0.082);
+      crownGroup.add(prong, jewel);
+    }
+    crownGroup.position.set(0, 0.278, 0.03);
+    crownGroup.rotation.x = 0.1;
+    headGroup.add(crownGroup);
+  } else if (cfg.accessory === 'beret') {
+    const beretGroup = new THREE.Group();
+    const beretCap = new THREE.Mesh(new THREE.SphereGeometry(0.185, 20, 16), accentMat);
+    beretCap.scale.set(1.12, 0.42, 1.08);
+    const beretStem = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.045, 8), accentMat);
+    beretStem.position.set(0, 0.08, 0);
+    beretGroup.add(beretCap, beretStem);
+    beretGroup.position.set(-0.055, 0.255, 0.02);
+    beretGroup.rotation.z = 0.24;
+    headGroup.add(beretGroup);
+  } else if (cfg.accessory === 'cape') {
+    const capeNeck = new THREE.Mesh(new THREE.TorusGeometry(0.145, 0.022, 10, 22), accentMat);
+    capeNeck.rotation.x = Math.PI / 2;
+    capeNeck.position.set(0, -0.062, 0.01);
+    const capeCloak = new THREE.Mesh(
+      new THREE.ConeGeometry(0.26, 0.34, 18, 1, true, Math.PI * 0.65, Math.PI * 1.7),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(cfg.accentHex || '#FB7185'),
+        roughness: 0.52,
+        side: THREE.DoubleSide,
+      })
+    );
+    capeCloak.position.set(0, -0.22, -0.05);
+    capeCloak.rotation.x = 0.18;
+    const clasp = new THREE.Mesh(
+      new THREE.SphereGeometry(0.026, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0xfde047, roughness: 0.3, metalness: 0.3 })
+    );
+    clasp.position.set(0, -0.068, 0.158);
+    squashGroup.add(capeNeck, capeCloak, clasp);
+  } else if (cfg.accessory === 'glasses') {
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(cfg.accentHex || '#1E293B'),
+      roughness: 0.3,
+      metalness: 0.35,
+    });
+    const glassesGroup = new THREE.Group();
+    [-1, 1].forEach((side) => {
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.066, 0.011, 10, 24), glassMat);
+      rim.position.set(side * 0.112, -0.006, 0.272);
+      glassesGroup.add(rim);
+    });
+    const bridge = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.095, 8), glassMat);
+    bridge.rotation.z = Math.PI / 2;
+    bridge.position.set(0, 0.002, 0.275);
+    glassesGroup.add(bridge);
+    headGroup.add(glassesGroup);
+  } else if (cfg.accessory === 'heart_hug') {
+    // Plush 3D Heart Cushion held warmly on chest!
+    const heartGroup = new THREE.Group();
+    const lLobe = new THREE.Mesh(new THREE.SphereGeometry(0.058, 14, 14), accentMat);
+    lLobe.position.set(-0.042, 0.025, 0);
+    const rLobe = new THREE.Mesh(new THREE.SphereGeometry(0.058, 14, 14), accentMat);
+    rLobe.position.set(0.042, 0.025, 0);
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.078, 0.1, 14), accentMat);
+    tip.rotation.z = Math.PI;
+    tip.position.set(0, -0.032, 0);
+    heartGroup.add(lLobe, rLobe, tip);
+    heartGroup.scale.set(1.0, 1.0, 0.58);
+    heartGroup.position.set(0, -0.175, 0.195);
+    squashGroup.add(heartGroup);
+  } else if (cfg.accessory === 'flower_hat') {
+    const flowerGroup = new THREE.Group();
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.052, 12, 12),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.4 })
+    );
+    flowerGroup.add(core);
+    for (let p = 0; p < 6; p++) {
+      const ang = (p * Math.PI * 2) / 6;
+      const petal = new THREE.Mesh(new THREE.SphereGeometry(0.052, 12, 12), accentMat);
+      petal.scale.set(1.15, 0.45, 0.95);
+      petal.position.set(Math.cos(ang) * 0.078, -0.005, Math.sin(ang) * 0.078);
+      flowerGroup.add(petal);
+    }
+    flowerGroup.position.set(0, 0.275, 0.03);
+    flowerGroup.rotation.x = 0.22;
+    headGroup.add(flowerGroup);
   }
 
   // Toy 1: Play Ball
@@ -1311,7 +1629,7 @@ function buildCuteSlender3DBunny(
     obj.userData.bunnyId = cfg.id;
   });
 
-  const signature = `${cfg.furHex}|${cfg.outfitHex}|${cfg.accentHex}|${cfg.accessory}`;
+  const signature = computeCharacterRigSignature(cfg);
 
   return {
     id: cfg.id,
@@ -1378,6 +1696,7 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
   activeChatBunny,
   chatWaitSeconds,
   isVoiceListening,
+  isGeminiLiveActive = false,
   isPaused = false,
   photos,
   weatherEffectMode,
@@ -1848,7 +2167,7 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
       }
 
       charList.forEach((cfg) => {
-        const sig = `${cfg.furHex}|${cfg.outfitHex}|${cfg.accentHex}|${cfg.accessory}`;
+        const sig = computeCharacterRigSignature(cfg);
         const existing = rigsMap.get(cfg.id);
 
         if (existing && existing.signature !== sig) {
@@ -3061,39 +3380,51 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
               >
                 {isChatting ? (
                   <>
-                    {/* Header: Bunny Name + Voice Replay + 60s Wait Counter + Finish */}
+                    {/* Header: Character Name + Live/Voice Replay + Wait Counter + Finish */}
                     <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-100">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <span
-                          className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: cfg.accentHex }}
-                        />
-                        <span className="text-xs font-bold text-[#141519] truncate">
-                          {cfg.name} 음성대화
+                        <span className="text-xs shrink-0" aria-hidden="true">
+                          {SPECIES_EMOJIS[cfg.species || 'bunny']}
                         </span>
-                        <button
-                          type="button"
-                          onClick={() => onReplayBunnyVoice(cfg.id)}
-                          title={`${cfg.name} 목소리 다시 듣기`}
-                          className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                            b.isSpeaking
-                              ? 'bg-emerald-500 text-white'
-                              : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
-                          }`}
-                        >
-                          <Volume2 className="w-3 h-3" />
-                          {b.isSpeaking ? `${cfg.name} 말하는 중` : '다시 듣기'}
-                        </button>
+                        <span className="text-xs font-bold text-[#141519] truncate">
+                          {cfg.name} 대화
+                        </span>
+                        {isGeminiLiveActive ? (
+                          <span
+                            className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 ${
+                              b.isSpeaking
+                                ? 'bg-emerald-500 text-white'
+                                : 'bg-indigo-600 text-white'
+                            }`}
+                            title="Gemini Live 실시간 네이티브 음성대화 연결됨"
+                          >
+                            ⚡ {b.isSpeaking ? '말하는 중' : 'Live 실시간'}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onReplayBunnyVoice(cfg.id)}
+                            title={`${cfg.name} 목소리 다시 듣기`}
+                            className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                              b.isSpeaking
+                                ? 'bg-emerald-500 text-white'
+                                : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
+                            }`}
+                          >
+                            <Volume2 className="w-3 h-3" />
+                            {b.isSpeaking ? `${cfg.name} 말하는 중` : '다시 듣기'}
+                          </button>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {!b.isThinking && !b.isSpeaking && isVoiceListening && (
+                        {!b.isThinking && !b.isSpeaking && (isVoiceListening || isGeminiLiveActive) && (
                           <span className="inline-flex items-center gap-0.5 rounded-full bg-rose-50 border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 whitespace-nowrap">
                             <Mic className="w-2.5 h-2.5" />
-                            듣는 중
+                            듣는 중 · {chatWaitSeconds}초
                           </span>
                         )}
-                        {!b.isThinking && !b.isSpeaking && !isVoiceListening && (
+                        {!b.isThinking && !b.isSpeaking && !isVoiceListening && !isGeminiLiveActive && (
                           <span className="text-[10px] font-medium text-zinc-400 tabular-nums whitespace-nowrap">
                             대기 {chatWaitSeconds}초
                           </span>
@@ -3109,13 +3440,13 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                       </div>
                     </div>
 
-                    {/* Quick Bunny Switcher inside Chat Bubble so user can switch designated bunny anytime */}
+                    {/* Quick Animal Character Switcher inside Chat Bubble */}
                     {characters.length > 1 && (
                       <div className="mt-1.5 flex items-center gap-1 overflow-x-auto pb-1 border-b border-zinc-100">
                         <span className="text-[9px] font-semibold text-zinc-400 shrink-0 mr-0.5">
                           대화 상대:
                         </span>
-                        {characters.map((otherCfg) => {
+                        {(enabledCharacters.length > 0 ? enabledCharacters : characters).map((otherCfg) => {
                           const selected = otherCfg.id === cfg.id;
                           return (
                             <button
@@ -3129,12 +3460,9 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                                   ? 'bg-[#141519] text-white'
                                   : 'bg-[#F4F5F7] hover:bg-zinc-200 text-zinc-600'
                               }`}
-                              title={`${otherCfg.name} 지명하여 ${otherCfg.name} 목소리로 대화하기`}
+                              title={`${otherCfg.name} 부르고 대화하기`}
                             >
-                              <span
-                                className="w-2 h-2 rounded-full shrink-0"
-                                style={{ backgroundColor: otherCfg.accentHex }}
-                              />
+                              <span>{SPECIES_EMOJIS[otherCfg.species || 'bunny']}</span>
                               {otherCfg.name}
                             </button>
                           );
@@ -3297,7 +3625,7 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
         );
       })}
 
-      {/* Bunny Designation & Voice Conversation Bar Above the Fairytale 3D Cottage Roof */}
+      {/* Animal Character Designation & Name-Call Conversation Bar Above the Fairytale 3D Cottage Roof */}
       {characters.length > 0 && (
         <div
           ref={houseTagDomRef}
@@ -3306,11 +3634,11 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
           className="pointer-events-auto absolute z-30 will-change-transform"
         >
           <div className="flex flex-col items-center gap-1">
-            <div className="flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-[#141519]/95 backdrop-blur-md text-white px-2.5 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.32)] border border-white/15">
+            <div className="flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-[#141519]/95 backdrop-blur-md text-white px-2.5 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.32)] border border-white/15 max-w-[340px]">
               <span className="text-[10px] font-bold text-amber-300 px-1 whitespace-nowrap">
-                🐰 토끼 지명 대화
+                🐾 이름 불러 대화
               </span>
-              {(enabledCharacters.length > 0 ? enabledCharacters : characters.slice(0, 3)).map(
+              {(enabledCharacters.length > 0 ? enabledCharacters : characters.slice(0, 4)).map(
                 (cfg) => {
                   const st = bunnies[cfg.id]?.status ?? 'IN_HOUSE';
                   const isInside = st === 'IN_HOUSE';
@@ -3321,19 +3649,16 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                       key={cfg.id}
                       type="button"
                       onClick={() => onSummonBunny(cfg.id)}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all whitespace-nowrap ${
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold transition-all whitespace-nowrap ${
                         isTalking
                           ? 'bg-white text-[#141519] shadow-sm scale-105'
                           : isInside
                           ? 'bg-white/10 text-zinc-100 hover:bg-white/25'
                           : 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/35'
                       }`}
-                      title={`${cfg.name} 지명하고 ${cfg.name} 목소리로 대화하기`}
+                      title={`"${cfg.name}" 이름을 부르거나 클릭해서 대화하기`}
                     >
-                      <span
-                        className="w-2 h-2 rounded-full shrink-0"
-                        style={{ backgroundColor: cfg.accentHex }}
-                      />
+                      <span>{SPECIES_EMOJIS[cfg.species || 'bunny']}</span>
                       <span>{cfg.name}</span>
                       {isTalking && (
                         <Volume2

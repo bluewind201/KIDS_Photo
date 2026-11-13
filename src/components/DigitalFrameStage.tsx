@@ -30,8 +30,9 @@ interface DigitalFrameStageProps {
   isPlaying: boolean;
   transitionMode: FrameTransitionMode;
   isSplitActive: boolean;
-  wakeWord: string;
+  callHintLabel?: string;
   isVoiceListening: boolean;
+  isGeminiLiveActive?: boolean;
   isAssistantLoading: boolean;
   albumPasswords?: Record<string, string>;
   photoAnalysisProgress?: PhotoAnalysisProgress | null;
@@ -58,8 +59,9 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   isPlaying,
   transitionMode,
   isSplitActive,
-  wakeWord,
+  callHintLabel = '토순아 · 코코야',
   isVoiceListening,
+  isGeminiLiveActive = false,
   isAssistantLoading,
   albumPasswords,
   photoAnalysisProgress,
@@ -458,14 +460,31 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
           <button
             type="button"
             onClick={onToggleVoiceListening}
+            title="캐릭터 이름을 부르면 바로 응답합니다"
             className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold shadow-sm transition-colors whitespace-nowrap ${
-              isVoiceListening
+              isGeminiLiveActive
+                ? 'bg-indigo-600 text-white'
+                : isVoiceListening
                 ? 'bg-[#141519] text-white'
                 : 'bg-white/95 text-[#141519] hover:bg-white'
             }`}
           >
-            <Mic className={`w-3.5 h-3.5 ${isVoiceListening ? 'text-emerald-400' : 'text-rose-500'}`} />
-            <span>{isVoiceListening ? `${wakeWord} 대기중` : wakeWord}</span>
+            <Mic
+              className={`w-3.5 h-3.5 ${
+                isGeminiLiveActive
+                  ? 'text-amber-300 animate-pulse'
+                  : isVoiceListening
+                  ? 'text-emerald-400'
+                  : 'text-rose-500'
+              }`}
+            />
+            <span>
+              {isGeminiLiveActive
+                ? '⚡ Gemini 실시간 대화중'
+                : isVoiceListening
+                ? `이름 호출 대기 (${callHintLabel})`
+                : `이름 불러 대화 (${callHintLabel})`}
+            </span>
           </button>
 
           {!showAskInput ? (

@@ -154,19 +154,50 @@ export type BunnyId = string;
 
 export type BunnyVoiceSpeaker = 'tosuni' | 'tosili' | 'toddungi' | 'tobyeori' | 'togureum';
 
-export type BunnyAccessoryType = 'ribbon' | 'clover' | 'backpack' | 'star' | 'scarf';
+export type AnimalSpecies =
+  | 'bunny'
+  | 'puppy'
+  | 'bear'
+  | 'kitty'
+  | 'fox'
+  | 'hamster'
+  | 'penguin'
+  | 'dino';
+
+export type BunnyAccessoryType =
+  | 'none'
+  | 'ribbon'
+  | 'bowtie'
+  | 'clover'
+  | 'backpack'
+  | 'star'
+  | 'scarf'
+  | 'crown'
+  | 'beret'
+  | 'cape'
+  | 'glasses'
+  | 'heart_hug'
+  | 'flower_hat';
 
 export type BunnyToyType = 'ball' | 'pinwheel' | 'blocks' | 'car' | 'bubbles';
+
+export type EnglishFrequencyMode = 'off' | 'rare' | 'normal' | 'often';
+
+export type GeminiVoiceMode = 'gemini_live' | 'pro_model' | 'standard';
 
 export interface BunnyCharacterConfig {
   id: BunnyId;
   name: string;
+  /** Legacy field kept optional-compatible; voice calling now automatically matches `name` + Korean vocatives! */
   callWord: string;
+  species?: AnimalSpecies;
   personaPrompt: string;
   greeting: string;
   furHex: string;
+  earInnerHex?: string;
   outfitHex: string;
   accentHex: string;
+  showOutfit?: boolean;
   accessory: BunnyAccessoryType;
   favoriteToy: BunnyToyType;
   voiceSpeaker: BunnyVoiceSpeaker;

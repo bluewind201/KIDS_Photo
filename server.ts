@@ -478,6 +478,9 @@ app.post('/api/gemini/bunny-chat', async (req, res) => {
       userMessage,
       weatherCondition = '맑음',
       childAgeStage = 'age_5',
+      englishFrequency = 'rare',
+      allowEnglishThisTurn = false,
+      geminiVoiceMode = 'gemini_live',
       growthStars = 0,
       userTurnCount = 1,
       isAutoFollowUpAfterSilence = false,
@@ -492,6 +495,9 @@ app.post('/api/gemini/bunny-chat', async (req, res) => {
       userMessage: string;
       weatherCondition?: string;
       childAgeStage?: 'age_3_4' | 'age_5' | 'age_6_7';
+      englishFrequency?: 'off' | 'rare' | 'normal' | 'often';
+      allowEnglishThisTurn?: boolean;
+      geminiVoiceMode?: 'gemini_live' | 'pro_model' | 'standard';
       growthStars?: number;
       userTurnCount?: number;
       isAutoFollowUpAfterSilence?: boolean;
@@ -585,8 +591,13 @@ app.post('/api/gemini/bunny-chat', async (req, res) => {
         trimmedMsg
       );
 
+    const allowEnglish =
+      !isAutoFollowUpAfterSilence &&
+      englishFrequency !== 'off' &&
+      (Boolean(allowEnglishThisTurn) || Boolean(requestFlashcard));
+
     const canAutoInsertMidChatCard =
-      !isAutoFollowUpAfterSilence && !userSpokeEnglish && (requestFlashcard || userTurnCount >= 2);
+      allowEnglish && !userSpokeEnglish && (requestFlashcard || userTurnCount >= 2);
 
     const systemInstruction = `${persona}
 현재 대화 중인 아이의 성장 단계: **${growthGuidance}** (지금까지 아이가 영어로 성공해 모은 성장 별: ${growthStars}개).
@@ -596,24 +607,23 @@ app.post('/api/gemini/bunny-chat', async (req, res) => {
 1. **아이 성장 눈높이 맞춤 한국어 반말**: 따뜻하고 신나는 짧은 반말(2~3문장 이내)로 이야기해.
 ${
   isAutoFollowUpAfterSilence
-    ? `2. **1분 동안 아이 대답이 없었을 때 자연스러운 대화 이어가기**:
-   - 방금 아이가 1분 동안 말을 하지 않았어(쑥스럽거나 생각 중일 수 있어). 절대 재촉하거나 부담 주지 말고 "헤헤~ 조금 쑥스러웠구나, 괜찮아! 다음엔 같이 말해 보자~" 하고 따뜻하게 넘어가면서, 아이가 대답하기 쉬운 새로운 재미있는 질문(예: 눈사람 이야기, 좋아하는 간식, 재미있었던 소풍 추억 등)으로 자연스럽게 다음 대화를 이어가 줘!
+    ? `2. **대답 대기 시간 동안 아이 대답이 없었을 때 자연스러운 대화 이어가기**:
+   - 방금 아이가 대답 대기 시간 동안 말을 하지 않았어(쑥스럽거나 생각 중일 수 있어). 절대 재촉하거나 부담 주지 말고 "헤헤~ 조금 쑥스러웠구나, 괜찮아! 다음엔 같이 말해 보자~" 하고 따뜻하게 넘어가면서, 아이가 대답하기 쉬운 새로운 재미있는 질문으로 자연스럽게 다음 대화를 이어가 줘!
    - 이때는 shouldSuggestEnglishReask와 shouldShowFlashcard를 모두 반드시 false로 설정해!`
-    : `2. **음성으로 따라 말하게 유도하는 영어 재질의 가이드 ("이렇게 영어로 다시 말해볼래?")**:
-   - 아이가 한국어로 말했을 때 약 40% 확률로 shouldSuggestEnglishReask를 true로 설정하고, 아이 성장 단계에 맞는 영어 표현(englishPhrase), 한글 발음(koreanPhonetic), 그리고 버튼이 아니라 **아이 목소리로 직접 따라 말해보게 유도하는 다정한 멘트**(englishNudgeText, 예: "우와~ 우리 입으로 크게 영어로도 말해볼까? 'Where did we go?' 하고 소리 내어 말해봐~!")를 알려줘.
-   - 만약 아이가 방금 영어 단어나 문장을 소리 내어 말했으면(${userSpokeEnglish ? '방금 아이가 영어 발화를 시도했음!' : '한국어 발화'}), 폭풍 칭찬("우와아!! 목소리로 영어를 진짜 멋지게 말했어! 최고야~!")을 해주고 shouldSuggestEnglishReask는 false로 해줘!
-3. **대화 도중 자연스럽게 이어 붙이는 대형 그림 단어카드 (따라 말하기 유도)**:
+    : !allowEnglish
+    ? `2. **영어 빈도 제한 (이번 턴은 순수 한국어 대화만!)**:
+   - 만약 아이가 방금 영어를 말했으면(${userSpokeEnglish ? '방금 아이가 영어 발화를 시도했음!' : '한국어 발화'}) 신나게 칭찬해 주고, 그 외에는 **이번 턴에 절대 영어 단어나 영어 따라 말하기를 꺼내지 마!** 100% 자연스럽고 재미있는 한국어로만 대화하고, shouldSuggestEnglishReask와 shouldShowFlashcard를 반드시 모두 false로 설정해!`
+    : `2. **음성으로 따라 말하게 유도하는 영어 가이드 (사용자 지정 빈도에 맞춘 차례!)**:
+   - 이번 턴은 영어 표현을 1개 소개해도 되는 차례야! shouldShowFlashcard 또는 shouldSuggestEnglishReask 중 **하나만** true로 설정해(둘 다 true 금지).
+   - shouldSuggestEnglishReask를 true로 할 경우 아이 성장 단계에 맞는 영어 표현(englishPhrase), 한글 발음(koreanPhonetic), 다정한 음성 유도 멘트(englishNudgeText)를 넣어줘.
    - ${
-     !canAutoInsertMidChatCard
-       ? '지금은 첫 인사 직후이거나 영어 칭찬 중이므로 shouldShowFlashcard는 false로 설정해.'
-       : requestFlashcard
-       ? '지금 단어카드가 요청되었으니 반드시 shouldShowFlashcard를 true로 설정해!'
-       : '현재 아이와 대화가 무르익은 중간 대화 상태야! 대화 속 소재(눈사람, 눈덩이, 과일, 동물, 바다, 날씨, 장난감 등)와 자연스럽게 이어질 때 가끔씩(약 40% 확률) shouldShowFlashcard를 true로 설정해서 큰 그림 단어카드를 짜잔 보여주며 "짜잔~ 우리 방금 말한 단어 큰 카드로 볼까? 같이 큰 소리로 따라 해봐!" 하고 아이가 소리 내어 따라 말하도록 유도해 줘! (shouldShowFlashcard가 true일 때는 아이가 하나에만 집중할 수 있게 shouldSuggestEnglishReask는 false로 해줘.)'
+     canAutoInsertMidChatCard
+       ? '또는 대화 속 소재와 어울리는 큰 그림 단어카드(shouldShowFlashcard=true)를 보여줘도 좋아! flashcardChoices에는 정답 영어단어 1개와 쉬운 오답 2개(총 3개)를 넣어줘.'
+       : 'shouldShowFlashcard는 false로 해줘.'
    }
-   - ${activeFlashcardContext ? `직전 단어카드는 "${activeFlashcardContext.koreanWord}"(${activeFlashcardContext.englishWord})였어. 아이가 이를 따라 말했으면 신나게 칭찬해 줘!` : ''}
-   - flashcardChoices에는 정답 영어단어 1개와 쉬운 오답 2개(총 3개)를 넣어줘.`
+   - ${activeFlashcardContext ? `직전 단어카드는 "${activeFlashcardContext.koreanWord}"(${activeFlashcardContext.englishWord})였어.` : ''}`
 }
-4. **추억 사진 찾아주기**:
+3. **추억 사진 찾아주기**:
    - 아이가 "내가 언제 어디 갔었지?", "바다 사진 보여줘", "눈썰매장 언제 갔어?" 처럼 다녀온 곳이나 사진을 물어보면 아래 앨범 목록과 이미지를 분석해 isPhotoMemoryQuery를 true로 설정하고 matchedPhotoIds(최대 6개)를 골라 추억을 다정하게 이야기해 줘.
 
 [등록된 가족 디지털 앨범 사진 목록]
@@ -654,8 +664,9 @@ ${photoCatalogText || '(등록된 사진 없음)'}`;
         : trimmedMsg,
     });
 
+    const selectedModel = geminiVoiceMode === 'pro_model' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
     const chat = ai.chats.create({
-      model: 'gemini-2.5-flash',
+      model: selectedModel,
       history: normalizedHistory,
       config: {
         systemInstruction,

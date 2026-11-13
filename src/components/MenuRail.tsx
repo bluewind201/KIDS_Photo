@@ -23,7 +23,7 @@ export type SettingsTabKey =
   | 'life';
 
 interface MenuRailProps {
-  wakeWord: string;
+  callHintLabel?: string;
   isVoiceListening: boolean;
   ttsEnabled: boolean;
   powerScheduleEnabled: boolean;
@@ -34,7 +34,7 @@ interface MenuRailProps {
 }
 
 export const MenuRail: React.FC<MenuRailProps> = ({
-  wakeWord,
+  callHintLabel = '토순아 · 코코야',
   isVoiceListening,
   ttsEnabled,
   powerScheduleEnabled,
@@ -77,7 +77,7 @@ export const MenuRail: React.FC<MenuRailProps> = ({
         <button
           type="button"
           onClick={onToggleVoiceListening}
-          title={`음성 호출 (${wakeWord})`}
+          title={`캐릭터 이름 호출 마이크 (${callHintLabel})`}
           className={`w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${
             isVoiceListening
               ? 'bg-emerald-400 text-[#141519]'
@@ -90,7 +90,7 @@ export const MenuRail: React.FC<MenuRailProps> = ({
         <button
           type="button"
           onClick={() => onOpenSettings('characters')}
-          title="3D 동물친구 · 아이 성장 단계 설정"
+          title="3D 동물친구 · 아이 인형 커스텀 · 영어 설정"
           className="w-9 h-9 rounded-xl hover:bg-white/10 text-zinc-300 flex items-center justify-center transition-colors"
         >
           <Sparkles className="w-4 h-4" />

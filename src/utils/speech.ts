@@ -20,6 +20,11 @@ export interface AndroidSpeechBridgeInterface {
   isSttAvailable: () => boolean;
   startListening: (lang: string) => void;
   stopListening: () => void;
+  hasMicPermission?: () => boolean;
+  ensureMicPermission?: () => void;
+  isPhoneGeminiInstalled?: () => boolean;
+  launchPhoneGeminiLive?: (personaPrompt: string) => boolean;
+  openExternalUrl?: (url: string) => void;
 }
 
 declare global {

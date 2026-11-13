@@ -16,7 +16,12 @@ import {
   INITIAL_MART_TICKERS,
   INITIAL_SCHEDULES,
 } from './data/initialAlbums';
-import { INITIAL_CHARACTERS } from './data/initialCharacters';
+import {
+  buildKoreanNameCallVariants,
+  INITIAL_CHARACTERS,
+  SPECIES_EMOJIS,
+  upgradeSavedCharacterRoster,
+} from './data/initialCharacters';
 import {
   AssistantInquiryResult,
   BunnyBehaviorStatus,
@@ -29,7 +34,9 @@ import {
   ChildGrowthStage,
   DigitalAlbum,
   EnglishCoachPrompt,
+  EnglishFrequencyMode,
   FrameTransitionMode,
+  GeminiVoiceMode,
   LayoutSide,
   MartTickerItem,
   PhotoAnalysisProgress,
@@ -48,6 +55,7 @@ import {
   saveCalendarSources,
   testAndPreviewIcsCalendar,
 } from './utils/calendarSync';
+import { GeminiLiveVoiceController } from './utils/geminiLiveSession';
 import { deleteAlbumPhotosFromVault } from './utils/photoCacheDb';
 import { runAlbumVaultAndAiPipeline } from './utils/photoSyncPipeline';
 import {
@@ -65,6 +73,7 @@ import {
   checkGeminiVisionAvailable,
   fetchWeatherUnified,
   FRAME_SETTINGS_STORAGE_KEY,
+  getSavedGeminiApiKey,
   resolvePublicShareLinkUnified,
   tryBackendJson,
 } from './utils/standaloneApi';
@@ -402,9 +411,16 @@ export default function App() {
   const [weatherPosition, setWeatherPosition] = useState<LayoutSide>('left');
   const [weatherEffectMode, setWeatherEffectMode] = useState<WeatherEffectMode>('auto');
 
-  // Child Growth Stage & Spoken English Stars
+  // Child Growth Stage, English Pacing, Wait Duration & Gemini Live Voice Mode
   const [childAgeStage, setChildAgeStage] = useState<ChildGrowthStage>('age_5');
+  const [englishFrequency, setEnglishFrequency] = useState<EnglishFrequencyMode>('rare');
+  const [englishWaitSeconds, setEnglishWaitSeconds] = useState<number>(30);
+  const [geminiVoiceMode, setGeminiVoiceMode] = useState<GeminiVoiceMode>('gemini_live');
+  const [isGeminiLiveActive, setIsGeminiLiveActive] = useState<boolean>(false);
   const [growthStars, setGrowthStars] = useState<number>(0);
+  const geminiLiveControllerRef = useRef<GeminiLiveVoiceController | null>(null);
+  const geminiLiveActiveRef = useRef<boolean>(false);
+  const turnsSinceLastEnglishRef = useRef<number>(0);
 
   // Scheduled Power-Saving & Away Screen-Off State
   const [powerSchedule, setPowerSchedule] = useState<PowerScheduleConfig>(DEFAULT_POWER_SCHEDULE);
@@ -556,9 +572,13 @@ export default function App() {
   const [characters, setCharacters] = useState<BunnyCharacterConfig[]>(INITIAL_CHARACTERS);
   const [hasVillageAwakened, setHasVillageAwakened] = useState(false);
   const [activeChatBunny, setActiveChatBunny] = useState<BunnyId | null>(null);
-  const [chatWaitSeconds, setChatWaitSeconds] = useState<number>(60);
+  const [chatWaitSeconds, setChatWaitSeconds] = useState<number>(30);
   const silenceAutoCountRef = useRef<number>(0);
   const cardAutoDismissTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setChatWaitSeconds(englishWaitSeconds);
+  }, [englishWaitSeconds]);
 
   const [bunnyHistories, setBunnyHistories] = useState<Record<BunnyId, BunnyChatMessage[]>>({});
   const [bunnies, setBunnies] = useState<Record<BunnyId, BunnyIndividualState>>(() =>
@@ -929,6 +949,9 @@ export default function App() {
       weatherPosition?: LayoutSide;
       weatherEffectMode?: WeatherEffectMode;
       childAgeStage?: ChildGrowthStage;
+      englishFrequency?: EnglishFrequencyMode;
+      englishWaitSeconds?: number;
+      geminiVoiceMode?: GeminiVoiceMode;
       growthStars?: number;
       powerSchedule?: PowerScheduleConfig;
       characters?: BunnyCharacterConfig[];
@@ -958,6 +981,29 @@ export default function App() {
       ) {
         setChildAgeStage(saved.childAgeStage);
       }
+      if (
+        saved.englishFrequency === 'off' ||
+        saved.englishFrequency === 'rare' ||
+        saved.englishFrequency === 'normal' ||
+        saved.englishFrequency === 'often'
+      ) {
+        setEnglishFrequency(saved.englishFrequency);
+      }
+      if (
+        typeof saved.englishWaitSeconds === 'number' &&
+        saved.englishWaitSeconds >= 10 &&
+        saved.englishWaitSeconds <= 180
+      ) {
+        setEnglishWaitSeconds(saved.englishWaitSeconds);
+        setChatWaitSeconds(saved.englishWaitSeconds);
+      }
+      if (
+        saved.geminiVoiceMode === 'gemini_live' ||
+        saved.geminiVoiceMode === 'pro_model' ||
+        saved.geminiVoiceMode === 'standard'
+      ) {
+        setGeminiVoiceMode(saved.geminiVoiceMode);
+      }
       if (typeof saved.growthStars === 'number') {
         setGrowthStars(saved.growthStars);
       }
@@ -965,17 +1011,7 @@ export default function App() {
         setPowerSchedule(saved.powerSchedule);
       }
       if (Array.isArray(saved.characters) && saved.characters.length > 0) {
-        setCharacters(
-          saved.characters.map((c) => {
-            if (c.id === 'tobyeori' && c.voiceSpeaker === 'tosuni') {
-              return { ...c, voiceSpeaker: 'tobyeori' };
-            }
-            if (c.id === 'togureum' && c.voiceSpeaker === 'tosili') {
-              return { ...c, voiceSpeaker: 'togureum' };
-            }
-            return c;
-          })
-        );
+        setCharacters(upgradeSavedCharacterRoster(saved.characters));
       }
       if (saved.locationInfo?.city) setLocationInfo(saved.locationInfo);
       if (Array.isArray(saved.schedules) && saved.schedules.length > 0) setSchedules(saved.schedules);
@@ -1026,6 +1062,9 @@ export default function App() {
       weatherPosition,
       weatherEffectMode,
       childAgeStage,
+      englishFrequency,
+      englishWaitSeconds,
+      geminiVoiceMode,
       growthStars,
       powerSchedule,
       characters,
@@ -1058,6 +1097,9 @@ export default function App() {
     weatherPosition,
     weatherEffectMode,
     childAgeStage,
+    englishFrequency,
+    englishWaitSeconds,
+    geminiVoiceMode,
     growthStars,
     powerSchedule,
     characters,
@@ -1066,12 +1108,31 @@ export default function App() {
     martItems,
   ]);
 
-  // Scheduled Forced-Wake & Away/Night Power-Saving Engine
-  const enterSleepMode = useCallback((reason: SleepReason) => {
-    stopCurrentSpeech();
-    setActiveChatBunny(null);
-    setSleepState({ sleeping: true, reason });
+  const stopGeminiLiveSession = useCallback(() => {
+    if (geminiLiveControllerRef.current) {
+      geminiLiveControllerRef.current.stop();
+      geminiLiveControllerRef.current = null;
+    }
+    geminiLiveActiveRef.current = false;
+    setIsGeminiLiveActive(false);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopGeminiLiveSession();
+    };
+  }, [stopGeminiLiveSession]);
+
+  // Scheduled Forced-Wake & Away/Night Power-Saving Engine
+  const enterSleepMode = useCallback(
+    (reason: SleepReason) => {
+      stopCurrentSpeech();
+      stopGeminiLiveSession();
+      setActiveChatBunny(null);
+      setSleepState({ sleeping: true, reason });
+    },
+    [stopGeminiLiveSession]
+  );
 
   const wakeTemporarilyFor30Min = useCallback(() => {
     const now = Date.now();
@@ -1369,13 +1430,17 @@ export default function App() {
     });
   }, []);
 
-  // AI Smart Frame Assistant Query Handler
+  // AI Smart Frame Assistant Query Handler (supports answering in a called character's voice!)
   const handleAssistantInquiry = useCallback(
-    async (queryText: string) => {
+    async (queryText: string, speakingCharacter?: BunnyCharacterConfig) => {
       if (!queryText.trim()) return;
       lastActivityRef.current = Date.now();
       setIsAssistantLoading(true);
-      showTemporaryToast(`AI 문의 확인 중: "${queryText}"`);
+      showTemporaryToast(
+        speakingCharacter
+          ? `${SPECIES_EMOJIS[speakingCharacter.species || 'bunny']} ${speakingCharacter.name}가 확인 중: "${queryText}"`
+          : `AI 문의 확인 중: "${queryText}"`
+      );
 
       try {
         const data = await askAssistantUnified({
@@ -1387,9 +1452,21 @@ export default function App() {
           schedules: mergedSchedules,
         });
 
-        setActiveInquiry(data);
+        const enriched: AssistantInquiryResult = speakingCharacter
+          ? {
+              ...data,
+              bunnySpeaker: speakingCharacter.voiceSpeaker,
+              bunnySpeakerName: speakingCharacter.name,
+            }
+          : data;
+
+        setActiveInquiry(enriched);
         setSplitRemainingSeconds(120);
-        speakText(data.spokenSummary, 'assistant', ttsEnabled);
+        speakText(
+          enriched.spokenSummary,
+          speakingCharacter ? speakingCharacter.voiceSpeaker : 'assistant',
+          ttsEnabled
+        );
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : '일시적인 오류가 발생했습니다.';
         setActiveInquiry({
@@ -1424,16 +1501,18 @@ export default function App() {
     });
   }, []);
 
-  // Finish Chat -> Bunny hops out to weather-appropriate 3D outdoor activity (and clears flashcards!)
+  // Finish Chat -> Animal hops out to weather-appropriate 3D outdoor activity (and stops Gemini Live if active!)
   const handleFinishBunnyChat = useCallback(
     (bunnyId: BunnyId) => {
+      const wasLive = geminiLiveActiveRef.current;
       stopCurrentSpeech();
+      stopGeminiLiveSession();
       if (cardAutoDismissTimerRef.current !== null) {
         window.clearTimeout(cardAutoDismissTimerRef.current);
         cardAutoDismissTimerRef.current = null;
       }
       silenceAutoCountRef.current = 0;
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
       setActiveChatBunny((curr) => (curr === bunnyId ? null : curr));
       const charCfg = characters.find((c) => c.id === bunnyId);
       const nextOut = pickOutdoorStateForCharacter(
@@ -1454,11 +1533,32 @@ export default function App() {
           activeFlashcard: null,
         },
       }));
+
+      // Resume passive name-call listening right after ending a Gemini Live session!
+      if (wasLive && latestStateRef.current.isVoiceListening) {
+        window.setTimeout(() => {
+          if (!latestStateRef.current.isVoiceListening || geminiLiveActiveRef.current) return;
+          const bridge = getAndroidSpeechBridge();
+          if (bridge) {
+            try {
+              bridge.startListening('ko-KR');
+            } catch {
+              // ignore
+            }
+          } else {
+            try {
+              recognitionRef.current?.start();
+            } catch {
+              // ignore
+            }
+          }
+        }, 380);
+      }
     },
-    [characters, activePhotos.length, effectiveWeather]
+    [characters, activePhotos.length, effectiveWeather, englishWaitSeconds, stopGeminiLiveSession]
   );
 
-  // Send Kid's Message (or 60-sec Silence Auto-Continue) to Multi-Turn Gemini 3.8 Flash Chatbot!
+  // Send Kid's Message (or Configurable Wait-Time Auto-Continue) to Gemini Live OR Multi-Turn Gemini Chat!
   const handleSendBunnyMessage = useCallback(
     async (
       bunnyId: BunnyId,
@@ -1475,8 +1575,28 @@ export default function App() {
       if (!isAutoSilence) {
         lastActivityRef.current = Date.now();
         silenceAutoCountRef.current = 0;
+        turnsSinceLastEnglishRef.current += 1;
       }
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
+
+      // Route directly through active real-time Gemini Live WebSocket session if connected!
+      if (geminiLiveControllerRef.current?.isActive()) {
+        if (!isAutoSilence) {
+          setBunnyHistories((prev) => ({
+            ...prev,
+            [bunnyId]: [
+              ...(prev[bunnyId] ?? []),
+              { id: `u-${Date.now()}`, role: 'user' as const, text },
+            ],
+          }));
+          geminiLiveControllerRef.current.sendTextTurn(text);
+        } else {
+          geminiLiveControllerRef.current.sendTextTurn(
+            '(아이가 조용히 듣고 있어요. 영어 단어 강요 없이 다정한 한국어로 재미있는 다음 질문이나 이야기를 1~2문장으로 건네주세요!)'
+          );
+        }
+        return;
+      }
 
       const priorHistory = bunnyHistories[bunnyId] ?? [];
       const updatedHistory = isAutoSilence
@@ -1496,6 +1616,19 @@ export default function App() {
 
       const userTurnCount = updatedHistory.filter((m) => m.role === 'user').length;
       const currentCard = isAutoSilence ? null : bunnies[bunnyId]?.activeFlashcard ?? null;
+      const cooldownInterval =
+        englishFrequency === 'often'
+          ? 3
+          : englishFrequency === 'normal'
+          ? 5
+          : englishFrequency === 'rare'
+          ? 8
+          : Number.POSITIVE_INFINITY;
+      const allowEnglishThisTurn =
+        !isAutoSilence &&
+        englishFrequency !== 'off' &&
+        userTurnCount >= 2 &&
+        turnsSinceLastEnglishRef.current >= cooldownInterval;
 
       setBunnies((prev) => ({
         ...prev,
@@ -1541,6 +1674,9 @@ export default function App() {
           userMessage: text,
           weatherCondition: weatherConditionLabel,
           childAgeStage,
+          englishFrequency,
+          allowEnglishThisTurn,
+          geminiVoiceMode,
           growthStars,
           userTurnCount,
           isAutoFollowUpAfterSilence: isAutoSilence,
@@ -1553,9 +1689,9 @@ export default function App() {
 
         let reply = data.replyText || '우와~ 정말 신난다! 또 이야기해 줘!';
 
-        // Build English Re-Ask Coach if suggested by Gemini (never on silence follow-up)
+        // Build English Re-Ask Coach ONLY when English is allowed this turn!
         let nextCoach: EnglishCoachPrompt | null = null;
-        if (!isAutoSilence && data.shouldSuggestEnglishReask && data.englishPhrase?.trim()) {
+        if (allowEnglishThisTurn && data.shouldSuggestEnglishReask && data.englishPhrase?.trim()) {
           nextCoach = {
             englishPhrase: data.englishPhrase.trim(),
             koreanPhonetic: data.koreanPhonetic?.trim() || data.englishPhrase.trim(),
@@ -1565,11 +1701,10 @@ export default function App() {
           };
         }
 
-        // Build Giant Mid-Conversation Picture Flashcard ONLY when a child is actively talking (userTurnCount >= 2)
+        // Build Giant Mid-Conversation Picture Flashcard ONLY when allowed by user's englishFrequency setting!
         let nextCard: BunnyFlashcard | null = null;
         if (
-          !isAutoSilence &&
-          userTurnCount >= 2 &&
+          allowEnglishThisTurn &&
           data.shouldShowFlashcard &&
           data.flashcardKorean &&
           data.flashcardEnglish
@@ -1600,17 +1735,18 @@ export default function App() {
             revealed: false,
           };
         } else if (
-          !isAutoSilence &&
+          allowEnglishThisTurn &&
           !data.isPhotoMemoryQuery &&
           !nextCoach &&
-          !currentCard &&
-          userTurnCount >= 2 &&
-          userTurnCount % 3 === 0
+          !currentCard
         ) {
-          // Ensure natural occasional mid-conversation card tailored to the child's growth stage
           const autoStageCard = pickRandomFlashcard(undefined, childAgeStage);
           nextCard = autoStageCard;
-          reply = `${reply} 참! 우리 이야기하다 생각났는데, 짜잔~ "${autoStageCard.koreanWord}"는 영어로 "${autoStageCard.phonetic}"라고 해! 같이 크게 말해볼래?`;
+          reply = `${reply} 참! "${autoStageCard.koreanWord}"는 영어로 "${autoStageCard.phonetic}"라고 해! 천천히 따라 말해볼래?`;
+        }
+
+        if (nextCard || nextCoach) {
+          turnsSinceLastEnglishRef.current = 0;
         }
 
         const spokenReply = nextCoach ? `${reply} ${nextCoach.nudgeText}` : reply;
@@ -1680,7 +1816,6 @@ export default function App() {
         speakText(spokenReply, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
           setBunnySpeakingFlag(bunnyId, speaking);
           if (!speaking && nextCard) {
-            // Model the English word aloud once right after introducing the giant card so the child can repeat it!
             speakEnglishPhrase(
               nextCard.englishWord,
               charCfg?.voiceSpeaker ?? 'tosuni',
@@ -1713,13 +1848,15 @@ export default function App() {
       characters,
       childAgeStage,
       effectiveWeather,
+      englishFrequency,
+      englishWaitSeconds,
+      geminiVoiceMode,
       growthStars,
       setBunnySpeakingFlag,
     ]
   );
 
-  // 1-Minute (60-Second) Patient Wait Timer during Active Child-Bunny Chat!
-  // Waits a full 60s for the child to speak before gently continuing to the next conversational turn.
+  // Configurable Patient Wait Timer during Active Child-Character Chat!
   const activeBunnyState = activeChatBunny ? bunnies[activeChatBunny] : null;
   const isActiveBunnyBusy = Boolean(
     activeBunnyState?.isThinking || activeBunnyState?.isSpeaking
@@ -1727,7 +1864,7 @@ export default function App() {
 
   useEffect(() => {
     if (!activeChatBunny || sleepState.sleeping) {
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
       return;
     }
     if (isActiveBunnyBusy) {
@@ -1738,28 +1875,29 @@ export default function App() {
       setChatWaitSeconds((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [activeChatBunny, sleepState.sleeping, isActiveBunnyBusy]);
+  }, [activeChatBunny, sleepState.sleeping, isActiveBunnyBusy, englishWaitSeconds]);
 
   useEffect(() => {
     if (!activeChatBunny || sleepState.sleeping || isActiveBunnyBusy) return;
     if (chatWaitSeconds > 0) return;
 
     if (silenceAutoCountRef.current === 0) {
-      // 1 minute passed with no reply -> gently move on to a warm follow-up topic!
       silenceAutoCountRef.current = 1;
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
       handleSendBunnyMessage(activeChatBunny, '', { isAutoFollowUpAfterSilence: true });
     } else {
-      // 2 consecutive minutes with no reply -> child left, wrap up warmly and hop back out to play!
       const charCfg = characters.find((c) => c.id === activeChatBunny);
-      const byeLine = '우리 친구 다른 놀이 하러 갔나 보다~! 이따가 심심할 때 또 불러줘!';
-      speakText(byeLine, charCfg?.voiceSpeaker ?? 'tosuni', ttsEnabled);
+      const byeLine = '우리 친구 다른 놀이 하러 갔나 보다~! 이따가 심심할 때 이름 불러줘!';
+      if (!geminiLiveActiveRef.current) {
+        speakText(byeLine, charCfg?.voiceSpeaker ?? 'tosuni', ttsEnabled);
+      }
       handleFinishBunnyChat(activeChatBunny);
     }
   }, [
     activeChatBunny,
     chatWaitSeconds,
     characters,
+    englishWaitSeconds,
     handleFinishBunnyChat,
     handleSendBunnyMessage,
     isActiveBunnyBusy,
@@ -1771,13 +1909,13 @@ export default function App() {
   const handleSpeakEnglish = useCallback(
     (bunnyId: BunnyId, englishText: string) => {
       lastActivityRef.current = Date.now();
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
       const charCfg = characters.find((c) => c.id === bunnyId);
       speakEnglishPhrase(englishText, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) =>
         setBunnySpeakingFlag(bunnyId, speaking)
       );
     },
-    [characters, setBunnySpeakingFlag]
+    [characters, englishWaitSeconds, setBunnySpeakingFlag]
   );
 
   // Handle Kid Answering a Mid-Chat Giant Flashcard (via Spoken Voice OR Last-Resort Fallback Button!)
@@ -1790,7 +1928,7 @@ export default function App() {
 
       lastActivityRef.current = Date.now();
       silenceAutoCountRef.current = 0;
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
 
       const isCorrect = choice.toLowerCase() === card.englishWord.toLowerCase();
       if (isCorrect) {
@@ -1832,19 +1970,25 @@ export default function App() {
         handleDismissFlashcard(bunnyId);
       }, 4600);
 
-      speakText(praiseMsg, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
-        setBunnySpeakingFlag(bunnyId, speaking);
-        if (!speaking) {
-          speakEnglishPhrase(
-            `${card.englishWord}! ${card.exampleEn}`,
-            charCfg?.voiceSpeaker ?? 'tosuni',
-            true,
-            (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk)
-          );
-        }
-      });
+      if (geminiLiveControllerRef.current?.isActive()) {
+        geminiLiveControllerRef.current.sendTextTurn(
+          `(아이가 영어 단어 "${choice}"를 멋지게 소리 내어 말했어! 신나게 칭찬해주고 자연스럽게 한국어로 대화를 이어가 줘!)`
+        );
+      } else {
+        speakText(praiseMsg, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
+          setBunnySpeakingFlag(bunnyId, speaking);
+          if (!speaking) {
+            speakEnglishPhrase(
+              `${card.englishWord}! ${card.exampleEn}`,
+              charCfg?.voiceSpeaker ?? 'tosuni',
+              true,
+              (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk)
+            );
+          }
+        });
+      }
     },
-    [bunnies, characters, handleDismissFlashcard, setBunnySpeakingFlag]
+    [bunnies, characters, englishWaitSeconds, handleDismissFlashcard, setBunnySpeakingFlag]
   );
 
   // Instant Send Out / Call Home from Settings Character List
@@ -1882,24 +2026,30 @@ export default function App() {
     [characters, activePhotos.length, effectiveWeather, setBunnySpeakingFlag, ttsEnabled]
   );
 
-  const handleSendCharacterHomeNow = useCallback((bunnyId: BunnyId) => {
-    setActiveChatBunny((curr) => (curr === bunnyId ? null : curr));
-    setBunnies((prev) => {
-      if (!prev[bunnyId] || prev[bunnyId].status === 'IN_HOUSE') return prev;
-      return {
-        ...prev,
-        [bunnyId]: {
-          ...prev[bunnyId],
-          status: 'GOING_HOME',
-          bubbleText: '집으로 총총 들어갈게~!',
-          isSpeaking: false,
-          isThinking: false,
-          englishCoach: null,
-          activeFlashcard: null,
-        },
-      };
-    });
-  }, []);
+  const handleSendCharacterHomeNow = useCallback(
+    (bunnyId: BunnyId) => {
+      if (activeChatBunny === bunnyId) {
+        stopGeminiLiveSession();
+      }
+      setActiveChatBunny((curr) => (curr === bunnyId ? null : curr));
+      setBunnies((prev) => {
+        if (!prev[bunnyId] || prev[bunnyId].status === 'IN_HOUSE') return prev;
+        return {
+          ...prev,
+          [bunnyId]: {
+            ...prev[bunnyId],
+            status: 'GOING_HOME',
+            bubbleText: '집으로 총총 들어갈게~!',
+            isSpeaking: false,
+            isThinking: false,
+            englishCoach: null,
+            activeFlashcard: null,
+          },
+        };
+      });
+    },
+    [activeChatBunny, stopGeminiLiveSession]
+  );
 
   const handleBunnyArrivedHome = useCallback((bunnyId: BunnyId) => {
     setBunnies((prev) => {
@@ -1956,15 +2106,18 @@ export default function App() {
   const recognitionRef = useRef<BrowserSpeechRecognitionInstance | null>(null);
   const startVoiceListeningSilentlyRef = useRef<() => void>(() => {});
 
-  // Summon a Specific 3D Character -> Overhead Gemini Chat Bubble + Immediate Audible Voice + Auto-Enable Mic!
+  // Summon a Specific 3D Animal Character -> Real-Time Gemini Live Native Audio OR Standard Voice Chat!
   const handleSummonBunny = useCallback(
-    (bunnyId: BunnyId, silentGreeting = false) => {
+    (bunnyId: BunnyId, silentGreeting = false, initialUserPrompt?: string) => {
       const charCfg = characters.find((c) => c.id === bunnyId);
       if (!charCfg) return;
 
+      stopCurrentSpeech();
+      stopGeminiLiveSession();
+
       lastActivityRef.current = Date.now();
       silenceAutoCountRef.current = 0;
-      setChatWaitSeconds(60);
+      setChatWaitSeconds(englishWaitSeconds);
 
       if (!charCfg.enabled) {
         setCharacters((prev) => prev.map((c) => (c.id === bunnyId ? { ...c, enabled: true } : c)));
@@ -1973,8 +2126,8 @@ export default function App() {
       setHasVillageAwakened(true);
       setActiveChatBunny(bunnyId);
 
-      // Voice-first for children: automatically activate speech recognition if not already listening
-      startVoiceListeningSilentlyRef.current();
+      const hasSavedApiKey = getSavedGeminiApiKey().trim().length > 10;
+      const shouldStartGeminiLive = geminiVoiceMode === 'gemini_live' && hasSavedApiKey;
 
       setBunnies((prev) => {
         const next = { ...prev };
@@ -2003,8 +2156,8 @@ export default function App() {
           ...(next[bunnyId] ?? { photoIndex: 0 }),
           status: 'CHATTING',
           bubbleText: charCfg.greeting,
-          isThinking: false,
-          isSpeaking: !silentGreeting,
+          isThinking: Boolean(initialUserPrompt) || shouldStartGeminiLive,
+          isSpeaking: !silentGreeting && !shouldStartGeminiLive,
           englishCoach: null,
           activeFlashcard: null,
         };
@@ -2029,19 +2182,256 @@ export default function App() {
         };
       });
 
-      if (!silentGreeting) {
-        if (!ttsEnabled) {
-          setTtsEnabled(true);
+      if (!ttsEnabled) {
+        setTtsEnabled(true);
+      }
+
+      // 1) Real-Time Bidirectional Gemini Live Native Audio Mode (same natural voice flow as Phone Gemini Live!)
+      if (shouldStartGeminiLive) {
+        setIsVoiceListening(true);
+        // Pause passive SpeechRecognizer so WebAudio getUserMedia gets clean exclusive mic access
+        if (nativeSttRestartTimerRef.current !== null) {
+          window.clearTimeout(nativeSttRestartTimerRef.current);
+          nativeSttRestartTimerRef.current = null;
         }
+        try {
+          getAndroidSpeechBridge()?.stopListening();
+        } catch {
+          // ignore
+        }
+        try {
+          recognitionRef.current?.stop();
+        } catch {
+          // ignore
+        }
+
+        const controller = new GeminiLiveVoiceController();
+        geminiLiveControllerRef.current = controller;
+        geminiLiveActiveRef.current = true;
+        setIsGeminiLiveActive(true);
+
+        const weatherSummaryLabel = weather
+          ? `${locationInfo.city} ${weather.current.condition} ${weather.current.temp}도, 미세먼지 ${weather.airQuality.pm10Grade}`
+          : effectiveWeather === 'snow'
+          ? '함박눈 내림'
+          : effectiveWeather === 'rain'
+          ? '비 내림'
+          : '맑고 쾌청함';
+
+        const allPhotoObjects = albums.flatMap((a) => a.photos);
+
         showTemporaryToast(
-          `🐰 ${charCfg.name} 지명 완료! ${charCfg.name} 목소리로 대화를 시작해요`
+          `⚡ ${SPECIES_EMOJIS[charCfg.species || 'bunny']} ${charCfg.name}와 Gemini 실시간 음성대화를 연결해요!`
+        );
+
+        if (initialUserPrompt?.trim()) {
+          setBunnyHistories((prev) => ({
+            ...prev,
+            [bunnyId]: [
+              ...(prev[bunnyId] ?? []),
+              { id: `u-init-${Date.now()}`, role: 'user', text: initialUserPrompt.trim() },
+            ],
+          }));
+        }
+
+        void controller
+          .start({
+            character: charCfg,
+            childAgeStage,
+            englishFrequency,
+            weatherSummary: weatherSummaryLabel,
+            schedules: mergedSchedules,
+            photos: allPhotoObjects,
+            initialUserPrompt,
+            silentGreeting,
+            callbacks: {
+              onStatusChange: (st, errMsg) => {
+                if (geminiLiveControllerRef.current !== controller) return;
+                if (st === 'connected') {
+                  setIsGeminiLiveActive(true);
+                  setBunnies((prev) =>
+                    prev[bunnyId]
+                      ? { ...prev, [bunnyId]: { ...prev[bunnyId], isThinking: false } }
+                      : prev
+                  );
+                } else if (st === 'disconnected' || st === 'error') {
+                  geminiLiveActiveRef.current = false;
+                  setIsGeminiLiveActive(false);
+                  if (errMsg) {
+                    showTemporaryToast(errMsg);
+                  }
+                }
+              },
+              onSpeakingChange: (speaking) => {
+                if (geminiLiveControllerRef.current !== controller) return;
+                lastActivityRef.current = Date.now();
+                setChatWaitSeconds(latestStateRef.current.englishWaitSeconds);
+                setBunnySpeakingFlag(bunnyId, speaking);
+              },
+              onUserTranscript: (txt, isFinal) => {
+                if (geminiLiveControllerRef.current !== controller) return;
+                lastActivityRef.current = Date.now();
+                silenceAutoCountRef.current = 0;
+                setChatWaitSeconds(latestStateRef.current.englishWaitSeconds);
+                if (!isFinal || !txt.trim()) return;
+
+                if (/잘\s*놀아|대화\s*끝|그만\s*안녕|놀러\s*가/.test(txt)) {
+                  latestStateRef.current.handleFinishBunnyChat(bunnyId);
+                  return;
+                }
+
+                const openCard = latestStateRef.current.bunnies[bunnyId]?.activeFlashcard;
+                if (
+                  openCard &&
+                  !openCard.revealed &&
+                  matchesSpokenEnglishAttempt(txt, openCard.englishWord, openCard.phonetic)
+                ) {
+                  latestStateRef.current.handleAnswerFlashcard(bunnyId, openCard.englishWord);
+                  return;
+                }
+
+                turnsSinceLastEnglishRef.current += 1;
+                setBunnyHistories((prev) => ({
+                  ...prev,
+                  [bunnyId]: [
+                    ...(prev[bunnyId] ?? []),
+                    { id: `u-live-${Date.now()}`, role: 'user', text: txt.trim() },
+                  ],
+                }));
+              },
+              onModelTranscript: (txt, isTurnComplete) => {
+                if (geminiLiveControllerRef.current !== controller) return;
+                setBunnies((prev) =>
+                  prev[bunnyId]
+                    ? {
+                        ...prev,
+                        [bunnyId]: {
+                          ...prev[bunnyId],
+                          bubbleText: txt,
+                          isThinking: false,
+                        },
+                      }
+                    : prev
+                );
+                if (isTurnComplete && txt.trim()) {
+                  setBunnyHistories((prev) => ({
+                    ...prev,
+                    [bunnyId]: [
+                      ...(prev[bunnyId] ?? []),
+                      { id: `b-live-${Date.now()}`, role: 'bunny', bunnyId, text: txt.trim() },
+                    ],
+                  }));
+                }
+              },
+              onShowPhotoTool: (keyword: string) => {
+                const kw = keyword.trim().toLowerCase();
+                const pool = albumsRef.current.flatMap((a) => a.photos);
+                const matched = pool.filter((p) => {
+                  const hay = [
+                    p.title,
+                    p.location,
+                    p.season,
+                    p.people,
+                    p.albumName,
+                    p.aiSummary,
+                    ...(p.tags ?? []),
+                    ...(p.objects ?? []),
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                    .toLowerCase();
+                  return kw ? hay.includes(kw) : true;
+                });
+                const finalPhotos = matched.length > 0 ? matched.slice(0, 8) : pool.slice(0, 4);
+                if (finalPhotos[0]) {
+                  const frameIdx = latestStateRef.current.activePhotos.findIndex(
+                    (ap) => ap.id === finalPhotos[0].id
+                  );
+                  if (frameIdx >= 0) setCurrentPhotoIdx(frameIdx);
+                }
+                setActiveInquiry({
+                  category: 'photo_memories',
+                  headline: `${charCfg.name}가 찾아준 우리 가족 추억 사진`,
+                  spokenSummary: `${charCfg.name}가 추억 사진을 찾아왔어요!`,
+                  matchedPhotos: finalPhotos,
+                  bunnySpeaker: charCfg.voiceSpeaker,
+                  bunnySpeakerName: charCfg.name,
+                });
+                setSplitRemainingSeconds(120);
+                return finalPhotos;
+              },
+              onShowFlashcardTool: (nextCard: BunnyFlashcard) => {
+                const freq = latestStateRef.current.englishFrequency;
+                if (freq === 'off') return false;
+                const minGap = freq === 'often' ? 2 : freq === 'normal' ? 4 : 7;
+                if (turnsSinceLastEnglishRef.current < minGap) {
+                  return false;
+                }
+                turnsSinceLastEnglishRef.current = 0;
+                setChatWaitSeconds(latestStateRef.current.englishWaitSeconds);
+                setBunnies((prev) =>
+                  prev[bunnyId]
+                    ? { ...prev, [bunnyId]: { ...prev[bunnyId], activeFlashcard: nextCard } }
+                    : prev
+                );
+                return true;
+              },
+            },
+          })
+          .then((startedOk) => {
+            if (!startedOk && geminiLiveControllerRef.current === controller) {
+              // Seamless fallback to standard voice mode if Live socket or mic stream couldn't open
+              geminiLiveControllerRef.current = null;
+              geminiLiveActiveRef.current = false;
+              setIsGeminiLiveActive(false);
+              startVoiceListeningSilentlyRef.current();
+              if (initialUserPrompt?.trim()) {
+                void latestStateRef.current.handleSendBunnyMessage(bunnyId, initialUserPrompt.trim());
+              } else if (!silentGreeting) {
+                speakText(charCfg.greeting, charCfg.voiceSpeaker, true, (speaking) =>
+                  setBunnySpeakingFlag(bunnyId, speaking)
+                );
+              }
+            }
+          });
+        return;
+      }
+
+      // 2) Standard Voice Mode (or no Gemini API key yet)
+      startVoiceListeningSilentlyRef.current();
+
+      if (initialUserPrompt?.trim()) {
+        void handleSendBunnyMessage(bunnyId, initialUserPrompt.trim());
+        return;
+      }
+
+      if (!silentGreeting) {
+        showTemporaryToast(
+          `${SPECIES_EMOJIS[charCfg.species || 'bunny']} ${charCfg.name} 호출됨! ${charCfg.name} 목소리로 대화를 시작해요`
         );
         speakText(charCfg.greeting, charCfg.voiceSpeaker, true, (speaking) =>
           setBunnySpeakingFlag(bunnyId, speaking)
         );
       }
     },
-    [characters, activePhotos.length, effectiveWeather, setBunnySpeakingFlag, showTemporaryToast, ttsEnabled]
+    [
+      albums,
+      characters,
+      activePhotos.length,
+      childAgeStage,
+      effectiveWeather,
+      englishFrequency,
+      englishWaitSeconds,
+      geminiVoiceMode,
+      handleSendBunnyMessage,
+      locationInfo.city,
+      mergedSchedules,
+      setBunnySpeakingFlag,
+      showTemporaryToast,
+      stopGeminiLiveSession,
+      ttsEnabled,
+      weather,
+    ]
   );
 
   // Quick Weather Reaction Cycle Button on Header so families/kids can test Sun / Rain / Snow (Snowman & Snowball Fight + Rollable Snowball) in 1 click!
@@ -2109,12 +2499,13 @@ export default function App() {
   };
 
   const latestStateRef = useRef({
-    wakeWord,
     characters,
     enabledCharacters,
+    activePhotos,
     activeChatBunny,
     bunnies,
-    awaitingWakeFollowUp,
+    englishFrequency,
+    englishWaitSeconds,
     isVoiceListening,
     sleepSleeping: sleepState.sleeping,
     handleAssistantInquiry,
@@ -2127,12 +2518,13 @@ export default function App() {
 
   useEffect(() => {
     latestStateRef.current = {
-      wakeWord,
       characters,
       enabledCharacters,
+      activePhotos,
       activeChatBunny,
       bunnies,
-      awaitingWakeFollowUp,
+      englishFrequency,
+      englishWaitSeconds,
       isVoiceListening,
       sleepSleeping: sleepState.sleeping,
       handleAssistantInquiry,
@@ -2144,143 +2536,116 @@ export default function App() {
     };
   });
 
-  const processRecognizedTranscript = useCallback(
-    (rawTranscript: string) => {
-      const transcript = rawTranscript.trim();
-      if (!transcript) return;
+  const processRecognizedTranscript = useCallback((rawTranscript: string) => {
+    const transcript = rawTranscript.trim();
+    if (!transcript) return;
+    if (geminiLiveActiveRef.current) return;
 
-      lastActivityRef.current = Date.now();
-      const s = latestStateRef.current;
-      const compact = transcript.replace(/\s+/g, '');
+    lastActivityRef.current = Date.now();
+    const s = latestStateRef.current;
+    const compact = transcript.replace(/\s+/g, '');
 
-      const getBunnyAliases = (char: BunnyCharacterConfig): string[] => {
-        const cleanCall = char.callWord.replace(/[!?\s]/g, '');
-        const cleanName = char.name.replace(/[!?\s]/g, '');
-        const baseStem = cleanName.replace(/[이아]$/, '');
-        const aliases = [cleanCall, cleanName];
-        if (baseStem.length >= 2) {
-          aliases.push(`${baseStem}아`, `${baseStem}야`, `${baseStem}이`);
-        }
-        // Common Korean STT homophones for kids calling bunnies
-        if (char.id === 'tosuni') aliases.push('토수나', '토수니', '첫째토끼');
-        if (char.id === 'tosili') aliases.push('토시라', '토시리', '둘째토끼');
-        if (char.id === 'toddungi') aliases.push('토뚜아', '토뚱야', '막내토끼');
-        if (char.id === 'tobyeori') aliases.push('토벼라', '토벼리', '별토끼');
-        if (char.id === 'togureum') aliases.push('토구르마', '구름토끼');
-        return Array.from(new Set(aliases.filter((w) => w.length >= 2)));
-      };
+    const getCharacterCallAliases = (char: BunnyCharacterConfig): string[] => {
+      const { variants } = buildKoreanNameCallVariants(char.name, char.callWord);
+      const aliases = [...variants];
+      if (char.id === 'tosuni') aliases.push('첫째토끼');
+      if (char.id === 'tosili') aliases.push('둘째토끼');
+      if (char.id === 'toddungi') aliases.push('막내토끼');
+      return Array.from(new Set(aliases.filter((w) => w.length >= 2)));
+    };
 
-      // Wake up screen if sleeping and someone calls wakeWord or ANY bunny!
-      if (s.sleepSleeping) {
-        const compactWake = s.wakeWord.replace(/\s+/g, '');
-        const calledChar = s.characters.some((c) =>
-          getBunnyAliases(c).some((alias) => compact.includes(alias))
-        );
-        if ((compactWake && compact.includes(compactWake)) || calledChar) {
-          s.wakeTemporarilyFor30Min();
-        } else {
-          return;
-        }
+    const isSmartFrameUtilityQuery = (q: string): boolean =>
+      /(오늘|내일|주말|이번\s*주)\s*(날씨|기온|비\s*와|눈\s*와)|미세먼지|초미세먼지|(자동차|차로|대중교통|지하철|버스|걸어서|도보).*얼마나\s*걸려|소요\s*시간|길\s*안내|(오늘|내일|이번\s*주|우리\s*집)\s*(일정|스케줄|캘린더)/.test(
+        q
+      );
+
+    // Wake up screen if sleeping and someone calls ANY character's name!
+    if (s.sleepSleeping) {
+      const calledChar = s.characters.some((c) =>
+        getCharacterCallAliases(c).some((alias) => compact.includes(alias))
+      );
+      if (calledChar) {
+        s.wakeTemporarilyFor30Min();
+      } else {
+        return;
       }
+    }
 
-      // 1. Check ALL 3D Characters (prioritize enabled, then auto-enable if user calls a resting bunny by name!)
-      const orderedChars = [
-        ...s.characters.filter((c) => c.enabled),
-        ...s.characters.filter((c) => !c.enabled),
-      ];
-      for (const char of orderedChars) {
-        const aliases = getBunnyAliases(char);
-        const matchedAlias = aliases.find((a) => compact.includes(a));
-        if (matchedAlias) {
-          const escaped = aliases
-            .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-            .sort((a, b) => b.length - a.length)
-            .join('|');
-          const pattern = new RegExp(escaped, 'g');
-          const remainder = transcript
-            .replace(pattern, '')
-            .replace(/^[,!?.~\s랑하고에게야아]+/, '')
-            .trim();
-          if (remainder.length >= 2) {
-            s.handleSummonBunny(char.id, true);
-            s.handleSendBunnyMessage(char.id, remainder);
+    // 1. Direct Character Name Calling (NO wake-word needed! Calling any character's name responds immediately!)
+    const orderedChars = [
+      ...s.characters.filter((c) => c.enabled),
+      ...s.characters.filter((c) => !c.enabled),
+    ];
+    for (const char of orderedChars) {
+      const aliases = getCharacterCallAliases(char);
+      const matchedAlias = aliases.find((a) => compact.includes(a));
+      if (matchedAlias) {
+        const escaped = aliases
+          .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .sort((a, b) => b.length - a.length)
+          .join('|');
+        const pattern = new RegExp(escaped, 'g');
+        const remainder = transcript
+          .replace(pattern, '')
+          .replace(/^[,!?.~\s랑하고에게야아이가은는도]+/, '')
+          .trim();
+
+        if (remainder.length >= 2) {
+          if (isSmartFrameUtilityQuery(remainder)) {
+            void s.handleAssistantInquiry(remainder, char);
           } else {
-            s.handleSummonBunny(char.id, false);
+            s.handleSummonBunny(char.id, true, remainder);
           }
-          return;
-        }
-      }
-
-      // 2. Check Custom AI Frame Wake Word
-      const compactWake = s.wakeWord.replace(/\s+/g, '');
-      if (compactWake && compact.includes(compactWake)) {
-        const idx = compact.indexOf(compactWake);
-        const afterCompact = compact.slice(idx + compactWake.length);
-        if (afterCompact.length >= 2) {
-          const cleanedQuery = transcript
-            .replace(new RegExp(s.wakeWord.split(/\s+/).join('\\s*'), 'i'), '')
-            .trim();
-          setAwaitingWakeFollowUp(false);
-          s.handleAssistantInquiry(cleanedQuery || transcript);
         } else {
-          setAwaitingWakeFollowUp(true);
-          showTemporaryToast(`"${s.wakeWord}" 호출됨! 날씨·일정·길안내를 말씀해 주세요.`);
-          speakText(
-            '네, 부르셨나요? 날씨나 일정, 목적지 소요시간을 말씀해 주세요.',
-            'assistant',
-            ttsEnabled
-          );
+          s.handleSummonBunny(char.id, false);
         }
         return;
       }
+    }
 
-      if (s.awaitingWakeFollowUp) {
-        setAwaitingWakeFollowUp(false);
-        s.handleAssistantInquiry(transcript);
+    // 2. Active Child-Character Voice Conversation (including Voice-First English Flashcard & English Re-Ask!)
+    if (s.activeChatBunny) {
+      if (/잘\s*놀아|대화\s*끝|그만\s*안녕|놀러\s*가/.test(transcript)) {
+        s.handleFinishBunnyChat(s.activeChatBunny);
         return;
       }
 
-      // 3. Active Child-Bunny Voice Conversation (including Voice-First English Flashcard & English Re-Ask!)
-      if (s.activeChatBunny) {
-        if (/잘\s*놀아|대화\s*끝|그만\s*안녕|놀러\s*가/.test(transcript)) {
-          s.handleFinishBunnyChat(s.activeChatBunny);
+      const activeState = s.bunnies[s.activeChatBunny];
+      const openCard = activeState?.activeFlashcard;
+
+      if (openCard && !openCard.revealed) {
+        if (matchesSpokenEnglishAttempt(transcript, openCard.englishWord, openCard.phonetic)) {
+          s.handleAnswerFlashcard(s.activeChatBunny, openCard.englishWord);
           return;
         }
-
-        const activeState = s.bunnies[s.activeChatBunny];
-        const openCard = activeState?.activeFlashcard;
-
-        // 3a. If Giant Mid-Chat Flashcard is open, match spoken English OR Hangul pronunciation first!
-        if (openCard && !openCard.revealed) {
-          if (matchesSpokenEnglishAttempt(transcript, openCard.englishWord, openCard.phonetic)) {
-            s.handleAnswerFlashcard(s.activeChatBunny, openCard.englishWord);
+        for (const ch of openCard.choices) {
+          if (transcript.toLowerCase().includes(ch.toLowerCase())) {
+            s.handleAnswerFlashcard(s.activeChatBunny, ch);
             return;
           }
-          // Check if child spoke one of the other choices
-          for (const ch of openCard.choices) {
-            if (transcript.toLowerCase().includes(ch.toLowerCase())) {
-              s.handleAnswerFlashcard(s.activeChatBunny, ch);
-              return;
-            }
-          }
         }
-
-        // 3b. If English Re-Ask Coach is active and child spoke the English phrase (or Hangul phonetic), reward a star!
-        const coach = activeState?.englishCoach;
-        if (
-          coach &&
-          matchesSpokenEnglishAttempt(transcript, coach.englishPhrase, coach.koreanPhonetic)
-        ) {
-          setGrowthStars((prev) => prev + 1);
-          s.handleSendBunnyMessage(s.activeChatBunny, coach.englishPhrase);
-          return;
-        }
-
-        s.handleSendBunnyMessage(s.activeChatBunny, transcript);
       }
-    },
-    [showTemporaryToast, ttsEnabled]
-  );
+
+      const coach = activeState?.englishCoach;
+      if (
+        coach &&
+        matchesSpokenEnglishAttempt(transcript, coach.englishPhrase, coach.koreanPhonetic)
+      ) {
+        setGrowthStars((prev) => prev + 1);
+        void s.handleSendBunnyMessage(s.activeChatBunny, coach.englishPhrase);
+        return;
+      }
+
+      void s.handleSendBunnyMessage(s.activeChatBunny, transcript);
+      return;
+    }
+
+    // 3. Direct Smart-Frame Utility Question while mic is listening (even without a wake-word!)
+    if (isSmartFrameUtilityQuery(transcript)) {
+      const leadChar = s.enabledCharacters[0] ?? s.characters[0];
+      void s.handleAssistantInquiry(transcript, leadChar);
+    }
+  }, []);
 
   // Native Android SpeechRecognizer + Browser SpeechRecognition Dual Engine
   // Automatically pauses mic while a bunny speaks (TTS) and resumes listening right after TTS completes!
@@ -2299,7 +2664,7 @@ export default function App() {
       nativeSttRestartTimerRef.current = window.setTimeout(() => {
         nativeSttRestartTimerRef.current = null;
         if (!latestStateRef.current.isVoiceListening) return;
-        if (isAnyTtsSpeaking()) return;
+        if (geminiLiveActiveRef.current || isAnyTtsSpeaking()) return;
         const bridge = getAndroidSpeechBridge();
         if (bridge) {
           try {
@@ -2340,7 +2705,11 @@ export default function App() {
         return;
       }
       if (!detail.listening && detail.status !== 'stopped') {
-        if (latestStateRef.current.isVoiceListening && !isAnyTtsSpeaking()) {
+        if (
+          latestStateRef.current.isVoiceListening &&
+          !geminiLiveActiveRef.current &&
+          !isAnyTtsSpeaking()
+        ) {
           const backoff = detail.status === 'busy' ? 750 : 350;
           scheduleNativeListenResume(backoff);
         }
@@ -2348,6 +2717,7 @@ export default function App() {
     };
 
     const onTtsActivity = (ev: Event) => {
+      if (geminiLiveActiveRef.current) return;
       const speaking = Boolean((ev as CustomEvent<{ speaking?: boolean }>).detail?.speaking);
       if (speaking) {
         clearRestartTimer();
@@ -2388,7 +2758,7 @@ export default function App() {
       const nativeBridge = getAndroidSpeechBridge();
       if (nativeBridge) {
         setIsVoiceListening(true);
-        if (!isAnyTtsSpeaking()) {
+        if (!geminiLiveActiveRef.current && !isAnyTtsSpeaking()) {
           try {
             nativeBridge.startListening('ko-KR');
           } catch {
@@ -2396,9 +2766,12 @@ export default function App() {
           }
         }
         if (showToastOnStart) {
-          const callNames = enabledCharacters.map((c) => c.callWord).join('·');
+          const callNames = enabledCharacters
+            .slice(0, 3)
+            .map((c) => buildKoreanNameCallVariants(c.name).primaryCall)
+            .join(' · ');
           showTemporaryToast(
-            `🎙️ 음성 대화 켜짐: "${callNames || '토순아'}" 하고 부르거나 바로 말해 보세요!`
+            `🎙️ 이름 호출 대기 중: "${callNames || '토순아 · 코코야'}" 하고 캐릭터 이름을 불러보세요!`
           );
         }
         return;
@@ -2455,7 +2828,11 @@ export default function App() {
         };
 
         rec.onend = () => {
-          if (latestStateRef.current.isVoiceListening && !isAnyTtsSpeaking()) {
+          if (
+            latestStateRef.current.isVoiceListening &&
+            !geminiLiveActiveRef.current &&
+            !isAnyTtsSpeaking()
+          ) {
             try {
               rec.start();
             } catch {
@@ -2464,15 +2841,18 @@ export default function App() {
           }
         };
 
-        if (!isAnyTtsSpeaking()) {
+        if (!geminiLiveActiveRef.current && !isAnyTtsSpeaking()) {
           rec.start();
         }
         recognitionRef.current = rec;
         setIsVoiceListening(true);
         if (showToastOnStart) {
-          const callNames = enabledCharacters.map((c) => c.callWord).join('·');
+          const callNames = enabledCharacters
+            .slice(0, 3)
+            .map((c) => buildKoreanNameCallVariants(c.name).primaryCall)
+            .join(' · ');
           showTemporaryToast(
-            `음성 대기 시작: "${wakeWord}"${callNames ? ` 또는 "${callNames}"` : ''}`
+            `🎙️ 이름 호출 대기 중: "${callNames || '토순아 · 코코야'}" 하고 불러보세요!`
           );
         }
       } catch {
@@ -2481,7 +2861,7 @@ export default function App() {
         }
       }
     },
-    [enabledCharacters, processRecognizedTranscript, showTemporaryToast, wakeWord]
+    [enabledCharacters, processRecognizedTranscript, showTemporaryToast]
   );
 
   useEffect(() => {
@@ -2493,7 +2873,8 @@ export default function App() {
   }, [startVoiceRecognitionEngine]);
 
   const toggleVoiceListening = useCallback(() => {
-    if (isVoiceListening) {
+    if (isVoiceListening || isGeminiLiveActive) {
+      stopGeminiLiveSession();
       setIsVoiceListening(false);
       if (nativeSttRestartTimerRef.current !== null) {
         window.clearTimeout(nativeSttRestartTimerRef.current);
@@ -2512,7 +2893,7 @@ export default function App() {
       return;
     }
     startVoiceRecognitionEngine(true);
-  }, [isVoiceListening, startVoiceRecognitionEngine]);
+  }, [isGeminiLiveActive, isVoiceListening, startVoiceRecognitionEngine, stopGeminiLiveSession]);
 
   const cycleTransitionMode = () => {
     const order: FrameTransitionMode[] = ['ken_burns', 'frame_sway', 'gallery_matte', 'dual_split'];
@@ -2537,9 +2918,17 @@ export default function App() {
 
   const duplicatedTickerItems = useMemo(() => [...martItems, ...martItems], [martItems]);
 
+  const callHintLabel = useMemo(() => {
+    const targetList = enabledCharacters.length > 0 ? enabledCharacters : characters;
+    const names = targetList
+      .slice(0, 2)
+      .map((c) => buildKoreanNameCallVariants(c.name).primaryCall);
+    return names.length > 0 ? names.join(' · ') : '토순아 · 코코야';
+  }, [characters, enabledCharacters]);
+
   const menuRailNode = (
     <MenuRail
-      wakeWord={wakeWord}
+      callHintLabel={callHintLabel}
       isVoiceListening={isVoiceListening}
       ttsEnabled={ttsEnabled}
       powerScheduleEnabled={powerSchedule.enabled}
@@ -2674,8 +3063,9 @@ export default function App() {
               isPlaying={isPlaying && !sleepState.sleeping}
               transitionMode={transitionMode}
               isSplitActive={Boolean(activeInquiry)}
-              wakeWord={wakeWord}
+              callHintLabel={callHintLabel}
               isVoiceListening={isVoiceListening}
+              isGeminiLiveActive={isGeminiLiveActive}
               isAssistantLoading={isAssistantLoading}
               albumPasswords={albumPasswordsMap}
               photoAnalysisProgress={photoAnalysisProgress}
@@ -2694,7 +3084,7 @@ export default function App() {
               onCycleTransition={cycleTransitionMode}
               onOpenSettings={() => setSettingsModalTab('cloud')}
               onToggleVoiceListening={toggleVoiceListening}
-              onSubmitAssistantQuery={handleAssistantInquiry}
+              onSubmitAssistantQuery={(q) => handleAssistantInquiry(q)}
             />
 
             {activeInquiry && (
@@ -2704,7 +3094,7 @@ export default function App() {
                 isLoading={isAssistantLoading}
                 onExtendTimer={() => setSplitRemainingSeconds((s) => s + 60)}
                 onCloseSplit={() => setActiveInquiry(null)}
-                onFollowUpQuery={handleAssistantInquiry}
+                onFollowUpQuery={(q) => handleAssistantInquiry(q)}
                 onSelectMemoryPhoto={handleSelectPhotoOnFrame}
                 onReplayVoice={() =>
                   speakText(
@@ -2728,7 +3118,7 @@ export default function App() {
         </main>
       </div>
 
-      {/* 3. Full-Screen Cute 3D Bunnies + Snowy Snowman/Snowball Fight/Rollable Snowball + Voice-First Giant Flashcard */}
+      {/* 3. Full-Screen Cute 3D Plush Animals + Snowy Snowman/Snowball Fight/Rollable Snowball + Voice-First Giant Flashcard */}
       <Bunny3DOverlay
         characters={characters}
         bunnies={bunnies}
@@ -2736,6 +3126,7 @@ export default function App() {
         activeChatBunny={activeChatBunny}
         chatWaitSeconds={chatWaitSeconds}
         isVoiceListening={isVoiceListening}
+        isGeminiLiveActive={isGeminiLiveActive}
         isPaused={sleepState.sleeping}
         photos={activePhotos}
         weatherEffectMode={weatherEffectMode}
@@ -2763,6 +3154,10 @@ export default function App() {
           characters={characters}
           bunnies={bunnies}
           childAgeStage={childAgeStage}
+          englishFrequency={englishFrequency}
+          englishWaitSeconds={englishWaitSeconds}
+          geminiVoiceMode={geminiVoiceMode}
+          isGeminiLiveActive={isGeminiLiveActive}
           growthStars={growthStars}
           powerSchedule={powerSchedule}
           menuPosition={menuPosition}
@@ -2813,6 +3208,9 @@ export default function App() {
           }}
           onUpdateCharacters={setCharacters}
           onChangeChildAgeStage={setChildAgeStage}
+          onChangeEnglishFrequency={setEnglishFrequency}
+          onChangeEnglishWaitSeconds={setEnglishWaitSeconds}
+          onChangeGeminiVoiceMode={setGeminiVoiceMode}
           onChangePowerSchedule={setPowerSchedule}
           onEnterSleepNow={() => {
             setSettingsModalTab(null);
