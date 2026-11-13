@@ -56,7 +56,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   onToggleVoiceListening,
   onSubmitAssistantQuery,
 }) => {
-  const [imgErrors, setImgErrors] = useState<Record<string, boolean>>({});
+  const [imgErrorStage, setImgErrorStage] = useState<Record<string, number>>({});
   const [quickPrompt, setQuickPrompt] = useState('');
   const [showAskInput, setShowAskInput] = useState(false);
 
@@ -104,7 +104,10 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       : '';
 
   const renderPhotoSurface = (photo: PhotoItem, compact = false) => {
-    const failed = Boolean(imgErrors[photo.id]);
+    const stage = imgErrorStage[photo.id] ?? 0;
+    const hasBackup = Boolean(photo.assetUrl && photo.assetUrl !== photo.src);
+    const failed = stage >= (hasBackup ? 2 : 1);
+
     if (failed) {
       return (
         <div className="w-full h-full flex flex-col items-center justify-center bg-[#EAECEF] p-6 text-center">
@@ -116,13 +119,20 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       );
     }
 
+    const activeSrc = stage === 1 && hasBackup ? photo.assetUrl! : photo.src;
+
     return (
       <img
-        key={photo.id}
-        src={photo.src}
+        key={`${photo.id}-${stage}`}
+        src={activeSrc}
         alt={`${photo.title} (${photo.location})`}
         referrerPolicy="no-referrer"
-        onError={() => setImgErrors((prev) => ({ ...prev, [photo.id]: true }))}
+        onError={() =>
+          setImgErrorStage((prev) => ({
+            ...prev,
+            [photo.id]: (prev[photo.id] ?? 0) + 1,
+          }))
+        }
         className={`w-full h-full object-cover select-none ${compact ? '' : motionClass}`}
       />
     );

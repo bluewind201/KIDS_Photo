@@ -37,10 +37,12 @@ import {
   analyzePhotoUnified,
   browseCloudDemoOrRemoteUnified,
   connectSynologyDsmUnified,
+  fetchCloudProviderFolderPhotos,
   fetchSynologyFolderPhotos,
   geocodeCityUnified,
   getSavedGeminiApiKey,
   refreshMartEventsUnified,
+  resolvePublicShareLinkUnified,
   saveGeminiApiKey,
 } from '../utils/standaloneApi';
 import {
@@ -163,6 +165,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('share_link');
   const [shareLinkUrl, setShareLinkUrl] = useState('');
   const [shareLinkAlbumTitle, setShareLinkAlbumTitle] = useState('');
+  const [shareLinkPassword, setShareLinkPassword] = useState('');
+  const [isDemoBrowseSession, setIsDemoBrowseSession] = useState(false);
   const [backendServerUrl, setBackendServerUrl] = useState(() => {
     return localStorage.getItem('kids_photo_backend_url') || '';
   });
@@ -233,87 +237,71 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     }
   };
 
-  // 🌟 Google / OneDrive / Synology Photos 공유 링크(URL) 간편 등록 함수
-  const handleRegisterShareLink = (inputUrl?: string, customTitle?: string) => {
+  // 🌟 Google / OneDrive / Synology Photos 공유 링크(URL) 실제 사진 연동 함수 (가짜 샘플 대체 없음!)
+  const handleRegisterShareLink = async (inputUrl?: string, customTitle?: string) => {
     const targetUrl = (inputUrl || shareLinkUrl).trim();
     if (!targetUrl) {
       setConnectorStatus({ type: 'error', msg: '공유 링크 URL을 입력해 주세요.' });
       return;
     }
 
-    let detectedProvider: StorageProvider = 'share_link';
-    let defaultTitle = customTitle?.trim() || shareLinkAlbumTitle.trim();
-    let templateHint = '가족';
-
-    if (
-      targetUrl.includes('drive.google.com') ||
-      targetUrl.includes('photos.google.com') ||
-      targetUrl.includes('photos.app.goo.gl')
-    ) {
-      detectedProvider = 'google_drive';
-      if (!defaultTitle) defaultTitle = 'Google 클라우드 사진 앨범';
-      templateHint = '제주';
-    } else if (
-      targetUrl.includes('1drv.ms') ||
-      targetUrl.includes('onedrive.live.com') ||
-      targetUrl.includes('sharepoint.com')
-    ) {
-      detectedProvider = 'onedrive';
-      if (!defaultTitle) defaultTitle = 'OneDrive 가족 사진 앨범';
-      templateHint = '가평';
-    } else if (
-      targetUrl.includes('synology') ||
-      targetUrl.includes('/mo/sharing/') ||
-      targetUrl.includes('/sharing/')
-    ) {
-      detectedProvider = 'synology_api';
-      if (!defaultTitle) defaultTitle = 'Synology Photos 가족 공유 앨범';
-      templateHint = '서울숲';
-    } else {
-      if (!defaultTitle) defaultTitle = '웹 공유 사진 앨범';
-    }
-
-    const albumId = `album-${detectedProvider}-${Date.now()}`;
-    const matched = SAMPLE_PHOTO_POOL.filter(
-      (item) => item.tags.some((t) => defaultTitle.includes(t)) || item.title.includes(templateHint)
-    );
-    const chosen = matched.length > 0 ? matched : SAMPLE_PHOTO_POOL;
-
-    const generatedPhotos: PhotoItem[] = chosen.map((tpl, i) => ({
-      id: `${albumId}-p-${i}`,
-      albumId,
-      albumName: defaultTitle,
-      provider: detectedProvider,
-      src: tpl.src,
-      assetUrl: tpl.assetUrl,
-      title: `${defaultTitle} - ${tpl.title}`,
-      date: tpl.date,
-      location: tpl.location,
-      tags: [...tpl.tags, '공유링크'],
-      aiSummary: `${defaultTitle}에서 연동된 소중한 사진입니다. ${tpl.aiSummary}`,
-    }));
-
-    onAddAlbum({
-      id: albumId,
-      name: defaultTitle,
-      provider: detectedProvider,
-      folderPath: targetUrl,
-      enabled: true,
-      createdAt: new Date().toISOString().slice(0, 10),
-      photos: generatedPhotos,
-    });
-
+    setIsConnecting(true);
     setConnectorStatus({
-      type: 'success',
-      msg: `🎉 "${defaultTitle}" 앨범이 등록되었습니다! 메인 액자 슬라이드쇼에 즉시 반영됩니다.`,
+      type: 'info',
+      msg: '공유 링크에 접속하여 실제 사진 목록을 불러오는 중입니다... (사진 수에 따라 2~8초 소요)',
     });
-    setShareLinkUrl('');
-    setShareLinkAlbumTitle('');
+
+    try {
+      const tempId = `album-share-${Date.now()}`;
+      const resolved = await resolvePublicShareLinkUnified({
+        url: targetUrl,
+        customTitle: customTitle?.trim() || shareLinkAlbumTitle.trim() || undefined,
+        password: shareLinkPassword.trim() || undefined,
+        albumId: tempId,
+      });
+
+      const finalAlbumId = `album-${resolved.provider}-${Date.now()}`;
+      const realPhotos: PhotoItem[] = resolved.photos.map((p, idx) => ({
+        ...p,
+        id: `${finalAlbumId}-p-${idx}`,
+        albumId: finalAlbumId,
+        albumName: resolved.albumTitle,
+      }));
+
+      onAddAlbum({
+        id: finalAlbumId,
+        name: resolved.albumTitle,
+        provider: resolved.provider,
+        folderPath: resolved.resolvedUrl,
+        enabled: true,
+        createdAt: new Date().toISOString().slice(0, 10),
+        photos: realPhotos,
+      });
+
+      setConnectorStatus({
+        type: 'success',
+        msg: `🎉 "${resolved.albumTitle}"에서 실제 사진 ${realPhotos.length}장을 불러와 메인 액자에 즉시 반영했습니다! (기존 기본 샘플 앨범은 자동 숨김 처리됨)`,
+      });
+      setShareLinkUrl('');
+      setShareLinkAlbumTitle('');
+      setShareLinkPassword('');
+    } catch (err: unknown) {
+      const errMsg =
+        err instanceof Error
+          ? err.message
+          : '공유 링크에서 사진을 불러오지 못했습니다. 공개 링크 설정을 확인해 주세요.';
+      setConnectorStatus({
+        type: 'error',
+        msg: errMsg,
+      });
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
-  // 🌟 샘플 NAS / 클라우드 앨범 원클릭 즉시 추가 (오프라인/단독 모드 대비)
+  // 🌟 샘플 NAS / 클라우드 앨범 원클릭 즉시 추가 (사용자가 명시적으로 샘플 버튼을 누른 경우에만 사용)
   const handleQuickAddSampleAlbum = (providerType: StorageProvider, albumNameText: string) => {
-    const albumId = `album-${providerType}-${Date.now()}`;
+    const albumId = `album-sample-${providerType}-${Date.now()}`;
     const generatedPhotos: PhotoItem[] = SAMPLE_PHOTO_POOL.map((tpl, i) => ({
       id: `${albumId}-p-${i}`,
       albumId,
@@ -330,9 +318,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
     onAddAlbum({
       id: albumId,
-      name: albumNameText,
+      name: `[샘플] ${albumNameText}`,
       provider: providerType,
-      folderPath: `/photo/${albumNameText}`,
+      folderPath: `/sample/${albumNameText}`,
       enabled: true,
       createdAt: new Date().toISOString().slice(0, 10),
       photos: generatedPhotos,
@@ -340,12 +328,13 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
     setConnectorStatus({
       type: 'success',
-      msg: `🎉 "${albumNameText}" 앨범이 추가되어 메인 디지털 액자에 즉시 반영되었습니다!`,
+      msg: `💡 테스트용 샘플 "${albumNameText}" 앨범(${generatedPhotos.length}장)이 추가되었습니다.`,
     });
   };
 
   const browseProviderFolders = async (demoMode: boolean) => {
     setIsConnecting(true);
+    setIsDemoBrowseSession(demoMode);
     setConnectorStatus(null);
     setRemoteFolders([]);
     setCheckedFolderIds([]);
@@ -398,16 +387,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         msg:
           errMsg ||
           (isSyno
-            ? '시놀로지 NAS 서버에 직접 통신하지 못했습니다. 주소·포트·계정을 확인하시거나, 비밀번호 없이 링크만 넣는 [시놀로지 포토 공유 링크]를 이용해 보세요!'
-            : '클라우드 폴더를 불러오지 못했습니다. API 키가 필요 없는 [공유 링크 간편 등록] 또는 [샘플 앨범 추가]를 권장합니다.'),
-        actionLabel: isSyno
-          ? '🚀 시놀로지 테스트 가족 앨범 즉시 등록하기'
-          : '🚀 테스트 가족 앨범 즉시 등록하기',
-        onAction: () =>
-          handleQuickAddSampleAlbum(
-            selectedProvider,
-            isSyno ? 'Synology Photos 가족 앨범' : `${PROVIDER_LABELS[selectedProvider]} 사진 앨범`
-          ),
+            ? '시놀로지 NAS 서버에 직접 통신하지 못했습니다. 주소·포트·계정을 확인하시거나, 위쪽의 [시놀로지 포토 공유 링크]를 이용해 보세요!'
+            : '클라우드 폴더를 불러오지 못했습니다. API 키가 필요 없는 [공유 링크 간편 등록]을 이용해 보세요.'),
       });
     } finally {
       setIsConnecting(false);
@@ -432,29 +413,56 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     if (selected.length === 0) return;
 
     setIsConnecting(true);
-    const albumId = `album-${selectedProvider}-${Date.now()}`;
+    const albumId = isDemoBrowseSession
+      ? `album-sample-${selectedProvider}-${Date.now()}`
+      : `album-${selectedProvider}-${Date.now()}`;
     const albumTitle = customAlbumName.trim() || selected[0].name;
     const combinedPath = selected.map((s) => s.path).join(', ');
 
     try {
       let generatedPhotos: PhotoItem[] = [];
 
-      // 실제 시놀로지 DSM 로그인 세션이 있을 경우 NAS 폴더 내 실제 사진 이미지 로드!
-      if (selectedProvider === 'synology_api' && synoSession) {
-        for (const folder of selected) {
-          const fetched = await fetchSynologyFolderPhotos({
-            cleanBase: synoSession.cleanBase,
-            sid: synoSession.sid,
-            folderPath: folder.path,
-            albumId,
-            albumName: albumTitle,
-            provider: selectedProvider,
-          });
-          generatedPhotos.push(...fetched);
+      // 1) 실제 모드: 시놀로지 DSM / Google Drive OAuth / OneDrive Graph / WebDAV에서 진짜 사진만 조회!
+      if (!isDemoBrowseSession) {
+        if (selectedProvider === 'synology_api' && synoSession) {
+          for (const folder of selected) {
+            const fetched = await fetchSynologyFolderPhotos({
+              cleanBase: synoSession.cleanBase,
+              sid: synoSession.sid,
+              folderPath: folder.path,
+              albumId,
+              albumName: albumTitle,
+              provider: selectedProvider,
+            });
+            generatedPhotos.push(...fetched);
+          }
+        } else {
+          for (const folder of selected) {
+            const fetched = await fetchCloudProviderFolderPhotos({
+              provider: selectedProvider,
+              folderId: folder.id,
+              folderPath: folder.path,
+              albumId,
+              albumName: albumTitle,
+              gdriveToken: gdriveToken.trim(),
+              onedriveToken: onedriveToken.trim(),
+              webdavUrl: webdavUrl.trim(),
+              webdavUser: webdavUser.trim(),
+              webdavPass: webdavPass,
+            });
+            generatedPhotos.push(...fetched);
+          }
         }
-      }
 
-      if (generatedPhotos.length === 0) {
+        if (generatedPhotos.length === 0) {
+          setConnectorStatus({
+            type: 'error',
+            msg: '선택하신 폴더 안에 이미지 파일(JPG, PNG, WEBP)이 없거나 접근 권한이 없습니다. 사진이 직접 들어 있는 하위 폴더를 선택해 주세요.',
+          });
+          return;
+        }
+      } else {
+        // 2) 사용자가 명시적으로 [샘플 폴더 불러오기]를 누른 경우에만 샘플 사진 사용
         const matchedTemplates = SAMPLE_PHOTO_POOL.filter((item) =>
           selected.some(
             (f) =>
@@ -471,7 +479,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         generatedPhotos = chosenTemplates.map((tpl, i) => ({
           id: `${albumId}-p-${i}`,
           albumId,
-          albumName: albumTitle,
+          albumName: `[샘플] ${albumTitle}`,
           provider: selectedProvider,
           src: tpl.src,
           assetUrl: tpl.assetUrl,
@@ -485,7 +493,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
       onAddAlbum({
         id: albumId,
-        name: albumTitle,
+        name: isDemoBrowseSession ? `[샘플] ${albumTitle}` : albumTitle,
         provider: selectedProvider,
         folderPath: combinedPath,
         enabled: true,
@@ -503,21 +511,55 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     }
   };
 
+  const compressImageFileToDataUrl = (file: File, maxDim = 1600, quality = 0.82): Promise<string> =>
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const rawDataUrl = String(reader.result ?? '');
+        const img = new Image();
+        img.onload = () => {
+          try {
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+              const ratio = Math.min(maxDim / width, maxDim / height);
+              width = Math.round(width * ratio);
+              height = Math.round(height * ratio);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+              resolve(rawDataUrl);
+              return;
+            }
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+          } catch {
+            resolve(rawDataUrl);
+          }
+        };
+        img.onerror = () => resolve(rawDataUrl);
+        img.src = rawDataUrl;
+      };
+      reader.readAsDataURL(file);
+    });
+
   const handleLocalFilesUpload = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const imageFiles = Array.from(fileList)
-      .filter((f) => f.type.startsWith('image/'))
-      .slice(0, 12);
+      .filter((f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic)$/i.test(f.name))
+      .slice(0, 50);
 
     if (imageFiles.length === 0) {
-      setConnectorStatus({ type: 'error', msg: '선택한 폴더에 이미지 파일(JPG, PNG, WEBP)이 없습니다.' });
+      setConnectorStatus({ type: 'error', msg: '선택한 항목에 이미지 파일(JPG, PNG, WEBP)이 없습니다.' });
       return;
     }
 
     setIsAnalyzingLocal(true);
     setConnectorStatus({
       type: 'info',
-      msg: `${imageFiles.length}장의 사진을 불러오고 AI가 추억 장소·태그를 분석 중입니다...`,
+      msg: `${imageFiles.length}장의 내 사진을 액자 화질에 맞춰 최적화하고 있습니다...`,
     });
 
     const albumId = `album-local-${Date.now()}`;
@@ -526,17 +568,13 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
       customAlbumName.trim() ||
       (firstRelPath.includes('/')
         ? firstRelPath.split('/')[0]
-        : `내 기기 사진첩 (${new Date().toLocaleDateString('ko-KR')})`);
+        : `내 폰 갤러리 앨범 (${new Date().toLocaleDateString('ko-KR')})`);
 
     const newPhotos: PhotoItem[] = [];
 
     for (let i = 0; i < imageFiles.length; i++) {
       const file = imageFiles[i];
-      const dataUrl = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result ?? ''));
-        reader.readAsDataURL(file);
-      });
+      const dataUrl = await compressImageFileToDataUrl(file);
 
       const fileDate = new Date(file.lastModified || Date.now()).toLocaleDateString('ko-KR', {
         year: 'numeric',
@@ -1615,59 +1653,73 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         type="url"
                         value={shareLinkUrl}
                         onChange={(e) => setShareLinkUrl(e.target.value)}
-                        placeholder="공유 링크 붙여넣기 (예: https://drive.google.com/..., https://1drv.ms/..., https://nas.../mo/sharing/...)"
+                        placeholder="공유 링크 붙여넣기 (구글 포토 공유 앨범, 구글 드라이브 공개 폴더, 1drv.ms, 시놀로지 /mo/sharing/...)"
                         className={`flex-1 ${inputCls} bg-white text-xs`}
                       />
                       <input
                         type="text"
                         value={shareLinkAlbumTitle}
                         onChange={(e) => setShareLinkAlbumTitle(e.target.value)}
-                        placeholder="앨범 이름 (선택: 비워두면 자동 지정)"
-                        className={`w-full sm:w-48 ${inputCls} bg-white text-xs`}
+                        placeholder="앨범 이름 (선택: 자동 지정)"
+                        className={`w-full sm:w-44 ${inputCls} bg-white text-xs`}
+                      />
+                      <input
+                        type="password"
+                        value={shareLinkPassword}
+                        onChange={(e) => setShareLinkPassword(e.target.value)}
+                        placeholder="공유 비번 (설정한 경우만)"
+                        className={`w-full sm:w-40 ${inputCls} bg-white text-xs`}
                       />
                     </div>
 
                     <button
                       type="button"
+                      disabled={isConnecting}
                       onClick={() => handleRegisterShareLink()}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-5 py-2.5 text-xs font-bold text-white shadow-sm transition-all"
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 px-5 py-2.5 text-xs font-bold text-white shadow-sm transition-all"
                     >
-                      <Plus className="w-4 h-4" />
-                      디지털 앨범으로 즉시 등록
+                      {isConnecting ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
+                      {isConnecting ? '실제 사진 불러오는 중...' : '실제 공유 사진 불러오기 · 앨범 등록'}
                     </button>
+                  </div>
+
+                  <div className="rounded-xl bg-white/80 border border-indigo-100 p-3 text-[11px] text-zinc-600 space-y-1">
+                    <div className="font-bold text-indigo-900">📌 내 사진이 잘 불러와지려면 꼭 확인해 주세요!</div>
+                    <div>• <strong>구글 포토</strong>: 앨범 열기 → 공유 → <strong>[링크 생성]</strong> (<code>photos.app.goo.gl/...</code>)</div>
+                    <div>• <strong>구글 드라이브</strong>: 사진 폴더 우클릭/더보기 → 공유 → 일반 액세스를 <strong>[링크가 있는 모든 사용자]</strong>로 변경</div>
+                    <div>• <strong>원드라이브</strong>: 사진 폴더 공유 → <strong>[링크가 있는 모든 사용자 보기 가능]</strong> 링크 복사 (<code>1drv.ms/...</code>)</div>
+                    <div>• <strong>시놀로지 포토</strong>: 앨범 공유 → <strong>[공개 링크 활성화]</strong> (비밀번호 설정 시 위 칸에 입력)</div>
                   </div>
 
                   <div className="pt-2 border-t border-indigo-100/80">
                     <div className="text-[11px] font-semibold text-zinc-500 mb-2">
-                      💡 원클릭 빠른 테스트 (샘플 클라우드 앨범):
+                      💡 공유 링크가 아직 없을 때 화면 미리보기용 (샘플 앨범):
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={() =>
-                          handleRegisterShareLink('https://drive.google.com/drive/folders/demo-jeju', 'Google Drive 제주 가족여행')
-                        }
+                        onClick={() => handleQuickAddSampleAlbum('google_drive', '제주 가족여행')}
                         className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
                       >
-                        + Google Drive 제주바다 앨범
+                        + [샘플] 제주바다 앨범
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          handleRegisterShareLink('https://1drv.ms/f/s!demo-autumn', 'OneDrive 가평 단풍캠핑')
-                        }
+                        onClick={() => handleQuickAddSampleAlbum('onedrive', '가평 단풍캠핑')}
                         className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
                       >
-                        + OneDrive 단풍캠핑 앨범
+                        + [샘플] 단풍캠핑 앨범
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          handleRegisterShareLink('https://my-nas.synology.me:5001/mo/sharing/demo-family', 'Synology Photos 가족공유 앨범')
-                        }
+                        onClick={() => handleQuickAddSampleAlbum('synology_api', '서울숲 가족소풍')}
                         className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
                       >
-                        + Synology Photos 가족 앨범
+                        + [샘플] 시놀로지 가족 앨범
                       </button>
                     </div>
                   </div>
@@ -1694,15 +1746,16 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         type="url"
                         value={shareLinkUrl}
                         onChange={(e) => setShareLinkUrl(e.target.value)}
-                        placeholder="구글 드라이브 폴더 링크 (https://drive.google.com/drive/folders/...)"
+                        placeholder="구글 포토 공유 앨범 (photos.app.goo.gl/...) 또는 구글 드라이브 공개 폴더 링크"
                         className={`flex-1 ${inputCls} bg-[#F7F8FA] text-xs`}
                       />
                       <button
                         type="button"
-                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'Google Drive 사진 앨범')}
-                        className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                        disabled={isConnecting}
+                        onClick={() => handleRegisterShareLink(shareLinkUrl)}
+                        className="rounded-full bg-[#141519] hover:bg-zinc-800 disabled:opacity-60 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
                       >
-                        앨범 즉시 등록
+                        {isConnecting ? '사진 불러오는 중...' : '실제 사진 불러오기'}
                       </button>
                     </div>
                   </div>
@@ -1778,10 +1831,11 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       />
                       <button
                         type="button"
-                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'OneDrive 사진 앨범')}
-                        className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                        disabled={isConnecting}
+                        onClick={() => handleRegisterShareLink(shareLinkUrl)}
+                        className="rounded-full bg-[#141519] hover:bg-zinc-800 disabled:opacity-60 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
                       >
-                        앨범 즉시 등록
+                        {isConnecting ? '사진 불러오는 중...' : '실제 사진 불러오기'}
                       </button>
                     </div>
                   </div>
@@ -1859,12 +1913,20 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         placeholder="시놀로지 포토 공유 링크 (예: https://bluewind201.synology.me:9999/mo/sharing/...)"
                         className={`flex-1 ${inputCls} bg-[#F7F8FA] text-xs`}
                       />
+                      <input
+                        type="password"
+                        value={shareLinkPassword}
+                        onChange={(e) => setShareLinkPassword(e.target.value)}
+                        placeholder="공유 비밀번호 (선택)"
+                        className={`w-full sm:w-36 ${inputCls} bg-[#F7F8FA] text-xs`}
+                      />
                       <button
                         type="button"
-                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'Synology Photos 가족 공유 앨범')}
-                        className="rounded-full bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white whitespace-nowrap shadow-sm"
+                        disabled={isConnecting}
+                        onClick={() => handleRegisterShareLink(shareLinkUrl)}
+                        className="rounded-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 px-4 py-2 text-xs font-bold text-white whitespace-nowrap shadow-sm"
                       >
-                        시놀로지 앨범 등록
+                        {isConnecting ? '불러오는 중...' : '시놀로지 실제 사진 등록'}
                       </button>
                     </div>
                   </div>
@@ -2235,7 +2297,34 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               <div className="space-y-2.5">
-                <h3 className="text-sm font-bold text-[#141519]">등록된 디지털 앨범 목록</h3>
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-[#141519]">등록된 디지털 앨범 목록</h3>
+                  {albums.some(
+                    (a) =>
+                      a.id === 'album-gdrive-family-2026' ||
+                      a.id === 'album-synology-camping-winter' ||
+                      a.id.startsWith('album-sample-')
+                  ) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        albums.forEach((a) => {
+                          if (
+                            a.id === 'album-gdrive-family-2026' ||
+                            a.id === 'album-synology-camping-winter' ||
+                            a.id.startsWith('album-sample-')
+                          ) {
+                            onDeleteAlbum(a.id);
+                          }
+                        });
+                      }}
+                      className="inline-flex items-center gap-1 rounded-full bg-rose-50 hover:bg-rose-100 border border-rose-200 px-3 py-1 text-[11px] font-semibold text-rose-700 transition-colors"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      기본 샘플 앨범 모두 지우기
+                    </button>
+                  )}
+                </div>
                 {albums.map((album) => (
                   <div
                     key={album.id}

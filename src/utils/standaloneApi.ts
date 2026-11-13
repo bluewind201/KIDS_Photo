@@ -891,6 +891,163 @@ export async function fetchSynologyFolderPhotos(params: {
   }
 }
 
+/**
+ * Fetches actual image files inside a Google Drive folder, OneDrive folder, or WebDAV folder when using OAuth/WebDAV credentials!
+ */
+export async function fetchCloudProviderFolderPhotos(params: {
+  provider: StorageProvider;
+  folderId: string;
+  folderPath: string;
+  albumId: string;
+  albumName: string;
+  gdriveToken?: string;
+  onedriveToken?: string;
+  webdavUrl?: string;
+  webdavUser?: string;
+  webdavPass?: string;
+}): Promise<PhotoItem[]> {
+  const todayLabel = new Date().toLocaleDateString('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  if (params.provider === 'google_drive' && params.gdriveToken?.trim()) {
+    const q = encodeURIComponent(
+      `'${params.folderId}' in parents and mimeType contains 'image/' and trashed = false`
+    );
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,thumbnailLink)&pageSize=100`,
+      { headers: { Authorization: `Bearer ${params.gdriveToken.trim()}` } }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as {
+        files?: Array<{ id: string; name: string; createdTime?: string; thumbnailLink?: string }>;
+      };
+      return (data.files ?? []).map((f, idx) => ({
+        id: `${params.albumId}-gdrive-oauth-${idx}`,
+        albumId: params.albumId,
+        albumName: params.albumName,
+        provider: 'google_drive',
+        src: f.thumbnailLink
+          ? f.thumbnailLink.replace(/=s\d+.*$/, '=s1920')
+          : `https://drive.google.com/thumbnail?id=${f.id}&sz=w1920`,
+        assetUrl: `https://lh3.googleusercontent.com/d/${f.id}=w1920`,
+        title: f.name.replace(/\.[^.]+$/, ''),
+        date: f.createdTime
+          ? new Date(f.createdTime).toLocaleDateString('ko-KR', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })
+          : todayLabel,
+        location: params.albumName,
+        tags: ['구글드라이브', params.albumName],
+        aiSummary: `Google Drive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+      }));
+    }
+  }
+
+  if (params.provider === 'onedrive' && params.onedriveToken?.trim()) {
+    const res = await fetch(
+      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(params.folderId)}/children?$top=100`,
+      { headers: { Authorization: `Bearer ${params.onedriveToken.trim()}` } }
+    );
+    if (res.ok) {
+      const data = (await res.json()) as {
+        value?: Array<{
+          id: string;
+          name: string;
+          image?: Record<string, unknown>;
+          file?: { mimeType?: string };
+          '@microsoft.graph.downloadUrl'?: string;
+        }>;
+      };
+      return (data.value ?? [])
+        .filter(
+          (item) =>
+            Boolean(item['@microsoft.graph.downloadUrl']) &&
+            (Boolean(item.image) ||
+              Boolean(item.file?.mimeType?.startsWith('image/')) ||
+              /\.(jpe?g|png|webp|gif|bmp)$/i.test(item.name))
+        )
+        .map((item, idx) => ({
+          id: `${params.albumId}-onedrive-oauth-${idx}`,
+          albumId: params.albumId,
+          albumName: params.albumName,
+          provider: 'onedrive',
+          src: item['@microsoft.graph.downloadUrl'] || '',
+          title: item.name.replace(/\.[^.]+$/, ''),
+          date: todayLabel,
+          location: params.albumName,
+          tags: ['원드라이브', params.albumName],
+          aiSummary: `OneDrive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+        }));
+    }
+  }
+
+  if (
+    params.provider === 'synology_webdav' &&
+    params.webdavUrl &&
+    params.webdavUser &&
+    params.webdavPass &&
+    Capacitor.isNativePlatform()
+  ) {
+    try {
+      const origin = new URL(params.webdavUrl.trim()).origin;
+      const targetUrl = params.folderPath.startsWith('http')
+        ? params.folderPath
+        : `${origin}/${params.folderPath.replace(/^\/+/, '')}`;
+      const basic = btoa(unescape(encodeURIComponent(`${params.webdavUser.trim()}:${params.webdavPass}`)));
+      const wRes = await CapacitorHttp.request({
+        method: 'PROPFIND',
+        url: targetUrl,
+        headers: { Authorization: `Basic ${basic}`, Depth: '1' },
+      });
+      if (wRes.status >= 200 && wRes.status < 300 && typeof wRes.data === 'string') {
+        const hrefs = Array.from(wRes.data.matchAll(/<(?:\w+:)?href>([^<]+)<\/(?:\w+:)?href>/gi)).map((m) =>
+          m[1].trim()
+        );
+        const imageHrefs = hrefs.filter((h) => /\.(jpe?g|png|webp|gif|bmp)$/i.test(decodeURIComponent(h)));
+        const out: PhotoItem[] = [];
+        // Fetch up to 30 WebDAV images as base64 data URLs since <img> cannot pass Basic Auth headers in modern WebViews
+        for (let i = 0; i < Math.min(imageHrefs.length, 30); i++) {
+          const href = imageHrefs[i];
+          const fullImgUrl = href.startsWith('http') ? href : `${origin}${href.startsWith('/') ? '' : '/'}${href}`;
+          const imgRes = await CapacitorHttp.get({
+            url: fullImgUrl,
+            headers: { Authorization: `Basic ${basic}` },
+            responseType: 'blob',
+          });
+          if (imgRes.status >= 200 && imgRes.status < 300 && typeof imgRes.data === 'string') {
+            const decodedName = decodeURIComponent(href.split('/').pop() || `photo_${i + 1}`);
+            const ext = decodedName.split('.').pop()?.toLowerCase() || 'jpg';
+            const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+            const dataUri = imgRes.data.startsWith('data:') ? imgRes.data : `data:${mime};base64,${imgRes.data}`;
+            out.push({
+              id: `${params.albumId}-webdav-${i}`,
+              albumId: params.albumId,
+              albumName: params.albumName,
+              provider: 'synology_webdav',
+              src: dataUri,
+              title: decodedName.replace(/\.[^.]+$/, ''),
+              date: todayLabel,
+              location: params.albumName,
+              tags: ['WebDAV', params.albumName],
+              aiSummary: `시놀로지 WebDAV "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+            });
+          }
+        }
+        return out;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return [];
+}
+
 export async function browseCloudDemoOrRemoteUnified(params: {
   provider: StorageProvider;
   demoMode: boolean;
@@ -1094,4 +1251,945 @@ export async function refreshMartEventsUnified(city: string): Promise<string[]> 
     `[주말 가족 장보기] 제철 과일·우리 아이 우유·간식 특가 코너 운영 중`,
     `[전통시장·하나로마트] 연중무휴 정상 영업 매장 상시 이용 가능`,
   ];
+}
+
+// ============================================================================
+// 6. REAL CLOUD & NAS PUBLIC SHARE-LINK PHOTO RESOLVER (Zero Fake Samples!)
+//    Supports: Google Photos Shared Album, Google Drive Shared Folder/File,
+//              OneDrive Shared Folder/File (1drv.ms / Badger API),
+//              Synology Photos & Synology File Station Share Links, Direct Image URLs
+// ============================================================================
+
+const DESKTOP_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+interface RawHttpResult {
+  status: number;
+  url: string;
+  headers: Record<string, string>;
+  text: string;
+  json?: unknown;
+}
+
+async function rawGet(
+  targetUrl: string,
+  extraHeaders: Record<string, string> = {},
+  timeoutMs = 11000
+): Promise<RawHttpResult> {
+  if (Capacitor.isNativePlatform()) {
+    const res = await CapacitorHttp.get({
+      url: targetUrl,
+      headers: {
+        'User-Agent': DESKTOP_USER_AGENT,
+        'x-cap-user-agent': DESKTOP_USER_AGENT,
+        Accept: 'text/html,application/json,*/*;q=0.9',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+        ...extraHeaders,
+      },
+      responseType: 'text',
+      connectTimeout: timeoutMs,
+      readTimeout: timeoutMs,
+    });
+    const text = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '');
+    let parsedJson: unknown;
+    try {
+      parsedJson = typeof res.data === 'object' ? res.data : JSON.parse(text);
+    } catch {
+      parsedJson = undefined;
+    }
+    const normHeaders: Record<string, string> = {};
+    if (res.headers) {
+      for (const [k, v] of Object.entries(res.headers)) {
+        normHeaders[k.toLowerCase()] = String(v);
+      }
+    }
+    return {
+      status: res.status,
+      url: res.url || targetUrl,
+      headers: normHeaders,
+      text,
+      json: parsedJson,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(targetUrl, {
+      method: 'GET',
+      headers: extraHeaders,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(text);
+    } catch {
+      parsedJson = undefined;
+    }
+    const normHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      normHeaders[k.toLowerCase()] = v;
+    });
+    return {
+      status: res.status,
+      url: res.url || targetUrl,
+      headers: normHeaders,
+      text,
+      json: parsedJson,
+    };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function rawPost(
+  targetUrl: string,
+  body: string | Record<string, unknown>,
+  contentType: 'application/json' | 'application/x-www-form-urlencoded',
+  extraHeaders: Record<string, string> = {},
+  timeoutMs = 11000
+): Promise<RawHttpResult> {
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+
+  if (Capacitor.isNativePlatform()) {
+    const res = await CapacitorHttp.post({
+      url: targetUrl,
+      headers: {
+        'Content-Type': contentType,
+        'User-Agent': DESKTOP_USER_AGENT,
+        'x-cap-user-agent': DESKTOP_USER_AGENT,
+        Accept: 'application/json,text/plain,*/*',
+        ...extraHeaders,
+      },
+      data: contentType === 'application/json' && typeof body === 'object' ? body : bodyStr,
+      connectTimeout: timeoutMs,
+      readTimeout: timeoutMs,
+    });
+    const text = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '');
+    let parsedJson: unknown;
+    try {
+      parsedJson = typeof res.data === 'object' ? res.data : JSON.parse(text);
+    } catch {
+      parsedJson = undefined;
+    }
+    const normHeaders: Record<string, string> = {};
+    if (res.headers) {
+      for (const [k, v] of Object.entries(res.headers)) {
+        normHeaders[k.toLowerCase()] = String(v);
+      }
+    }
+    return {
+      status: res.status,
+      url: res.url || targetUrl,
+      headers: normHeaders,
+      text,
+      json: parsedJson,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, ...extraHeaders },
+      body: bodyStr,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(text);
+    } catch {
+      parsedJson = undefined;
+    }
+    const normHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      normHeaders[k.toLowerCase()] = v;
+    });
+    return {
+      status: res.status,
+      url: res.url || targetUrl,
+      headers: normHeaders,
+      text,
+      json: parsedJson,
+    };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+function decodeHtmlEntities(input: string): string {
+  return input
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\\u003d/gi, '=')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\u002f/gi, '/')
+    .replace(/\\x3d/gi, '=')
+    .replace(/\\x26/gi, '&')
+    .replace(/\\x22/gi, '"');
+}
+
+function extractOgMeta(html: string, prop: string): string {
+  const re1 = new RegExp(`<meta[^>]+property=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i');
+  const m1 = html.match(re1);
+  if (m1?.[1]) return decodeHtmlEntities(m1[1].trim());
+  const re2 = new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+property=["']${prop}["']`, 'i');
+  const m2 = html.match(re2);
+  if (m2?.[1]) return decodeHtmlEntities(m2[1].trim());
+  return '';
+}
+
+function encodeOneDriveShareToken(shareUrl: string): string {
+  const utf8Bytes = new TextEncoder().encode(shareUrl.trim());
+  let binary = '';
+  for (let i = 0; i < utf8Bytes.length; i++) {
+    binary += String.fromCharCode(utf8Bytes[i]);
+  }
+  const b64 = btoa(binary).replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+  return `u!${b64}`;
+}
+
+export interface ResolvedShareAlbumResult {
+  provider: StorageProvider;
+  albumTitle: string;
+  resolvedUrl: string;
+  photos: PhotoItem[];
+}
+
+/**
+ * Resolves actual user photos from a public share link (Google Photos, Google Drive, OneDrive, Synology Photos/FileStation, or direct image URL).
+ * NEVER returns built-in sample photos! Throws a clear Korean error if 0 real photos are accessible.
+ */
+export async function resolvePublicShareLinkUnified(params: {
+  url: string;
+  customTitle?: string;
+  password?: string;
+  albumId: string;
+}): Promise<ResolvedShareAlbumResult> {
+  let rawUrl = params.url.trim();
+  if (!rawUrl) {
+    throw new Error('공유 링크 URL을 입력해 주세요.');
+  }
+  if (!/^https?:\/\//i.test(rawUrl)) {
+    rawUrl = `https://${rawUrl}`;
+  }
+
+  // 1) Try backend resolver first if running on Web or connected to a home PC/NAS server
+  const backend = await tryBackendJson<{
+    provider?: StorageProvider;
+    title?: string;
+    url?: string;
+    photos?: PhotoItem[];
+    error?: string;
+  }>(
+    '/api/storage/share-link',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: rawUrl,
+        albumName: params.customTitle,
+        password: params.password,
+        albumId: params.albumId,
+      }),
+    },
+    14000
+  );
+
+  if (backend.ok && Array.isArray(backend.data.photos) && backend.data.photos.length > 0) {
+    return {
+      provider: backend.data.provider || 'share_link',
+      albumTitle: backend.data.title || params.customTitle?.trim() || '공유 사진 앨범',
+      resolvedUrl: backend.data.url || rawUrl,
+      photos: backend.data.photos,
+    };
+  }
+  if (!Capacitor.isNativePlatform() && !backend.ok && backend.errorMsg) {
+    throw new Error(backend.errorMsg);
+  }
+
+  const todayLabel = new Date().toLocaleDateString('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  // ==========================================================================
+  // CASE A: Direct Image URL (.jpg, .jpeg, .png, .webp, .gif)
+  // ==========================================================================
+  if (/\.(jpe?g|png|webp|gif|bmp)(\?.*)?$/i.test(rawUrl)) {
+    const title = params.customTitle?.trim() || '직접 등록한 사진 앨범';
+    return {
+      provider: 'share_link',
+      albumTitle: title,
+      resolvedUrl: rawUrl,
+      photos: [
+        {
+          id: `${params.albumId}-img-0`,
+          albumId: params.albumId,
+          albumName: title,
+          provider: 'share_link',
+          src: rawUrl,
+          title,
+          date: todayLabel,
+          location: title,
+          tags: ['공유사진', title],
+          aiSummary: `${title}에서 불러온 사진입니다.`,
+        },
+      ],
+    };
+  }
+
+  // ==========================================================================
+  // CASE B: Google Photos Shared Album / Photo (photos.app.goo.gl / photos.google.com)
+  // ==========================================================================
+  if (/photos\.app\.goo\.gl|photos\.google\.com/i.test(rawUrl)) {
+    const page = await rawGet(rawUrl);
+    const cleanedHtml = decodeHtmlEntities(page.text);
+    const ogTitle = extractOgMeta(page.text, 'og:title')
+      .replace(/\s*-\s*Google\s*(Photos|포토).*$/i, '')
+      .trim();
+    const albumTitle = params.customTitle?.trim() || ogTitle || 'Google 포토 공유 앨범';
+
+    // Extract all genuine Google Photos shared media URLs (`lh3.googleusercontent.com/pw/...` or `.../AF1Qip...`)
+    const urlSet = new Set<string>();
+    const pwRegex = /https:\/\/lh3\.googleusercontent\.com\/pw\/[a-zA-Z0-9_-]{24,}/g;
+    for (const m of cleanedHtml.matchAll(pwRegex)) {
+      urlSet.add(m[0]);
+    }
+    const afRegex = /https:\/\/lh3\.googleusercontent\.com\/(?:[a-zA-Z0-9_-]+\/)?AF1Qip[a-zA-Z0-9_-]{18,}/g;
+    for (const m of cleanedHtml.matchAll(afRegex)) {
+      urlSet.add(m[0]);
+    }
+
+    // Single-photo share fallback via og:image (exclude Google logo/avatar `/a/` URLs)
+    if (urlSet.size === 0) {
+      const ogImg = extractOgMeta(page.text, 'og:image');
+      if (ogImg && ogImg.includes('googleusercontent.com') && !ogImg.includes('/a/')) {
+        const base = ogImg.split('=')[0];
+        urlSet.add(base);
+      }
+    }
+
+    const baseUrls = Array.from(urlSet).slice(0, 120);
+    if (baseUrls.length === 0) {
+      throw new Error(
+        '구글 포토 공유 링크에서 사진을 찾지 못했습니다. 구글 포토 앱에서 [앨범 공유 → 링크 생성(링크가 있는 모든 사용자 보기 허용)] 상태인지 확인해 주세요.'
+      );
+    }
+
+    const photos: PhotoItem[] = baseUrls.map((baseUrl, idx) => ({
+      id: `${params.albumId}-gphotos-${idx}`,
+      albumId: params.albumId,
+      albumName: albumTitle,
+      provider: 'google_drive',
+      src: `${baseUrl}=w1920-h1080`,
+      assetUrl: `${baseUrl}=w2560-h1440`,
+      title: `${albumTitle} #${idx + 1}`,
+      date: todayLabel,
+      location: albumTitle,
+      tags: ['구글포토', albumTitle],
+      aiSummary: `Google 포토 공유 앨범 "${albumTitle}"에서 불러온 실제 사진입니다.`,
+    }));
+
+    return {
+      provider: 'google_drive',
+      albumTitle,
+      resolvedUrl: page.url || rawUrl,
+      photos,
+    };
+  }
+
+  // ==========================================================================
+  // CASE C: Google Drive Shared Folder or File (drive.google.com)
+  // ==========================================================================
+  if (/drive\.google\.com|docs\.google\.com/i.test(rawUrl)) {
+    const folderMatch =
+      rawUrl.match(/\/folders\/([a-zA-Z0-9_-]{15,})/) ||
+      (rawUrl.includes('folders') ? rawUrl.match(/[?&]id=([a-zA-Z0-9_-]{15,})/) : null);
+
+    // C-1: Single shared image file on Google Drive
+    if (!folderMatch) {
+      const fileMatch =
+        rawUrl.match(/\/file\/d\/([a-zA-Z0-9_-]{15,})/) ||
+        rawUrl.match(/[?&]id=([a-zA-Z0-9_-]{15,})/);
+      if (fileMatch?.[1]) {
+        const fileId = fileMatch[1];
+        const albumTitle = params.customTitle?.trim() || 'Google Drive 공유 사진';
+        return {
+          provider: 'google_drive',
+          albumTitle,
+          resolvedUrl: rawUrl,
+          photos: [
+            {
+              id: `${params.albumId}-gdrive-0`,
+              albumId: params.albumId,
+              albumName: albumTitle,
+              provider: 'google_drive',
+              src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
+              assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+              title: albumTitle,
+              date: todayLabel,
+              location: albumTitle,
+              tags: ['구글드라이브', albumTitle],
+              aiSummary: `Google Drive 공유 링크에서 불러온 실제 사진입니다.`,
+            },
+          ],
+        };
+      }
+    }
+
+    // C-2: Shared Folder on Google Drive
+    if (folderMatch?.[1]) {
+      const folderId = folderMatch[1];
+      let albumTitle = params.customTitle?.trim() || '';
+      const foundFiles = new Map<string, string>(); // fileId -> title
+
+      // Strategy 1: Public embeddedfolderview endpoint (lightweight HTML listing all public files in the folder!)
+      try {
+        const embedRes = await rawGet(`https://drive.google.com/embeddedfolderview?id=${folderId}#grid`);
+        if (!albumTitle) {
+          const titleTag = embedRes.text.match(/<title>([^<]+)<\/title>/i)?.[1]?.trim() || '';
+          if (titleTag && !/Google\s*Drive|로그인|Sign\s*in/i.test(titleTag)) {
+            albumTitle = decodeHtmlEntities(titleTag);
+          }
+        }
+
+        const entryRegex =
+          /id=["']entry-([a-zA-Z0-9_-]{20,})["'][\s\S]{0,600}?class=["']flip-entry-title["']>([^<]+)</gi;
+        for (const m of embedRes.text.matchAll(entryRegex)) {
+          const id = m[1];
+          const fileName = decodeHtmlEntities(m[2].trim());
+          // Exclude obvious non-image documents/videos if extension is present
+          if (
+            id !== folderId &&
+            !/\.(mp4|mov|avi|mkv|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|mp3|wav)$/i.test(fileName)
+          ) {
+            foundFiles.set(id, fileName);
+          }
+        }
+
+        if (foundFiles.size === 0) {
+          for (const m of embedRes.text.matchAll(/id=["']entry-([a-zA-Z0-9_-]{20,})["']/gi)) {
+            if (m[1] !== folderId) {
+              foundFiles.set(m[1], `사진 #${foundFiles.size + 1}`);
+            }
+          }
+        }
+      } catch {
+        // Continue to Strategy 2
+      }
+
+      // Strategy 2: Main folder page HTML (`_DRIVE_ivd` / `data-id` extraction)
+      if (foundFiles.size === 0) {
+        try {
+          const folderRes = await rawGet(`https://drive.google.com/drive/folders/${folderId}`);
+          const unescaped = decodeHtmlEntities(folderRes.text);
+          if (!albumTitle) {
+            const ogTitle = extractOgMeta(folderRes.text, 'og:title')
+              .replace(/\s*-\s*Google\s*(Drive|드라이브).*$/i, '')
+              .trim();
+            if (ogTitle && !/로그인|Sign\s*in/i.test(ogTitle)) {
+              albumTitle = ogTitle;
+            }
+          }
+
+          // Match `data-id="FILE_ID"` attributes on folder grid items
+          const dataIdRegex = /data-id=["']([a-zA-Z0-9_-]{25,45})["']/g;
+          for (const m of unescaped.matchAll(dataIdRegex)) {
+            const id = m[1];
+            if (id !== folderId) {
+              foundFiles.set(id, `사진 #${foundFiles.size + 1}`);
+            }
+          }
+
+          const ivdImgRegex =
+            /\["([a-zA-Z0-9_-]{25,45})"\s*,\s*\["[a-zA-Z0-9_-]+"\]\s*,\s*"([^"]+)"\s*,\s*"image\/[a-zA-Z0-9.+-]+"/g;
+          for (const m of unescaped.matchAll(ivdImgRegex)) {
+            if (m[1] !== folderId) {
+              foundFiles.set(m[1], m[2]);
+            }
+          }
+        } catch {
+          // Handled below if empty
+        }
+      }
+
+      if (!albumTitle) albumTitle = 'Google Drive 공유 폴더';
+
+      const entries = Array.from(foundFiles.entries()).slice(0, 120);
+      if (entries.length === 0) {
+        throw new Error(
+          '구글 드라이브 폴더에서 사진을 찾지 못했습니다. 폴더 공유 설정이 반드시 [제한됨]이 아닌 [링크가 있는 모든 사용자(뷰어)]로 열려 있어야 하며, 폴더 안에 이미지 파일(JPG/PNG/WEBP)이 들어 있는지 확인해 주세요.'
+        );
+      }
+
+      const photos: PhotoItem[] = entries.map(([fileId, fileName], idx) => ({
+        id: `${params.albumId}-gdrive-${idx}`,
+        albumId: params.albumId,
+        albumName: albumTitle,
+        provider: 'google_drive',
+        src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
+        assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+        title: fileName.replace(/\.[^.]+$/, ''),
+        date: todayLabel,
+        location: albumTitle,
+        tags: ['구글드라이브', albumTitle],
+        aiSummary: `Google Drive "${albumTitle}" 폴더에서 불러온 실제 사진입니다.`,
+      }));
+
+      return {
+        provider: 'google_drive',
+        albumTitle,
+        resolvedUrl: rawUrl,
+        photos,
+      };
+    }
+  }
+
+  // ==========================================================================
+  // CASE D: Microsoft OneDrive / 1drv.ms Shared Folder or Photo
+  // ==========================================================================
+  if (/1drv\.ms|onedrive\.live\.com|sharepoint\.com/i.test(rawUrl)) {
+    let finalShareUrl = rawUrl;
+    try {
+      const headFollow = await rawGet(rawUrl);
+      if (headFollow.url) finalShareUrl = headFollow.url;
+    } catch {
+      // Keep original URL
+    }
+
+    // Obtain anonymous Microsoft Badger token for public OneDrive shares
+    let badgerToken = '';
+    try {
+      const tokenRes = await rawPost(
+        'https://api-badgerp.svc.ms/v1.0/token',
+        { appId: '5cbed6ac-a083-4e14-b191-b4ba07653de2' },
+        'application/json'
+      );
+      const tokenObj = tokenRes.json as { token?: string } | undefined;
+      if (tokenObj?.token) {
+        badgerToken = tokenObj.token;
+      }
+    } catch {
+      // Badger fallback below
+    }
+
+    interface OneDriveItem {
+      id?: string;
+      name?: string;
+      file?: { mimeType?: string };
+      image?: Record<string, unknown>;
+      photo?: { takenDateTime?: string };
+      '@content.downloadUrl'?: string;
+      thumbnails?: Array<{ large?: { url?: string } }>;
+      children?: OneDriveItem[];
+    }
+
+    const candidateUrls = Array.from(new Set([rawUrl, finalShareUrl]));
+    let rootItem: OneDriveItem | null = null;
+
+    for (const candidate of candidateUrls) {
+      const shareId = encodeOneDriveShareToken(candidate);
+      const endpoints = [
+        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children`,
+        `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($expand=thumbnails)`,
+      ];
+
+      for (const ep of endpoints) {
+        try {
+          const headers: Record<string, string> = { Accept: 'application/json' };
+          if (badgerToken) {
+            headers.Authorization = `Badger ${badgerToken}`;
+            headers.Prefer = 'autoredeem';
+          }
+          const r = await rawGet(ep, headers);
+          const data = r.json as OneDriveItem | undefined;
+          if (r.status >= 200 && r.status < 300 && data && (data.children || data['@content.downloadUrl'])) {
+            rootItem = data;
+            break;
+          }
+        } catch {
+          // Try next endpoint
+        }
+      }
+      if (rootItem) break;
+    }
+
+    if (rootItem) {
+      const albumTitle = params.customTitle?.trim() || rootItem.name || 'OneDrive 공유 앨범';
+      const rawItems = Array.isArray(rootItem.children) && rootItem.children.length > 0 ? rootItem.children : [rootItem];
+      const imageItems = rawItems.filter((item) => {
+        const dl = item['@content.downloadUrl'] || item.thumbnails?.[0]?.large?.url;
+        if (!dl) return false;
+        if (item.image || item.photo) return true;
+        if (item.file?.mimeType?.startsWith('image/')) return true;
+        return /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(item.name || '');
+      });
+
+      if (imageItems.length > 0) {
+        const photos: PhotoItem[] = imageItems.slice(0, 120).map((item, idx) => {
+          const imgUrl = item['@content.downloadUrl'] || item.thumbnails?.[0]?.large?.url || '';
+          const dateStr = item.photo?.takenDateTime
+            ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+              })
+            : todayLabel;
+          return {
+            id: `${params.albumId}-onedrive-${idx}`,
+            albumId: params.albumId,
+            albumName: albumTitle,
+            provider: 'onedrive',
+            src: imgUrl,
+            title: (item.name || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
+            date: dateStr,
+            location: albumTitle,
+            tags: ['원드라이브', albumTitle],
+            aiSummary: `OneDrive "${albumTitle}" 공유 링크에서 불러온 실제 사진입니다.`,
+          };
+        });
+
+        return {
+          provider: 'onedrive',
+          albumTitle,
+          resolvedUrl: finalShareUrl,
+          photos,
+        };
+      }
+    }
+
+    throw new Error(
+      'OneDrive 공유 링크에서 사진을 불러오지 못했습니다. 원드라이브 공유 설정이 [링크가 있는 모든 사용자 보기 가능(비밀번호 없음)]인지, 폴더 안에 이미지 파일이 있는지 확인해 주세요.'
+    );
+  }
+
+  // ==========================================================================
+  // CASE E: Synology Photos & Synology File Station Share Links
+  //   Examples:
+  //   - https://nas.synology.me:5001/mo/sharing/AbCdEf123
+  //   - https://nas.synology.me:9999/photo/mo/sharing/AbCdEf123
+  //   - https://nas.synology.me:5001/sharing/XyZ987
+  //   - https://gofile.me/6A2B3/AbCdEf123
+  // ==========================================================================
+  let resolvedSynoUrl = rawUrl;
+  let initialLandingHtml = '';
+  try {
+    const landing = await rawGet(rawUrl);
+    if (landing.url) resolvedSynoUrl = landing.url;
+    initialLandingHtml = landing.text || '';
+  } catch {
+    // Keep rawUrl and still attempt API endpoints directly
+  }
+
+  const synoShareMatch = resolvedSynoUrl.match(
+    /^(https?:\/\/[^/?#]+)((?:\/[^/?#]+)*?)\/(?:mo\/)?(?:fb)?sharing\/([a-zA-Z0-9_-]+)/i
+  );
+
+  if (synoShareMatch || /synology|gofile\.me|\/sharing\//i.test(resolvedSynoUrl)) {
+    if (!synoShareMatch) {
+      throw new Error(
+        '시놀로지 공유 링크(QuickConnect/gofile.me) 리다이렉트 주소를 해석하지 못했습니다. 시놀로지 DDNS 주소(예: https://이름.synology.me:포트/mo/sharing/코드) 형태의 링크를 사용해 주세요.'
+      );
+    }
+
+    const origin = synoShareMatch[1];
+    const prefixPath = synoShareMatch[2] || ''; // e.g. "" or "/photo"
+    const passphrase = synoShareMatch[3];
+    const shareHeaders: Record<string, string> = {
+      'X-SYNO-SHARING': passphrase,
+    };
+
+    // Candidate Synology Photos & DSM WebAPI entry points
+    const entryEndpoints = Array.from(
+      new Set([
+        ...(prefixPath ? [`${origin}${prefixPath}/webapi/entry.cgi`] : []),
+        `${origin}/photo/webapi/entry.cgi`,
+        `${origin}/webapi/entry.cgi`,
+      ])
+    );
+
+    let detectedAlbumTitle = params.customTitle?.trim() || '';
+
+    // E-1: Try Synology Photos Public Share API (`SYNO.Foto.Sharing.*` + `SYNO.Foto.Browse.Item`)
+    for (const entryUrl of entryEndpoints) {
+      try {
+        // Step 1: Login / unlock share session cookie (works both with and without password)
+        const loginBody = new URLSearchParams({
+          api: 'SYNO.Foto.Sharing.Passphrase',
+          version: '1',
+          method: 'login',
+          passphrase,
+        });
+        if (params.password?.trim()) {
+          loginBody.set('password', params.password.trim());
+        }
+        await rawPost(entryUrl, loginBody.toString(), 'application/x-www-form-urlencoded', shareHeaders).catch(
+          () => null
+        );
+
+        // Optional album metadata query (`SYNO.Foto.Sharing.Misc` -> `get_info`)
+        if (!detectedAlbumTitle) {
+          const infoBody = new URLSearchParams({
+            api: 'SYNO.Foto.Sharing.Misc',
+            version: '1',
+            method: 'get_info',
+            passphrase,
+          });
+          const infoRes = await rawPost(
+            entryUrl,
+            infoBody.toString(),
+            'application/x-www-form-urlencoded',
+            shareHeaders
+          ).catch(() => null);
+          const infoJson = infoRes?.json as { data?: { album?: { name?: string }; name?: string } } | undefined;
+          const fetchedName = infoJson?.data?.album?.name || infoJson?.data?.name;
+          if (fetchedName) detectedAlbumTitle = fetchedName;
+        }
+
+        // Step 2: List shared photos via `SYNO.Foto.Browse.Item`
+        const listBody = new URLSearchParams({
+          api: 'SYNO.Foto.Browse.Item',
+          version: '1',
+          method: 'list',
+          offset: '0',
+          limit: '200',
+          additional: '["thumbnail"]',
+          passphrase,
+        });
+
+        let listRes = await rawPost(entryUrl, listBody.toString(), 'application/x-www-form-urlencoded', shareHeaders);
+        let listJson = listRes.json as {
+          success?: boolean;
+          error?: { code?: number };
+          data?: {
+            list?: Array<{
+              id: number;
+              filename?: string;
+              type?: string;
+              time?: number;
+              additional?: { thumbnail?: { cache_key?: string; xl?: string; m?: string } };
+            }>;
+          };
+        } | undefined;
+
+        if (!listJson?.success) {
+          // Retry with version=2 in case DSM 7.2+ requires v2
+          listBody.set('version', '2');
+          listRes = await rawPost(entryUrl, listBody.toString(), 'application/x-www-form-urlencoded', shareHeaders);
+          listJson = listRes.json as typeof listJson;
+        }
+
+        if (listJson?.success && Array.isArray(listJson.data?.list) && listJson.data.list.length > 0) {
+          const albumTitle = detectedAlbumTitle || 'Synology Photos 공유 앨범';
+          const photoItems = listJson.data.list.filter((it) => it.type !== 'video');
+          if (photoItems.length > 0) {
+            const photos: PhotoItem[] = photoItems.slice(0, 150).map((item, idx) => {
+              const cacheKey = item.additional?.thumbnail?.cache_key || `${item.id}_0`;
+              const thumbParams = new URLSearchParams({
+                api: 'SYNO.Foto.Thumbnail',
+                version: '2',
+                method: 'get',
+                mode: 'download',
+                id: String(item.id),
+                type: 'unit',
+                size: 'xl',
+                cache_key: cacheKey,
+                passphrase,
+                _sharing_id: passphrase,
+              });
+              const thumbV1Params = new URLSearchParams({
+                api: 'SYNO.Foto.Thumbnail',
+                version: '1',
+                method: 'get',
+                mode: 'download',
+                id: String(item.id),
+                type: 'unit',
+                size: 'xl',
+                cache_key: cacheKey,
+                passphrase,
+                _sharing_id: passphrase,
+              });
+
+              const dateStr = item.time
+                ? new Date(item.time * 1000).toLocaleDateString('ko-KR', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                  })
+                : todayLabel;
+
+              return {
+                id: `${params.albumId}-synofoto-${item.id}-${idx}`,
+                albumId: params.albumId,
+                albumName: albumTitle,
+                provider: 'synology_api',
+                src: `${entryUrl}?${thumbParams.toString()}`,
+                assetUrl: `${entryUrl}?${thumbV1Params.toString()}`,
+                title: (item.filename || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
+                date: dateStr,
+                location: albumTitle,
+                tags: ['시놀로지포토', albumTitle],
+                aiSummary: `Synology Photos "${albumTitle}" 공유 앨범에서 불러온 실제 사진입니다.`,
+              };
+            });
+
+            return {
+              provider: 'synology_api',
+              albumTitle,
+              resolvedUrl: resolvedSynoUrl,
+              photos,
+            };
+          }
+        }
+      } catch {
+        // Try next entryUrl or FileStation share API
+      }
+    }
+
+    // E-2: Try Synology DSM File Station Folder/File Share API (`SYNO.Core.Sharing.Login` + `SYNO.FolderSharing.List`)
+    try {
+      const dsmEntry = `${origin}/webapi/entry.cgi`;
+      const fsLogin = new URLSearchParams({
+        api: 'SYNO.Core.Sharing.Login',
+        version: '1',
+        method: 'login',
+        sharing_id: passphrase,
+      });
+      if (params.password?.trim()) {
+        fsLogin.set('password', params.password.trim());
+      }
+      const loginRes = await rawPost(dsmEntry, fsLogin.toString(), 'application/x-www-form-urlencoded', shareHeaders);
+      const loginJson = loginRes.json as {
+        success?: boolean;
+        data?: { sharing_sid?: string };
+      } | undefined;
+
+      const sharingSid = loginJson?.data?.sharing_sid || '';
+      const fsListParams = new URLSearchParams({
+        api: 'SYNO.FolderSharing.List',
+        version: '2',
+        method: 'list',
+        sharing_id: passphrase,
+        offset: '0',
+        limit: '200',
+        additional: '["time"]',
+      });
+      if (sharingSid) fsListParams.set('_sharing_sid', sharingSid);
+
+      const fsListRes = await rawPost(
+        dsmEntry,
+        fsListParams.toString(),
+        'application/x-www-form-urlencoded',
+        shareHeaders
+      );
+      const fsListJson = fsListRes.json as {
+        success?: boolean;
+        data?: {
+          files?: Array<{
+            name: string;
+            path: string;
+            isdir?: boolean;
+            additional?: { time?: { mtime?: number } };
+          }>;
+        };
+      } | undefined;
+
+      const imageFiles = (fsListJson?.data?.files ?? []).filter(
+        (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name)
+      );
+
+      if (imageFiles.length > 0) {
+        const albumTitle = detectedAlbumTitle || 'Synology 공유 폴더 앨범';
+        const photos: PhotoItem[] = imageFiles.slice(0, 150).map((file, idx) => {
+          const dlParams = new URLSearchParams({
+            api: 'SYNO.FolderSharing.Download',
+            version: '2',
+            method: 'download',
+            mode: 'open',
+            sharing_id: passphrase,
+            path: file.path,
+          });
+          if (sharingSid) dlParams.set('_sharing_sid', sharingSid);
+          const mtime = file.additional?.time?.mtime;
+          const dateStr = mtime
+            ? new Date(mtime * 1000).toLocaleDateString('ko-KR', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+              })
+            : todayLabel;
+
+          return {
+            id: `${params.albumId}-synofs-${idx}`,
+            albumId: params.albumId,
+            albumName: albumTitle,
+            provider: 'synology_api',
+            src: `${dsmEntry}?${dlParams.toString()}`,
+            title: file.name.replace(/\.[^.]+$/, ''),
+            date: dateStr,
+            location: albumTitle,
+            tags: ['시놀로지NAS', albumTitle],
+            aiSummary: `Synology NAS "${albumTitle}" 공유 폴더에서 불러온 실제 사진입니다.`,
+          };
+        });
+
+        return {
+          provider: 'synology_api',
+          albumTitle,
+          resolvedUrl: resolvedSynoUrl,
+          photos,
+        };
+      }
+    } catch {
+      // Handled below
+    }
+
+    throw new Error(
+      params.password?.trim()
+        ? '시놀로지 공유 링크에서 사진을 불러오지 못했습니다. 공유 비밀번호가 맞는지, 외부에서 접속 가능한 DDNS 주소/포트인지, 앨범 안에 사진이 있는지 확인해 주세요.'
+        : '시놀로지 공유 링크에서 사진을 불러오지 못했습니다. [공개 링크 활성화] 상태인지 확인하시고, 링크에 비밀번호가 걸려 있다면 아래 [공유 비밀번호] 칸에 입력 후 다시 시도해 주세요.'
+    );
+  }
+
+  // ==========================================================================
+  // CASE F: Generic Public Webpage / Direct Content-Type Image Fallback
+  // ==========================================================================
+  if (initialLandingHtml) {
+    const ogImage = extractOgMeta(initialLandingHtml, 'og:image');
+    const ogTitle = extractOgMeta(initialLandingHtml, 'og:title');
+    if (ogImage && /^https?:\/\//i.test(ogImage)) {
+      const albumTitle = params.customTitle?.trim() || ogTitle || '웹 공유 사진';
+      return {
+        provider: 'share_link',
+        albumTitle,
+        resolvedUrl: resolvedSynoUrl,
+        photos: [
+          {
+            id: `${params.albumId}-web-0`,
+            albumId: params.albumId,
+            albumName: albumTitle,
+            provider: 'share_link',
+            src: ogImage,
+            title: albumTitle,
+            date: todayLabel,
+            location: albumTitle,
+            tags: ['공유사진', albumTitle],
+            aiSummary: `${albumTitle} 공유 링크에서 불러온 실제 사진입니다.`,
+          },
+        ],
+      };
+    }
+  }
+
+  throw new Error(
+    '입력하신 공유 링크에서 실제 사진을 찾지 못했습니다. 지원하는 공유 링크 형식인지(구글 포토 공유 앨범, 구글 드라이브 공개 폴더, 원드라이브 공유 폴더, 시놀로지 포토 공유 링크) 및 [링크가 있는 모든 사용자 공개] 설정 여부를 확인해 주세요.'
+  );
 }

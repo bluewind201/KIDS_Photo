@@ -2124,7 +2124,22 @@ export default function App() {
           currentCity={locationInfo.city}
           martItems={martItems}
           onClose={() => setSettingsModalTab(null)}
-          onAddAlbum={(newAlbum) => setAlbums((prev) => [newAlbum, ...prev])}
+          onAddAlbum={(newAlbum) => {
+            const isSampleAlbum = newAlbum.id.startsWith('album-sample-');
+            setAlbums((prev) => {
+              const cleanedPrev = isSampleAlbum
+                ? prev
+                : prev.map((a) =>
+                    a.id === 'album-gdrive-family-2026' ||
+                    a.id === 'album-synology-camping-winter' ||
+                    a.id.startsWith('album-sample-')
+                      ? { ...a, enabled: false }
+                      : a
+                  );
+              return [newAlbum, ...cleanedPrev];
+            });
+            setCurrentPhotoIdx(0);
+          }}
           onToggleAlbum={(albumId) =>
             setAlbums((prev) =>
               prev.map((a) => (a.id === albumId ? { ...a, enabled: !a.enabled } : a))
