@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Signed Android APK
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -53,30 +53,38 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Android APK
+      - name: Build Signed Release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          KIDSPHOTO_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          KIDSPHOTO_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | tr -d ' \t\r\n' | base64 -d > "$RUNNER_TEMP/release.jks"
+            export KIDSPHOTO_KEYSTORE="$RUNNER_TEMP/release.jks"
+            echo "Signing APK with fixed release keystore"
+          else
+            echo "::warning::SIGNING_KEYSTORE_BASE64 not set; using fixed fallback keystore"
+          fi
+          ./gradlew assembleRelease
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: KIDS_Photo-apk
-          path: android/app/build/outputs/apk/debug/*.apk
-
-      - name: Publish APK to latest-apk release
+      - name: Publish Signed APK to latest-apk release
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          apk_path=$(find android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          apk_path=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$apk_path" ]; then
-            echo "No APK found to publish!"
+            echo "No release APK found to publish!"
             exit 1
           fi
           cp "$apk_path" KIDS_Photo.apk
+          vcode=$((100 + GITHUB_RUN_NUMBER))
+          vname="1.1.${vcode}"
           gh release delete latest-apk --yes --cleanup-tag || true
           gh release create latest-apk KIDS_Photo.apk \
             --prerelease \
             --target "$GITHUB_SHA" \
-            --title "KIDS_Photo 최신 APK (토순이네 스마트 액자)" \
-            --notes "자동 빌드 배포 - 브랜치: ${GITHUB_REF_NAME}, 커밋: ${GITHUB_SHA::7}, 빌드번호: ${GITHUB_RUN_NUMBER}"
+            --title "KIDS_Photo v${vname} (토순이네 스마트 액자 - 고정 서명 정식 빌드)" \
+            --notes "고정 릴리스 서명 키 적용 (이후 버전부터 삭제 없이 바로 덮어쓰기 업데이트 설치 가능) - 브랜치: ${GITHUB_REF_NAME}, 커밋: ${GITHUB_SHA::7}, versionCode: ${vcode}"

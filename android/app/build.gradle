@@ -1,5 +1,10 @@
 apply plugin: 'com.android.application'
 
+def ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")
+def computedVersionCode = ciRunNumber ? (100 + ciRunNumber.toInteger()) : 1
+def releaseKeystorePath = System.getenv("KIDSPHOTO_KEYSTORE")
+def releaseKeystoreFile = releaseKeystorePath ? file(releaseKeystorePath) : null
+
 android {
     namespace = "com.bluewind.kidsphoto"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +12,8 @@ android {
         applicationId "com.bluewind.kidsphoto"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode computedVersionCode
+        versionName "1.1.${computedVersionCode}"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,9 +21,29 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        if (releaseKeystoreFile != null && releaseKeystoreFile.exists()) {
+            release {
+                storeFile releaseKeystoreFile
+                storePassword System.getenv("KIDSPHOTO_KEYSTORE_PASSWORD")
+                keyAlias(System.getenv("KIDSPHOTO_KEY_ALIAS") ?: "kidsphoto")
+                keyPassword System.getenv("KIDSPHOTO_KEYSTORE_PASSWORD")
+            }
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.findByName('release') ?: signingConfigs.debug
+        }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.findByName('release') ?: signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
