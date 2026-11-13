@@ -40,6 +40,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
@@ -52,9 +53,12 @@ import org.json.JSONObject;
 public class MainActivity extends BridgeActivity {
     private static final int PERMISSION_REQUEST_CODE = 1001;
     private static final int MIC_PERMISSION_FOR_STT_CODE = 1002;
+    private static final int CALENDAR_PERMISSION_CODE = 1003;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService neuralTtsExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService photoOptExecutor = Executors.newFixedThreadPool(3);
+    private final ConcurrentHashMap<String, String> completedPhotoPayloads = new ConcurrentHashMap<>();
     private final AtomicLong activeSpeechGeneration = new AtomicLong(0L);
     private MediaPlayer activeNeuralPlayer = null;
     private TextToSpeech nativeTts = null;
@@ -113,8 +117,10 @@ public class MainActivity extends BridgeActivity {
             webCookieManager.setAcceptCookie(true);
             webCookieManager.setAcceptThirdPartyCookies(webView, true);
 
-            // Expose Native Android TTS + SpeechRecognizer directly to JS
+            // Expose Native Android TTS + SpeechRecognizer + Fast Photo Optimizer + Device Calendar Bridge directly to JS
             webView.addJavascriptInterface(new AndroidSpeechBridge(), "AndroidSpeechBridge");
+            webView.addJavascriptInterface(new AndroidPhotoBridge(), "AndroidPhotoBridge");
+            webView.addJavascriptInterface(new AndroidCalendarBridge(), "AndroidCalendarBridge");
 
             // Allow home Synology NAS self-signed SSL certificates for image streaming in WebView
             webView.setWebViewClient(new BridgeWebViewClient(getBridge()) {
@@ -635,7 +641,41 @@ public class MainActivity extends BridgeActivity {
                 pendingSttLang = null;
                 dispatchJsSttState(false, "not-allowed");
             }
+        } else if (requestCode == CALENDAR_PERMISSION_CODE) {
+            boolean granted =
+                grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            dispatchJsCalendarPermResult(granted);
         }
+    }
+
+    private void dispatchJsCalendarPermResult(boolean granted) {
+        mainHandler.post(() -> {
+            if (getBridge() == null || getBridge().getWebView() == null) return;
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("granted", granted);
+                String js =
+                    "window.dispatchEvent(new CustomEvent('nativeCalendarPermEvent', { detail: " +
+                    payload.toString() +
+                    " }));";
+                getBridge().getWebView().evaluateJavascript(js, null);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void dispatchJsPhotoOptReady(String requestId) {
+        mainHandler.post(() -> {
+            if (getBridge() == null || getBridge().getWebView() == null) return;
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("requestId", requestId != null ? requestId : "");
+                String js =
+                    "window.dispatchEvent(new CustomEvent('nativePhotoOptReady', { detail: " +
+                    payload.toString() +
+                    " }));";
+                getBridge().getWebView().evaluateJavascript(js, null);
+            } catch (Exception ignored) {}
+        });
     }
 
     private void dispatchJsTtsEvent(String utteranceId, String type) {
@@ -750,12 +790,105 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    public class AndroidPhotoBridge {
+        @JavascriptInterface
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public void optimizePhotoAsync(
+            String requestId,
+            String candidateUrlsJson,
+            String headersJson,
+            String sharePassword,
+            int maxDisplayDim,
+            int displayQuality,
+            int aiThumbDim
+        ) {
+            final String safeReqId =
+                (requestId != null && !requestId.isEmpty())
+                    ? requestId
+                    : ("req-" + System.currentTimeMillis());
+
+            photoOptExecutor.execute(() -> {
+                JSONObject res = NativePhotoOptimizer.fetchAndOptimize(
+                    getApplicationContext(),
+                    candidateUrlsJson,
+                    headersJson,
+                    sharePassword,
+                    maxDisplayDim,
+                    displayQuality,
+                    aiThumbDim
+                );
+                // Cap pending map size just in case a caller timed out
+                if (completedPhotoPayloads.size() > 40) {
+                    completedPhotoPayloads.clear();
+                }
+                completedPhotoPayloads.put(safeReqId, res.toString());
+                dispatchJsPhotoOptReady(safeReqId);
+            });
+        }
+
+        @JavascriptInterface
+        public String consumeCompletedResult(String requestId) {
+            if (requestId == null) return "{\"ok\":false}";
+            String val = completedPhotoPayloads.remove(requestId);
+            return val != null ? val : "{\"ok\":false}";
+        }
+    }
+
+    public class AndroidCalendarBridge {
+        @JavascriptInterface
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean hasCalendarPermission() {
+            return NativeCalendarHelper.hasPermission(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void requestCalendarPermission() {
+            mainHandler.post(() -> {
+                if (NativeCalendarHelper.hasPermission(MainActivity.this)) {
+                    dispatchJsCalendarPermResult(true);
+                    return;
+                }
+                ActivityCompat.requestPermissions(
+                    MainActivity.this,
+                    new String[] { Manifest.permission.READ_CALENDAR },
+                    CALENDAR_PERMISSION_CODE
+                );
+            });
+        }
+
+        @JavascriptInterface
+        public String listCalendars() {
+            return NativeCalendarHelper.listDeviceCalendarsJson(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public String getEvents(String calendarIdsJson, int daysAhead) {
+            return NativeCalendarHelper.getSelectedCalendarEventsJson(
+                MainActivity.this,
+                calendarIdsJson,
+                daysAhead
+            );
+        }
+    }
+
     @Override
     public void onDestroy() {
         activeSpeechGeneration.incrementAndGet();
         stopActiveNeuralPlayerOnMainThread();
         try {
             neuralTtsExecutor.shutdownNow();
+        } catch (Exception ignored) {}
+        try {
+            photoOptExecutor.shutdownNow();
+            completedPhotoPayloads.clear();
         } catch (Exception ignored) {}
 
         try {

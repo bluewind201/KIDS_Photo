@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Bus,
   Car,
@@ -10,6 +10,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { AssistantInquiryResult, BunnyId, PhotoItem } from '../types';
+import { getVaultDisplayObjectUrl, peekVaultObjectUrlSync } from '../utils/photoCacheDb';
 
 interface SplitInquiryPanelProps {
   inquiry: AssistantInquiryResult;
@@ -47,6 +48,19 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
   onReplayVoice,
 }) => {
   const [followUpText, setFollowUpText] = useState('');
+  const [vaultUrls, setVaultUrls] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!inquiry.matchedPhotos?.length) return;
+    inquiry.matchedPhotos.forEach((p) => {
+      if (vaultUrls[p.id] || p.src.startsWith('/')) return;
+      getVaultDisplayObjectUrl(p.id)
+        .then((u) => {
+          if (u) setVaultUrls((prev) => ({ ...prev, [p.id]: u }));
+        })
+        .catch(() => {});
+    });
+  }, [inquiry.matchedPhotos, vaultUrls]);
 
   const mins = String(Math.floor(remainingSeconds / 60)).padStart(2, '0');
   const secs = String(remainingSeconds % 60).padStart(2, '0');
@@ -226,7 +240,7 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
                   >
                     <div className="aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
                       <img
-                        src={photo.src}
+                        src={vaultUrls[photo.id] || peekVaultObjectUrlSync(photo.id) || photo.src}
                         alt={photo.title}
                         referrerPolicy="no-referrer"
                         decoding="async"

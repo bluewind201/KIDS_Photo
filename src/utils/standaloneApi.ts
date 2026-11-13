@@ -616,26 +616,64 @@ ${photoCatalogText}
     };
   }
 
-  // Check photo memory query
+  // Check photo memory query (matches against AI structured index: tags, season, mood, people, objects, location, title, summary!)
   const looksLikePhotoQuery =
-    /언제|어디|사진|갔|보여|바다|제주|숲|캠핑|단풍|벚꽃|소풍|딸기|놀이공원|에버랜드|회전목마|눈|썰매|눈사람|여행|추억/i.test(
+    /언제|어디|사진|갔|보여|찾아|바다|해변|제주|숲|공원|캠핑|단풍|가을|봄|여름|겨울|벚꽃|꽃|소풍|딸기|놀이공원|에버랜드|회전목마|눈|썰매|눈사람|웃|행복|생일|케이크|강아지|동물|여행|추억/i.test(
       trimmedMsg
     );
 
   if (looksLikePhotoQuery && params.photos.length > 0) {
-    const matched = params.photos.filter(
-      (p) =>
-        p.tags.some((t) => trimmedMsg.includes(t)) ||
-        trimmedMsg.includes(p.location.slice(0, 2)) ||
-        p.title.split(' ').some((w) => w.length >= 2 && trimmedMsg.includes(w))
-    );
-    const picked = matched.length > 0 ? matched.slice(0, 4) : params.photos.slice(0, 2);
+    const queryTokens = trimmedMsg
+      .replace(/[?!.,~]/g, ' ')
+      .split(/\s+/)
+      .map((w) => w.replace(/(사진|보여줘|찾아줘|갔던|어디야|언제야|에|에서|이|가|을|를)$/g, '').trim())
+      .filter((w) => w.length >= 2);
+
+    const scored = params.photos
+      .map((p) => {
+        const pExt = p as typeof p & {
+          season?: string;
+          mood?: string;
+          people?: string;
+          objects?: string[];
+        };
+        const haystack = [
+          p.title,
+          p.location,
+          p.albumName,
+          p.date,
+          p.aiSummary,
+          ...(p.tags ?? []),
+          pExt.season ?? '',
+          pExt.mood ?? '',
+          pExt.people ?? '',
+          ...(pExt.objects ?? []),
+        ]
+          .join(' ')
+          .toLowerCase();
+
+        let score = 0;
+        for (const t of p.tags ?? []) {
+          if (t && trimmedMsg.includes(t)) score += 5;
+        }
+        for (const tok of queryTokens) {
+          if (haystack.includes(tok.toLowerCase())) score += 3;
+        }
+        if (p.location && p.location.length >= 2 && trimmedMsg.includes(p.location.slice(0, 2))) {
+          score += 4;
+        }
+        return { photo: p, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const positiveMatches = scored.filter((s) => s.score > 0).map((s) => s.photo);
+    const picked = positiveMatches.length > 0 ? positiveMatches.slice(0, 4) : params.photos.slice(0, 2);
     const first = picked[0];
     return {
-      replyText: `우와~ 찾았다!! ${first.date}에 "${first.location}" 다녀왔던 사진이야! ${first.title} 추억이 정말 행복해 보여~!`,
+      replyText: `우와~ 찾았다!! ${first.date}에 "${first.location}" 추억 사진이야! ${first.aiSummary || `${first.title} 순간이 정말 행복해 보여~!`} `,
       isPhotoMemoryQuery: true,
       matchedPhotoIds: picked.map((p) => p.id),
-      memoryHeadline: `${name}가 찾아준 우리 가족 추억 사진`,
+      memoryHeadline: `${name}가 AI 데이터에서 찾아준 우리 가족 사진`,
       shouldSuggestEnglishReask: false,
       shouldShowFlashcard: false,
     };
@@ -903,10 +941,29 @@ export async function fetchSynologyFolderPhotos(params: {
     };
 
     const imageFiles = (json?.data?.files ?? []).filter(
-      (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name)
+      (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(f.name)
     );
 
-    return imageFiles.slice(0, 40).map((file, i) => {
+    return imageFiles.slice(0, 60).map((file, i) => {
+      // Prioritize rotated, lightweight Synology DSM thumbnails (`large` ~1280px ~180KB) before raw 25MB `Download`!
+      const thumbLargeParams = new URLSearchParams({
+        api: 'SYNO.FileStation.Thumb',
+        version: '2',
+        method: 'get',
+        path: file.path,
+        size: 'large',
+        rotate: 'true',
+        _sid: params.sid,
+      });
+      const thumbMediumParams = new URLSearchParams({
+        api: 'SYNO.FileStation.Thumb',
+        version: '2',
+        method: 'get',
+        path: file.path,
+        size: 'medium',
+        rotate: 'true',
+        _sid: params.sid,
+      });
       const dlParams = new URLSearchParams({
         api: 'SYNO.FileStation.Download',
         version: '2',
@@ -915,7 +972,9 @@ export async function fetchSynologyFolderPhotos(params: {
         mode: 'open',
         _sid: params.sid,
       });
-      const imgUrl = `${params.cleanBase}/webapi/entry.cgi?${dlParams.toString()}`;
+      const thumbLargeUrl = `${params.cleanBase}/webapi/entry.cgi?${thumbLargeParams.toString()}`;
+      const thumbMedUrl = `${params.cleanBase}/webapi/entry.cgi?${thumbMediumParams.toString()}`;
+      const rawDlUrl = `${params.cleanBase}/webapi/entry.cgi?${dlParams.toString()}`;
       const mtime = file.additional?.time?.mtime;
       const dateStr = mtime
         ? new Date(mtime * 1000).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -926,7 +985,9 @@ export async function fetchSynologyFolderPhotos(params: {
         albumId: params.albumId,
         albumName: params.albumName,
         provider: params.provider,
-        src: imgUrl,
+        src: thumbLargeUrl,
+        assetUrl: thumbMedUrl,
+        fallbackUrls: [rawDlUrl],
         title: file.name.replace(/\.[^.]+$/, ''),
         date: dateStr,
         location: params.albumName,
@@ -1272,6 +1333,232 @@ export async function analyzePhotoUnified(params: {
     }
   }
   return null;
+}
+
+export interface BatchPhotoInputItem {
+  photoId: string;
+  fileName: string;
+  albumName: string;
+  dateStr: string;
+  /** Compact 384px JPEG raw base64 (~12-16KB) from IndexedDB vault */
+  aiThumbBase64: string;
+  visualHintTags?: string[];
+}
+
+export interface AnalyzedPhotoStructuredData {
+  photoId: string;
+  title: string;
+  location: string;
+  aiSummary: string;
+  season?: string;
+  mood?: string;
+  people?: string;
+  objects?: string[];
+  tags: string[];
+  analyzedByGemini: boolean;
+}
+
+/**
+ * Builds an instant zero-latency structured index from filename/date/visual-pixel tags
+ * when Gemini is not yet connected, so search & captions still work cleanly right away!
+ */
+export function buildSmartLocalPhotoIndex(item: BatchPhotoInputItem): AnalyzedPhotoStructuredData {
+  const rawName = item.fileName.replace(/\.[^.]+$/, '');
+  let inferredDate = item.dateStr;
+  let season = '';
+
+  const dateMatch = rawName.match(/(20\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])/);
+  if (dateMatch) {
+    const yr = Number(dateMatch[1]);
+    const mo = Number(dateMatch[2]);
+    const da = Number(dateMatch[3]);
+    inferredDate = `${yr}년 ${mo}월 ${da}일`;
+    if (mo >= 3 && mo <= 5) season = '봄';
+    else if (mo >= 6 && mo <= 8) season = '여름';
+    else if (mo >= 9 && mo <= 11) season = '가을';
+    else season = '겨울';
+  } else {
+    const mMatch = item.dateStr.match(/(\d{1,2})월/);
+    if (mMatch) {
+      const mo = Number(mMatch[1]);
+      if (mo >= 3 && mo <= 5) season = '봄';
+      else if (mo >= 6 && mo <= 8) season = '여름';
+      else if (mo >= 9 && mo <= 11) season = '가을';
+      else season = '겨울';
+    }
+  }
+
+  const hints = item.visualHintTags ?? [];
+  const isGenericCameraName =
+    /^(IMG|DSC|PXL|SAM|KakaoTalk|Screenshot|photo|image|\d{8})[-_\d\s]*$/i.test(rawName);
+
+  const vibeWord = hints.includes('바다·하늘')
+    ? '푸른 하늘 나들이'
+    : hints.includes('숲·공원')
+    ? '초록 자연 산책'
+    : hints.includes('눈·겨울')
+    ? '하얀 겨울날 추억'
+    : hints.includes('따뜻한분위기')
+    ? '포근한 가족 일상'
+    : season
+    ? `${season}날의 소중한 추억`
+    : '행복한 가족 추억';
+
+  const cleanTitle = isGenericCameraName ? `${item.albumName} · ${vibeWord}` : rawName;
+  const tagSet = new Set<string>([
+    item.albumName,
+    ...(season ? [season] : []),
+    ...hints,
+    '가족추억',
+  ]);
+
+  return {
+    photoId: item.photoId,
+    title: cleanTitle,
+    location: item.albumName,
+    aiSummary: `${inferredDate} "${item.albumName}" 앨범에 담긴 ${vibeWord} 사진입니다.`,
+    season: season || undefined,
+    mood: '따뜻함',
+    tags: Array.from(tagSet).slice(0, 8),
+    analyzedByGemini: false,
+  };
+}
+
+/**
+ * Ultra-fast Batch AI Photo Indexer:
+ * Sends up to 5 ultra-compact 384px (~14KB) thumbnails in a SINGLE Gemini 2.5 Flash call
+ * (~70KB total payload -> ~2s per 5 photos!) and structures them into searchable metadata!
+ */
+export async function analyzePhotoBatchUnified(
+  batch: BatchPhotoInputItem[]
+): Promise<AnalyzedPhotoStructuredData[]> {
+  if (batch.length === 0) return [];
+
+  // 1) Try backend batch endpoint if available
+  const backend = await tryBackendJson<{ items?: AnalyzedPhotoStructuredData[] }>(
+    '/api/gemini/analyze-photo-batch',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: batch }),
+    },
+    18000
+  );
+  if (backend.ok && Array.isArray(backend.data.items) && backend.data.items.length > 0) {
+    return backend.data.items;
+  }
+
+  // 2) Direct Client Gemini 2.5 Flash Multimodal Batch Call
+  const ai = getClientGemini();
+  if (ai) {
+    try {
+      const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+        {
+          text: `다음 ${batch.length}장의 가족·아이 스마트 액자 사진을 순서대로(index 0 ~ ${
+            batch.length - 1
+          }) 빠르게 분석하여 나중에 음성으로("바다 사진 보여줘", "웃는 사진", "겨울 눈썰매 사진" 등) 즉시 검색할 수 있도록 구조화된 한국어 JSON 배열로 데이터화해 주세요.
+각 사진마다 다음 항목을 채워 주세요:
+- index: 사진 번호 (0부터 시작)
+- title: IMG_1234 같은 파일명 대신 사진 속 장면을 따뜻하게 담은 짧은 한국어 제목
+- location: 사진 배경으로 파악되는 장소·공간 (예: "모래사장 해변", "단풍 숲길", "거실 생일파티")
+- season: 계절 유추 ("봄", "여름", "가을", "겨울", "사계절" 중 하나)
+- mood: 분위기·감정 키워드 (예: "신남", "행복한 미소", "평화로움", "장난꾸러기")
+- people: 인물 구성 (예: "아이 단독", "아이와 부모님", "가족 단체", "풍경·사물")
+- objects: 사진 속 주요 사물·배경 단어 3~5개 배열 (예: ["바다", "모래성", "밀짚모자"])
+- aiSummary: 3D 토끼가 아이에게 이야기해 줄 수 있는 다정한 한국어 1~2문장 설명
+- tags: 검색용 핵심 키워드 6~8개 배열`,
+        },
+      ];
+
+      batch.forEach((item, idx) => {
+        const cleanB64 = item.aiThumbBase64.includes(',')
+          ? item.aiThumbBase64.slice(item.aiThumbBase64.indexOf(',') + 1)
+          : item.aiThumbBase64;
+        parts.push({
+          text: `[사진 index=${idx}] 원본이름="${item.fileName}", 앨범="${item.albumName}", 촬영일="${item.dateStr}"`,
+        });
+        parts.push({
+          inlineData: {
+            mimeType: 'image/jpeg',
+            data: cleanB64,
+          },
+        });
+      });
+
+      const resp = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                index: { type: Type.INTEGER },
+                title: { type: Type.STRING },
+                location: { type: Type.STRING },
+                season: { type: Type.STRING },
+                mood: { type: Type.STRING },
+                people: { type: Type.STRING },
+                objects: { type: Type.ARRAY, items: { type: Type.STRING } },
+                aiSummary: { type: Type.STRING },
+                tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: ['index', 'title', 'location', 'aiSummary', 'tags'],
+            },
+          },
+        },
+      });
+
+      const rawArr = JSON.parse((resp.text ?? '[]').trim()) as Array<{
+        index: number;
+        title?: string;
+        location?: string;
+        season?: string;
+        mood?: string;
+        people?: string;
+        objects?: string[];
+        aiSummary?: string;
+        tags?: string[];
+      }>;
+
+      if (Array.isArray(rawArr) && rawArr.length > 0) {
+        return batch.map((inputItem, idx) => {
+          const found = rawArr.find((r) => r.index === idx) ?? rawArr[idx];
+          if (!found || (!found.title && !found.aiSummary)) {
+            return buildSmartLocalPhotoIndex(inputItem);
+          }
+          const mergedTags = Array.from(
+            new Set([
+              ...(found.tags ?? []),
+              ...(found.objects ?? []),
+              ...(found.season ? [found.season] : []),
+              ...(found.mood ? [found.mood] : []),
+              inputItem.albumName,
+            ])
+          ).slice(0, 10);
+
+          return {
+            photoId: inputItem.photoId,
+            title: found.title?.trim() || inputItem.fileName,
+            location: found.location?.trim() || inputItem.albumName,
+            aiSummary: found.aiSummary?.trim() || '',
+            season: found.season?.trim(),
+            mood: found.mood?.trim(),
+            people: found.people?.trim(),
+            objects: found.objects,
+            tags: mergedTags,
+            analyzedByGemini: true,
+          };
+        });
+      }
+    } catch {
+      // Fall back to local smart indexing if quota/network error occurs
+    }
+  }
+
+  return batch.map((item) => buildSmartLocalPhotoIndex(item));
 }
 
 /**
@@ -2036,9 +2323,9 @@ export async function resolvePublicShareLinkUnified(params: {
       albumId: params.albumId,
       albumName: albumTitle,
       provider: 'google_drive',
-      src: `${baseUrl}=w2560-h2560`,
+      src: `${baseUrl}=w1600-h1600`,
       assetUrl: `${baseUrl}=w1920-h1080`,
-      fallbackUrls: [`${baseUrl}=w3840-h3840`, `${baseUrl}=d`, baseUrl],
+      fallbackUrls: [`${baseUrl}=w1280-h1280`, `${baseUrl}=d`, baseUrl],
       title: `${albumTitle} #${idx + 1}`,
       date: todayLabel,
       location: albumTitle,
@@ -2460,29 +2747,25 @@ export async function resolvePublicShareLinkUnified(params: {
           const photoItems = listJson.data.list.filter((it) => it.type !== 'video');
           if (photoItems.length > 0) {
             const photos: PhotoItem[] = photoItems.slice(0, 150).map((item, idx) => {
-              const cacheKey = item.additional?.thumbnail?.cache_key || `${item.id}_0`;
-              const thumbParams = new URLSearchParams({
-                api: 'SYNO.Foto.Thumbnail',
-                version: '2',
-                method: 'get',
-                mode: 'download',
-                id: String(item.id),
-                type: 'unit',
-                size: 'xl',
-                cache_key: cacheKey,
-                passphrase,
-              });
-              const thumbV1Params = new URLSearchParams({
-                api: 'SYNO.Foto.Thumbnail',
-                version: '1',
-                method: 'get',
-                mode: 'download',
-                id: String(item.id),
-                type: 'unit',
-                size: 'xl',
-                cache_key: cacheKey,
-                passphrase,
-              });
+              const thumbInfo = item.additional?.thumbnail;
+              const cacheKey = thumbInfo?.cache_key || `${item.id}_0`;
+              const xlReady = !thumbInfo?.xl || thumbInfo.xl === 'ready';
+
+              const makeSynoThumbUrl = (ver: string, size: string) => {
+                const p = new URLSearchParams({
+                  api: 'SYNO.Foto.Thumbnail',
+                  version: ver,
+                  method: 'get',
+                  mode: 'download',
+                  id: String(item.id),
+                  type: 'unit',
+                  size,
+                  cache_key: cacheKey,
+                  passphrase,
+                });
+                return `${entryUrl}?${p.toString()}`;
+              };
+
               const rawDownloadParams = new URLSearchParams({
                 api: 'SYNO.Foto.Download',
                 version: '1',
@@ -2490,6 +2773,21 @@ export async function resolvePublicShareLinkUnified(params: {
                 unit_id: `[${item.id}]`,
                 passphrase,
               });
+
+              const orderedCandidates = xlReady
+                ? [
+                    makeSynoThumbUrl('2', 'xl'),
+                    makeSynoThumbUrl('1', 'xl'),
+                    makeSynoThumbUrl('2', 'm'),
+                    makeSynoThumbUrl('1', 'm'),
+                    `${entryUrl}?${rawDownloadParams.toString()}`,
+                  ]
+                : [
+                    makeSynoThumbUrl('2', 'm'),
+                    makeSynoThumbUrl('1', 'm'),
+                    makeSynoThumbUrl('2', 'xl'),
+                    `${entryUrl}?${rawDownloadParams.toString()}`,
+                  ];
 
               const dateStr = item.time
                 ? new Date(item.time * 1000).toLocaleDateString('ko-KR', {
@@ -2504,9 +2802,9 @@ export async function resolvePublicShareLinkUnified(params: {
                 albumId: params.albumId,
                 albumName: albumTitle,
                 provider: 'synology_api',
-                src: `${entryUrl}?${thumbParams.toString()}`,
-                assetUrl: `${entryUrl}?${thumbV1Params.toString()}`,
-                fallbackUrls: [`${entryUrl}?${rawDownloadParams.toString()}`],
+                src: orderedCandidates[0],
+                assetUrl: orderedCandidates[1],
+                fallbackUrls: orderedCandidates.slice(2),
                 nativeHeaders: {
                   'X-SYNO-SHARING': passphrase,
                 },
@@ -2580,7 +2878,7 @@ export async function resolvePublicShareLinkUnified(params: {
       } | undefined;
 
       const imageFiles = (fsListJson?.data?.files ?? []).filter(
-        (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp)$/i.test(f.name)
+        (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(f.name)
       );
 
       if (imageFiles.length > 0) {

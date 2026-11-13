@@ -36,9 +36,20 @@ import {
   PhotoItem,
   PowerScheduleConfig,
   ScheduleItem,
+  SelectableCalendarSource,
   WeatherEffectMode,
   WeatherPayload,
 } from './types';
+import {
+  discoverAndMergeDeviceCalendars,
+  fetchAllSelectedCalendarSchedules,
+  getAndroidCalendarBridge,
+  loadSavedCalendarSources,
+  saveCalendarSources,
+  testAndPreviewIcsCalendar,
+} from './utils/calendarSync';
+import { deleteAlbumPhotosFromVault } from './utils/photoCacheDb';
+import { runAlbumVaultAndAiPipeline } from './utils/photoSyncPipeline';
 import {
   getAndroidSpeechBridge,
   installGlobalAudioUnlock,
@@ -49,11 +60,9 @@ import {
   stopCurrentSpeech,
 } from './utils/speech';
 import {
-  analyzePhotoUnified,
   askAssistantUnified,
   askBunnyChatUnified,
   checkGeminiVisionAvailable,
-  extractPhotoBase64ForVision,
   fetchWeatherUnified,
   FRAME_SETTINGS_STORAGE_KEY,
   resolvePublicShareLinkUnified,
@@ -343,26 +352,25 @@ function upgradeLegacyPhotoResolutions(rawAlbums: DigitalAlbum[]): DigitalAlbum[
     ...album,
     photos: Array.isArray(album.photos)
       ? album.photos.map((p) => {
-          const upgradeUrl = (u?: string) => {
-            if (!u) return u;
+          const optimizeUrl = (u?: string) => {
+            if (!u || u.startsWith('idb:') || u.startsWith('data:')) return u;
             return u
-              .replace(/=w1920-h1080\b/g, '=w2560-h2560')
-              .replace(/=w2560-h1440\b/g, '=w3840-h3840')
-              .replace(/([?&]sz=)w1920\b/g, '$1w2560')
-              .replace(/=s1920\b/g, '=s2560')
-              .replace(/(\/d\/[a-zA-Z0-9_-]+)=w1920\b/g, '$1=w2560');
+              .replace(/=w(?:1920|2560|3840)-h(?:1080|1440|2560|3840)\b/g, '=w1600-h1600')
+              .replace(/([?&]sz=)w(?:1920|2560|3840)\b/g, '$1w1600')
+              .replace(/=s(?:1920|2560|3840)\b/g, '=s1600')
+              .replace(/(\/d\/[a-zA-Z0-9_-]+)=w(?:1920|2560|3840)\b/g, '$1=w1600');
           };
           const extraFallbacks: string[] = [...(p.fallbackUrls ?? [])];
           if (/lh3\.googleusercontent\.com\/(pw\/|(?:[a-zA-Z0-9_-]+\/)?AF1Qip)/i.test(p.src)) {
             const base = p.src.split('=')[0];
-            for (const cand of [`${base}=w1920-h1080`, `${base}=d`, base]) {
+            for (const cand of [`${base}=w1280-h1280`, `${base}=w1920-h1080`, base]) {
               if (!extraFallbacks.includes(cand)) extraFallbacks.push(cand);
             }
           }
           return {
             ...p,
-            src: upgradeUrl(p.src) ?? p.src,
-            assetUrl: upgradeUrl(p.assetUrl),
+            src: optimizeUrl(p.src) ?? p.src,
+            assetUrl: optimizeUrl(p.assetUrl),
             fallbackUrls: extraFallbacks.length > 0 ? extraFallbacks : p.fallbackUrls,
           };
         })
@@ -421,7 +429,116 @@ export default function App() {
   const [weather, setWeather] = useState<WeatherPayload | null>(null);
   const [isWeatherLoading, setIsWeatherLoading] = useState(false);
   const [schedules, setSchedules] = useState<ScheduleItem[]>(INITIAL_SCHEDULES);
+  const [calendarSources, setCalendarSources] = useState<SelectableCalendarSource[]>(() =>
+    loadSavedCalendarSources()
+  );
+  const [syncedCalendarSchedules, setSyncedCalendarSchedules] = useState<ScheduleItem[]>([]);
+  const [isCalendarSyncing, setIsCalendarSyncing] = useState<boolean>(false);
   const [martItems, setMartItems] = useState<MartTickerItem[]>(INITIAL_MART_TICKERS);
+
+  const mergedSchedules = useMemo<ScheduleItem[]>(() => {
+    const manualItems = schedules.filter((s) => !s.isSynced);
+    return [...syncedCalendarSchedules, ...manualItems];
+  }, [syncedCalendarSchedules, schedules]);
+
+  const syncedSelectedCalendarCount = useMemo(
+    () => calendarSources.filter((c) => c.selected).length,
+    [calendarSources]
+  );
+
+  useEffect(() => {
+    saveCalendarSources(calendarSources);
+  }, [calendarSources]);
+
+  const refreshSelectedCalendarsNow = useCallback(async () => {
+    setIsCalendarSyncing(true);
+    try {
+      const items = await fetchAllSelectedCalendarSchedules(calendarSources);
+      setSyncedCalendarSchedules(items);
+    } catch {
+      // Keep last synced schedules on transient network error
+    } finally {
+      setIsCalendarSyncing(false);
+    }
+  }, [calendarSources]);
+
+  // Auto-sync selected calendars whenever selection changes and every 30 minutes
+  useEffect(() => {
+    if (sleepState.sleeping) return;
+    void refreshSelectedCalendarsNow();
+    const timer = window.setInterval(() => {
+      void refreshSelectedCalendarsNow();
+    }, 30 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [refreshSelectedCalendarsNow, sleepState.sleeping]);
+
+  // If Android Calendar permission was already granted previously, silently refresh device calendar roster on mount
+  useEffect(() => {
+    const calBridge = getAndroidCalendarBridge();
+    if (!calBridge) return;
+    try {
+      if (calBridge.hasCalendarPermission?.()) {
+        discoverAndMergeDeviceCalendars(loadSavedCalendarSources())
+          .then((res) => {
+            if (res.granted && res.discoveredCount > 0) {
+              setCalendarSources(res.sources);
+            }
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const handleDiscoverDeviceCalendars = useCallback(async () => {
+    const res = await discoverAndMergeDeviceCalendars(calendarSources);
+    if (res.granted) {
+      setCalendarSources(res.sources);
+    }
+    return { granted: res.granted, discoveredCount: res.discoveredCount };
+  }, [calendarSources]);
+
+  const handleToggleCalendarSource = useCallback((sourceId: string) => {
+    setCalendarSources((prev) =>
+      prev.map((c) => (c.id === sourceId ? { ...c, selected: !c.selected } : c))
+    );
+  }, []);
+
+  const handleAddIcsCalendarSource = useCallback(
+    async (name: string, rawUrlOrId: string, colorHex: string) => {
+      const { normalizedUrl, sampleCount } = await testAndPreviewIcsCalendar(
+        rawUrlOrId,
+        name,
+        colorHex
+      );
+      const newSource: SelectableCalendarSource = {
+        id: `ics-${Date.now()}`,
+        name: name || '외부 공유 캘린더',
+        accountName: normalizedUrl.includes('google.com')
+          ? 'Google 캘린더 (.ics 연동)'
+          : normalizedUrl.includes('icloud.com')
+          ? 'Apple iCloud 캘린더 (.ics 연동)'
+          : normalizedUrl.includes('naver.com')
+          ? '네이버 캘린더 (.ics 연동)'
+          : '외부 iCal(.ics) 캘린더',
+        sourceType: 'ics_url',
+        colorHex,
+        selected: true,
+        icsUrl: normalizedUrl,
+      };
+      setCalendarSources((prev) => {
+        const filtered = prev.filter((c) => c.icsUrl !== normalizedUrl);
+        return [...filtered, newSource];
+      });
+      return { count: sampleCount };
+    },
+    []
+  );
+
+  const handleRemoveCalendarSource = useCallback((sourceId: string) => {
+    setCalendarSources((prev) => prev.filter((c) => c.id !== sourceId));
+  }, []);
 
   // Voice & Custom Wake Word State
   const [wakeWord, setWakeWord] = useState('하이 액자');
@@ -460,6 +577,7 @@ export default function App() {
   const [analysisRunNonce, setAnalysisRunNonce] = useState(0);
   const analysisRunningRef = useRef(false);
   const failedAnalysisIdsRef = useRef<Set<string>>(new Set());
+  const failedVaultIdsRef = useRef<Set<string>>(new Set());
   const albumsRef = useRef<DigitalAlbum[]>(albums);
   useEffect(() => {
     albumsRef.current = albums;
@@ -476,7 +594,7 @@ export default function App() {
   /**
    * Re-resolves public share links (OneDrive `1drv.ms`, Google Photos, Google Drive, Synology `/sharing/`)
    * so expired `@content.downloadUrl` tokens or wiped app-update cookies refresh cleanly while keeping
-   * existing photo IDs and Gemini AI analyzed titles/summaries/tags intact!
+   * existing photo IDs, IndexedDB Vault state, and Gemini AI structured data intact!
    */
   const refreshShareLinkAlbumUrls = useCallback(async (targetAlbumId?: string): Promise<boolean> => {
     const candidates = albumsRef.current.filter((a) => {
@@ -516,14 +634,20 @@ export default function App() {
               }
               return {
                 ...prior,
-                src: fresh.src,
+                src: prior.vaultCached && prior.src.startsWith('idb:') ? prior.src : fresh.src,
                 assetUrl: fresh.assetUrl,
                 fallbackUrls: fresh.fallbackUrls,
                 nativeHeaders: fresh.nativeHeaders ?? prior.nativeHeaders,
                 date: prior.date || fresh.date,
-                // Preserve Gemini Vision metadata if already analyzed!
+                vaultCached: prior.vaultCached,
+                optimizedBytes: prior.optimizedBytes,
+                // Preserve Gemini Vision structured index if already analyzed!
                 title: prior.aiAnalyzed ? prior.title : prior.title || fresh.title,
                 location: prior.aiAnalyzed ? prior.location : prior.location || fresh.location,
+                season: prior.season,
+                mood: prior.mood,
+                people: prior.people,
+                objects: prior.objects,
                 aiSummary: prior.aiAnalyzed ? prior.aiSummary : prior.aiSummary || fresh.aiSummary,
                 tags: prior.aiAnalyzed && prior.tags?.length ? prior.tags : fresh.tags,
               };
@@ -537,6 +661,11 @@ export default function App() {
       } catch {
         // Keep cached album metadata if offline or temporarily unreachable
       }
+    }
+
+    if (anyUpdated) {
+      failedVaultIdsRef.current.clear();
+      setAnalysisRunNonce((n) => n + 1);
     }
 
     return anyUpdated;
@@ -580,6 +709,7 @@ export default function App() {
 
   const handleForceReanalyzePhotos = useCallback(() => {
     failedAnalysisIdsRef.current.clear();
+    failedVaultIdsRef.current.clear();
     setAlbums((prev) =>
       prev.map((a) =>
         isBuiltInOrSampleAlbum(a)
@@ -593,7 +723,8 @@ export default function App() {
     setAnalysisRunNonce((n) => n + 1);
   }, []);
 
-  // Background Gemini Vision Photo Analysis Queue ("제미나이가 연결돼서 분석 진행할 때 사진을 분석 중이라고 안내")
+  // Background Compact Vault Compression + 5-Photo Batch Gemini AI Data Indexing Queue
+  // Automatically optimizes previously registered high-res albums AND newly synced remaining photos!
   const isMountedRef = useRef(true);
   useEffect(() => {
     isMountedRef.current = true;
@@ -603,140 +734,117 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!geminiVisionConnected || analysisRunningRef.current) return;
+    if (analysisRunningRef.current) return;
 
-    const collectPendingItems = () => {
-      const items: Array<{ album: DigitalAlbum; photo: PhotoItem }> = [];
+    const findNextPendingAlbum = (): DigitalAlbum | null => {
       for (const album of albumsRef.current) {
         if (isBuiltInOrSampleAlbum(album)) continue;
-        for (const photo of album.photos) {
-          if (!photo.aiAnalyzed && !failedAnalysisIdsRef.current.has(photo.id)) {
-            items.push({ album, photo });
-          }
+        const hasPendingVault = album.photos.some(
+          (p) => !p.vaultCached && !failedVaultIdsRef.current.has(p.id)
+        );
+        const hasPendingAi =
+          geminiVisionConnected &&
+          album.photos.some(
+            (p) => !p.aiAnalyzed && !failedAnalysisIdsRef.current.has(p.id)
+          );
+        if (hasPendingVault || hasPendingAi) {
+          return album;
         }
       }
-      return items;
+      return null;
     };
 
-    const initialPending = collectPendingItems();
-    if (initialPending.length === 0) return;
+    const firstAlbum = findNextPendingAlbum();
+    if (!firstAlbum) return;
 
     analysisRunningRef.current = true;
 
     (async () => {
-      let total = initialPending.length;
-      let completedCount = 0;
-      let successCount = 0;
-      const processedInRun = new Set<string>();
-
-      setPhotoAnalysisProgress({
-        active: true,
-        geminiConnected: true,
-        done: 0,
-        total,
-        currentAlbumName: initialPending[0].album.name,
-        currentPhotoTitle: initialPending[0].photo.title,
-      });
+      let totalIndexedInSession = 0;
+      let totalVaultedInSession = 0;
+      let totalSavedBytesInSession = 0;
 
       while (isMountedRef.current) {
-        const currentPending = collectPendingItems().filter(
-          (it) => !processedInRun.has(it.photo.id)
-        );
-        if (currentPending.length === 0) break;
-
-        total = completedCount + currentPending.length;
-        const { album, photo } = currentPending[0];
-        processedInRun.add(photo.id);
-
-        setPhotoAnalysisProgress({
-          active: true,
-          geminiConnected: true,
-          done: completedCount,
-          total,
-          currentAlbumName: album.name,
-          currentPhotoTitle: photo.title,
-        });
+        const targetAlbum = findNextPendingAlbum();
+        if (!targetAlbum) break;
 
         try {
-          const latestAlbum = albumsRef.current.find((a) => a.id === album.id);
-          const latestPhoto = latestAlbum?.photos.find((p) => p.id === photo.id) ?? photo;
+          const res = await runAlbumVaultAndAiPipeline({
+            photos: targetAlbum.photos,
+            sharePassword: targetAlbum.sharePassword,
+            shouldAbort: () => !isMountedRef.current,
+            onProgress: (info) => {
+              if (!isMountedRef.current) return;
+              setPhotoAnalysisProgress({
+                active: true,
+                geminiConnected: geminiVisionConnected,
+                phase: info.phase,
+                done: info.done,
+                total: info.total,
+                savedBytesTotal: totalSavedBytesInSession + info.savedBytesTotal,
+                currentAlbumName: targetAlbum.name,
+                currentPhotoTitle: info.currentPhotoTitle,
+              });
+            },
+          });
 
-          const extracted = await extractPhotoBase64ForVision(
-            latestPhoto,
-            latestAlbum?.sharePassword ?? album.sharePassword
+          const estimatedSaved = Math.max(
+            0,
+            res.vaultCachedCount * 2_400_000 - res.totalOptimizedBytes
           );
+          totalVaultedInSession += res.vaultCachedCount;
+          totalIndexedInSession += res.geminiAnalyzedCount;
+          totalSavedBytesInSession += estimatedSaved;
 
-          if (extracted && isMountedRef.current) {
-            const meta = await analyzePhotoUnified({
-              base64Data: extracted.base64Data,
-              mimeType: extracted.mimeType,
-              fileName: latestPhoto.title,
-            });
-
-            if (meta && (meta.title || meta.aiSummary)) {
-              successCount += 1;
-              setAlbums((prev) =>
-                prev.map((curA) => {
-                  if (curA.id !== album.id) return curA;
-                  return {
-                    ...curA,
-                    photos: curA.photos.map((curP) =>
-                      curP.id !== photo.id
-                        ? curP
-                        : {
-                            ...curP,
-                            title: meta.title?.trim() || curP.title,
-                            location: meta.location?.trim() || curP.location,
-                            aiSummary: meta.aiSummary?.trim() || curP.aiSummary,
-                            tags:
-                              Array.isArray(meta.tags) && meta.tags.length > 0
-                                ? meta.tags
-                                : curP.tags,
-                            aiAnalyzed: true,
-                          }
-                    ),
-                  };
-                })
-              );
-            } else {
-              failedAnalysisIdsRef.current.add(photo.id);
+          // Mark any photo that still couldn't be cached or AI-analyzed in this pass so we never loop infinitely
+          for (const updatedP of res.photos) {
+            if (!updatedP.vaultCached) {
+              failedVaultIdsRef.current.add(updatedP.id);
             }
-          } else {
-            failedAnalysisIdsRef.current.add(photo.id);
+            if (geminiVisionConnected && !updatedP.aiAnalyzed) {
+              failedAnalysisIdsRef.current.add(updatedP.id);
+            }
+          }
+
+          if (isMountedRef.current) {
+            const byId = new Map<string, PhotoItem>(res.photos.map((p) => [p.id, p]));
+            setAlbums((prev) =>
+              prev.map((curA) => {
+                if (curA.id !== targetAlbum.id) return curA;
+                return {
+                  ...curA,
+                  photos: curA.photos.map((p) => byId.get(p.id) ?? p),
+                };
+              })
+            );
           }
         } catch {
-          failedAnalysisIdsRef.current.add(photo.id);
-        }
-
-        completedCount += 1;
-        if (isMountedRef.current) {
-          setPhotoAnalysisProgress({
-            active: true,
-            geminiConnected: true,
-            done: completedCount,
-            total,
-            currentAlbumName: album.name,
-            currentPhotoTitle: photo.title,
+          targetAlbum.photos.forEach((p) => {
+            failedVaultIdsRef.current.add(p.id);
+            failedAnalysisIdsRef.current.add(p.id);
           });
         }
 
-        // Gentle 320ms pacing between Vision requests to keep animations smooth and respect API rate limits
-        await new Promise((r) => window.setTimeout(r, 320));
+        await new Promise((r) => window.setTimeout(r, 250));
       }
 
       analysisRunningRef.current = false;
 
       if (isMountedRef.current) {
+        const savedMb = (totalSavedBytesInSession / (1024 * 1024)).toFixed(1);
         const toast =
-          successCount > 0
-            ? `✨ Gemini AI 사진 분석 완료 (${successCount}장) · 이제 토끼들과 사진 속 추억 이야기를 나눌 수 있어요!`
+          totalIndexedInSession > 0
+            ? `✨ 사진 경량 최적 저장(약 ${savedMb}MB 절감) 및 AI 고속 데이터화(${totalIndexedInSession}장) 완료! 이제 빠르게 추억을 찾을 수 있어요!`
+            : totalVaultedInSession > 0
+            ? `📦 고화질 사진 ${totalVaultedInSession}장 최소 용량 최적 저장 완료(약 ${savedMb}MB 절감) · 파일명 표시 없이 즉시 재생됩니다!`
             : undefined;
 
         setPhotoAnalysisProgress({
           active: false,
-          geminiConnected: true,
-          done: completedCount,
-          total,
+          geminiConnected: geminiVisionConnected,
+          done: totalIndexedInSession || totalVaultedInSession,
+          total: totalIndexedInSession || totalVaultedInSession,
+          savedBytesTotal: totalSavedBytesInSession,
           completedToast: toast,
         });
 
@@ -1276,7 +1384,7 @@ export default function App() {
           currentLat: locationInfo.lat,
           currentLng: locationInfo.lng,
           weatherSummary: weather,
-          schedules,
+          schedules: mergedSchedules,
         });
 
         setActiveInquiry(data);
@@ -1295,7 +1403,7 @@ export default function App() {
         setIsAssistantLoading(false);
       }
     },
-    [locationInfo, weather, schedules, ttsEnabled, showTemporaryToast]
+    [locationInfo, weather, mergedSchedules, ttsEnabled, showTemporaryToast]
   );
 
   // Dismiss Giant Mid-Chat Flashcard smoothly back to conversation
@@ -1406,6 +1514,10 @@ export default function App() {
             title: p.title,
             date: p.date,
             location: p.location,
+            season: p.season,
+            mood: p.mood,
+            people: p.people,
+            objects: p.objects,
             albumName: p.albumName,
             tags: p.tags,
             aiSummary: p.aiSummary,
@@ -1541,7 +1653,10 @@ export default function App() {
             matchedList = allPhotoObjects.filter(
               (p) =>
                 p.tags.some((tag) => text.includes(tag)) ||
-                text.includes(p.location.slice(0, 2))
+                Boolean(p.season && text.includes(p.season)) ||
+                Boolean(p.people && text.includes(p.people)) ||
+                (p.objects ?? []).some((obj) => text.includes(obj)) ||
+                Boolean(p.location && p.location.length >= 2 && text.includes(p.location.slice(0, 2)))
             );
           }
 
@@ -2439,7 +2554,12 @@ export default function App() {
     <LeftInfoSidebar
       weather={weather}
       isWeatherLoading={isWeatherLoading}
-      schedules={schedules}
+      schedules={mergedSchedules}
+      syncedCalendarCount={syncedSelectedCalendarCount}
+      isCalendarSyncing={isCalendarSyncing}
+      onRefreshCalendars={() => {
+        void refreshSelectedCalendarsNow();
+      }}
       onRefreshWeather={fetchWeather}
       onAddSchedule={(item) =>
         setSchedules((prev) => [{ ...item, id: `sched-${Date.now()}` }, ...prev])
@@ -2655,6 +2775,14 @@ export default function App() {
           currentCity={locationInfo.city}
           martItems={martItems}
           photoAnalysisProgress={photoAnalysisProgress}
+          calendarSources={calendarSources}
+          syncedSchedulesCount={syncedCalendarSchedules.length}
+          isCalendarSyncing={isCalendarSyncing}
+          onDiscoverDeviceCalendars={handleDiscoverDeviceCalendars}
+          onToggleCalendarSource={handleToggleCalendarSource}
+          onAddIcsCalendarSource={handleAddIcsCalendarSource}
+          onRemoveCalendarSource={handleRemoveCalendarSource}
+          onRefreshCalendarsNow={refreshSelectedCalendarsNow}
           onReanalyzePhotos={handleForceReanalyzePhotos}
           onRefreshAlbumUrls={refreshShareLinkAlbumUrls}
           onClose={() => setSettingsModalTab(null)}
@@ -2679,9 +2807,10 @@ export default function App() {
               prev.map((a) => (a.id === albumId ? { ...a, enabled: !a.enabled } : a))
             )
           }
-          onDeleteAlbum={(albumId) =>
-            setAlbums((prev) => prev.filter((a) => a.id !== albumId))
-          }
+          onDeleteAlbum={(albumId) => {
+            setAlbums((prev) => prev.filter((a) => a.id !== albumId));
+            void deleteAlbumPhotosFromVault(albumId);
+          }}
           onUpdateCharacters={setCharacters}
           onChangeChildAgeStage={setChildAgeStage}
           onChangePowerSchedule={setPowerSchedule}

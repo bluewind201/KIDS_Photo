@@ -18,7 +18,11 @@ import {
 } from 'lucide-react';
 import { PROVIDER_LABELS } from '../data/initialAlbums';
 import { FrameTransitionMode, PhotoAnalysisProgress, PhotoItem } from '../types';
-import { fetchImageViaNativeHttp } from '../utils/standaloneApi';
+import {
+  getVaultDisplayObjectUrl,
+  optimizeAndCachePhotoToVault,
+  peekVaultObjectUrlSync,
+} from '../utils/photoCacheDb';
 
 interface DigitalFrameStageProps {
   photos: PhotoItem[];
@@ -138,27 +142,28 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       });
   };
 
-  // Automatically load Synology / NAS / OneDrive / custom-header photos (or any photo whose WebView <img> failed)
-  // via Native CapacitorHttp (`HttpURLConnection` + auto Synology share re-login + self-signed SSL)!
+  // Resolve every photo from the Compact IndexedDB Vault (~135KB WebP) first,
+  // and if not yet cached, downscale & store via NativePhotoOptimizer (Java Skia C++ subsampler)
+  // so even 20MB~40MB DSLR/iPhone/HEIC photos NEVER time out or show filenames!
   useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-
     const candidatesToResolve = [currentPhoto, secondaryPhoto, nextPreloadPhoto].filter(
       (p): p is PhotoItem => Boolean(p)
     );
 
     for (const photo of candidatesToResolve) {
-      if (photo.src.startsWith('data:') || photo.src.startsWith('blob:') || photo.src.startsWith('/')) {
+      if (photo.src.startsWith('/') || nativeBlobUrls[photo.id] || peekVaultObjectUrlSync(photo.id)) {
         continue;
       }
 
-      const candidateUrls = [
-        photo.src,
-        ...(photo.assetUrl ? [photo.assetUrl] : []),
-        ...(photo.fallbackUrls ?? []),
-      ].filter((u) => /^https?:\/\//i.test(u));
+      if (nativeLoadingIds[photo.id] || nativeFailedIds[photo.id]) {
+        continue;
+      }
 
-      const needsImmediateNativeFetch =
+      const isIdbPointer = photo.src.startsWith('idb://');
+      const needsImmediateVaultOptimize =
+        isIdbPointer ||
+        Boolean(photo.vaultCached) ||
+        Capacitor.isNativePlatform() ||
         Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
         photo.provider === 'synology_api' ||
         photo.provider === 'synology_webdav' ||
@@ -167,47 +172,48 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
 
       const anyWebImgError = (imgErrorStage[photo.id] ?? 0) >= 1;
 
-      if (
-        (needsImmediateNativeFetch || anyWebImgError) &&
-        !nativeBlobUrls[photo.id] &&
-        !nativeLoadingIds[photo.id] &&
-        !nativeFailedIds[photo.id]
-      ) {
-        let inferredHeaders = photo.nativeHeaders;
-        // Backwards compatibility for albums saved before `nativeHeaders` existed: extract `passphrase=` from URL!
-        if (!inferredHeaders && /passphrase=([^&]+)/i.test(photo.src)) {
-          const m = photo.src.match(/passphrase=([^&]+)/i);
-          if (m?.[1]) {
-            inferredHeaders = { 'X-SYNO-SHARING': decodeURIComponent(m[1]) };
-          }
+      if (!needsImmediateVaultOptimize && !anyWebImgError) {
+        continue;
+      }
+
+      const sharePassword = albumPasswords?.[photo.albumId];
+      setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: true }));
+
+      (async () => {
+        // 1) Fast <2ms local IndexedDB Vault lookup!
+        const cachedVaultUrl = await getVaultDisplayObjectUrl(photo.id);
+        if (cachedVaultUrl) {
+          setNativeBlobUrls((prev) => ({ ...prev, [photo.id]: cachedVaultUrl }));
+          return;
         }
 
-        const sharePassword = albumPasswords?.[photo.albumId];
+        if (isIdbPointer) {
+          setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+          return;
+        }
 
-        setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: true }));
-        fetchImageViaNativeHttp(candidateUrls, inferredHeaders, sharePassword)
-          .then((blobUrl) => {
-            if (blobUrl) {
-              setNativeBlobUrls((prev) => ({ ...prev, [photo.id]: blobUrl }));
-            } else {
-              setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
-              if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
-                attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
-                triggerAlbumRecovery(photo.albumId, photo.id);
-              }
-            }
-          })
-          .catch(() => {
-            setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
-            if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
-              attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
-              triggerAlbumRecovery(photo.albumId, photo.id);
-            }
-          })
-          .finally(() => {
-            setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: false }));
-          });
-      }
+        // 2) Hardware-downscale & permanently cache into IndexedDB Vault (~135KB WebP)
+        const optimized = await optimizeAndCachePhotoToVault(photo, sharePassword);
+        if (optimized?.displayObjectUrl) {
+          setNativeBlobUrls((prev) => ({ ...prev, [photo.id]: optimized.displayObjectUrl }));
+        } else {
+          setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+          if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
+            attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
+            triggerAlbumRecovery(photo.albumId, photo.id);
+          }
+        }
+      })()
+        .catch(() => {
+          setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+          if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
+            attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
+            triggerAlbumRecovery(photo.albumId, photo.id);
+          }
+        })
+        .finally(() => {
+          setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: false }));
+        });
     }
   }, [
     currentPhoto,
@@ -294,7 +300,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   );
 
   const renderPhotoSurface = (photo: PhotoItem, compact = false) => {
-    const resolvedBlobUrl = nativeBlobUrls[photo.id];
+    const resolvedBlobUrl = nativeBlobUrls[photo.id] || peekVaultObjectUrlSync(photo.id);
     if (resolvedBlobUrl) {
       return renderFittedPhotoWithAmbientMargins(
         resolvedBlobUrl,
@@ -306,13 +312,11 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
 
     const isNativeFetching = Boolean(nativeLoadingIds[photo.id]);
     const isAlbumRefreshing = Boolean(refreshingAlbumIds[photo.albumId]);
+    const isIdbPointer = photo.src.startsWith('idb://');
     const needsNativeFirst =
-      Capacitor.isNativePlatform() &&
-      (Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
-        photo.provider === 'synology_api' ||
-        photo.provider === 'synology_webdav' ||
-        photo.provider === 'onedrive' ||
-        /\/webapi\/entry\.cgi|1drv\.ms|microsoftpersonalcontent\.com|onedrive\.live\.com/i.test(photo.src));
+      isIdbPointer ||
+      Boolean(photo.vaultCached) ||
+      (Capacitor.isNativePlatform() && !photo.src.startsWith('/'));
 
     if (isNativeFetching || isAlbumRefreshing || (needsNativeFirst && !nativeFailedIds[photo.id])) {
       return (
@@ -322,7 +326,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
           <span className="mt-1 text-xs text-zinc-400">
             {isAlbumRefreshing
               ? '공유 앨범 연결 세션을 자동 갱신하여 사진을 복구하고 있어요...'
-              : '고화질 원본 사진을 불러오는 중...'}
+              : '고화질 사진을 액자 최적 용량으로 빠르게 불러오는 중...'}
           </span>
         </div>
       );
@@ -332,7 +336,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       photo.src,
       ...(photo.assetUrl && photo.assetUrl !== photo.src ? [photo.assetUrl] : []),
       ...(photo.fallbackUrls ?? []),
-    ];
+    ].filter((u) => !u.startsWith('idb://'));
     const stage = imgErrorStage[photo.id] ?? 0;
     const allWebFailed = stage >= candidateUrls.length;
     const totallyFailed =
@@ -538,10 +542,19 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
                   <span className="inline-flex items-center gap-1.5 text-amber-300 truncate">
                     <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
                     <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                    <span>Gemini AI 연결됨 · 수집한 사진을 분석 중입니다...</span>
+                    <span>
+                      {photoAnalysisProgress.phase === 'optimizing'
+                        ? '고화질 사진 경량 최적 저장 중...'
+                        : photoAnalysisProgress.geminiConnected
+                        ? 'Gemini AI 고속 사진 분석 · 데이터화 중...'
+                        : '사진 검색용 스마트 데이터 구성 중...'}
+                    </span>
                   </span>
                   <span className="font-mono text-[11px] text-zinc-200 shrink-0">
                     {photoAnalysisProgress.done} / {photoAnalysisProgress.total}장
+                    {photoAnalysisProgress.savedBytesTotal
+                      ? ` (${(photoAnalysisProgress.savedBytesTotal / (1024 * 1024)).toFixed(1)}MB)`
+                      : ''}
                   </span>
                 </div>
                 <div className="mt-1 text-[11px] text-zinc-300 truncate">

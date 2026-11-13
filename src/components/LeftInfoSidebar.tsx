@@ -21,6 +21,9 @@ interface LeftInfoSidebarProps {
   weather: WeatherPayload | null;
   isWeatherLoading: boolean;
   schedules: ScheduleItem[];
+  syncedCalendarCount?: number;
+  isCalendarSyncing?: boolean;
+  onRefreshCalendars?: () => void;
   onRefreshWeather: () => void;
   onAddSchedule: (item: Omit<ScheduleItem, 'id'>) => void;
   onRemoveSchedule: (id: string) => void;
@@ -67,6 +70,9 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
   weather,
   isWeatherLoading,
   schedules,
+  syncedCalendarCount = 0,
+  isCalendarSyncing = false,
+  onRefreshCalendars,
   onRefreshWeather,
   onAddSchedule,
   onRemoveSchedule,
@@ -224,9 +230,37 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
         className="flex-1 min-h-[190px] rounded-[20px] bg-white border border-black/[0.06] p-4 flex flex-col justify-between shadow-[0_2px_10px_rgba(0,0,0,0.02)]"
       >
         <div className="min-h-0 flex flex-col">
-          <div className="flex items-center justify-between mb-2.5">
-            <h2 className="text-sm font-bold text-[#141519] tracking-tight">우리 가족 일정</h2>
-            <span className="font-mono text-[11px] text-zinc-400">{schedules.length}건</span>
+          <div className="flex items-center justify-between gap-1.5 mb-2.5">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <h2 className="text-sm font-bold text-[#141519] tracking-tight truncate">
+                우리 가족 일정
+              </h2>
+              <span className="font-mono text-[11px] text-zinc-400 shrink-0">
+                {schedules.length}건
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0">
+              {syncedCalendarCount > 0 && onRefreshCalendars && (
+                <button
+                  type="button"
+                  onClick={onRefreshCalendars}
+                  title="연동된 캘린더 일정 새로고침"
+                  className="w-6 h-6 rounded-full hover:bg-zinc-100 flex items-center justify-center text-zinc-400 hover:text-zinc-700 transition-colors"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isCalendarSyncing ? 'animate-spin text-indigo-600' : ''}`} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onOpenSettings('life')}
+                title="어떤 캘린더를 연동할지 직접 선택"
+                className="inline-flex items-center gap-1 rounded-full bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 px-2 py-0.5 text-[10px] font-bold text-indigo-700 transition-colors whitespace-nowrap"
+              >
+                <Calendar className="w-2.5 h-2.5" />
+                <span>{syncedCalendarCount > 0 ? `캘린더 ${syncedCalendarCount}개` : '캘린더 연동'}</span>
+              </button>
+            </div>
           </div>
 
           {showAddForm && (
@@ -276,7 +310,7 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
           )}
 
           <ul className="space-y-1.5 overflow-y-auto pr-0.5">
-            {schedules.slice(0, 5).map((item, idx) => {
+            {schedules.slice(0, 7).map((item, idx) => {
               const isFirst = idx === 0;
               return (
                 <li
@@ -289,19 +323,35 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                      className={`relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
                         isFirst
                           ? 'bg-[#141519] text-white'
                           : 'bg-[#F3F4F6] text-zinc-600'
                       }`}
                     >
                       <Calendar className="w-3.5 h-3.5" />
+                      {item.calendarColor && (
+                        <span
+                          className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white"
+                          style={{ backgroundColor: item.calendarColor }}
+                        />
+                      )}
                     </div>
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold text-[#141519] truncate">
-                        {item.title}
-                      </p>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="text-xs font-semibold text-[#141519] truncate">
+                          {item.title}
+                        </p>
+                      </div>
                       <p className="text-[11px] text-zinc-400 truncate">
+                        {item.calendarName && (
+                          <span
+                            className="font-semibold mr-1"
+                            style={{ color: item.calendarColor || '#4F46E5' }}
+                          >
+                            [{item.calendarName}]
+                          </span>
+                        )}
                         <span>{item.date}</span>
                         <span aria-hidden="true"> · </span>
                         <span className="font-mono">{item.time}</span>
@@ -315,15 +365,27 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onRemoveSchedule(item.id)}
-                    className="text-zinc-300 hover:text-rose-500 transition-colors shrink-0"
-                    title="일정 삭제"
-                  >
-                    <ChevronRight className="w-3.5 h-3.5 group-hover:hidden" />
-                    <span className="hidden group-hover:inline text-[10px] font-semibold">삭제</span>
-                  </button>
+                  {item.isSynced ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenSettings('life')}
+                      className="text-zinc-300 hover:text-indigo-600 transition-colors shrink-0"
+                      title={`${item.calendarName || '연동 캘린더'} 설정 열기`}
+                    >
+                      <ChevronRight className="w-3.5 h-3.5 group-hover:hidden" />
+                      <span className="hidden group-hover:inline text-[10px] font-semibold">캘린더</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveSchedule(item.id)}
+                      className="text-zinc-300 hover:text-rose-500 transition-colors shrink-0"
+                      title="일정 삭제"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5 group-hover:hidden" />
+                      <span className="hidden group-hover:inline text-[10px] font-semibold">삭제</span>
+                    </button>
+                  )}
                 </li>
               );
             })}

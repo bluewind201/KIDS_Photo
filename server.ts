@@ -820,6 +820,105 @@ app.post('/api/gemini/analyze-photo', async (req, res) => {
   }
 });
 
+// 6-B. Fast Batch Multimodal Photo Analyzer (5 compact 384px thumbnails per call)
+app.post('/api/gemini/analyze-photo-batch', async (req, res) => {
+  try {
+    const { items = [] } = req.body as {
+      items?: Array<{
+        photoId: string;
+        fileName: string;
+        albumName: string;
+        dateStr: string;
+        aiThumbBase64: string;
+      }>;
+    };
+    if (!Array.isArray(items) || items.length === 0) {
+      res.json({ items: [] });
+      return;
+    }
+
+    const ai = getAiClient();
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [
+      {
+        text: `다음 ${items.length}장의 사진을 순서대로(index 0 ~ ${
+          items.length - 1
+        }) 분석하여 나중에 음성으로 즉시 검색할 수 있도록 구조화된 한국어 JSON 배열로 작성해 주세요.`,
+      },
+    ];
+
+    items.slice(0, 6).forEach((item, idx) => {
+      const cleanB64 = item.aiThumbBase64.includes(',')
+        ? item.aiThumbBase64.slice(item.aiThumbBase64.indexOf(',') + 1)
+        : item.aiThumbBase64;
+      parts.push({
+        text: `[사진 index=${idx}] 원본이름="${item.fileName}", 앨범="${item.albumName}", 촬영일="${item.dateStr}"`,
+      });
+      parts.push({
+        inlineData: { mimeType: 'image/jpeg', data: cleanB64 },
+      });
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: { parts },
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              index: { type: Type.INTEGER },
+              title: { type: Type.STRING },
+              location: { type: Type.STRING },
+              season: { type: Type.STRING },
+              mood: { type: Type.STRING },
+              people: { type: Type.STRING },
+              objects: { type: Type.ARRAY, items: { type: Type.STRING } },
+              aiSummary: { type: Type.STRING },
+              tags: { type: Type.ARRAY, items: { type: Type.STRING } },
+            },
+            required: ['index', 'title', 'location', 'aiSummary', 'tags'],
+          },
+        },
+      },
+    });
+
+    const rawArr = JSON.parse((response.text ?? '[]').trim()) as Array<{
+      index: number;
+      title?: string;
+      location?: string;
+      season?: string;
+      mood?: string;
+      people?: string;
+      objects?: string[];
+      aiSummary?: string;
+      tags?: string[];
+    }>;
+
+    const out = items.slice(0, 6).map((inp, idx) => {
+      const found = rawArr.find((r) => r.index === idx) ?? rawArr[idx];
+      return {
+        photoId: inp.photoId,
+        title: found?.title || inp.fileName,
+        location: found?.location || inp.albumName,
+        aiSummary: found?.aiSummary || '',
+        season: found?.season,
+        mood: found?.mood,
+        people: found?.people,
+        objects: found?.objects,
+        tags: Array.from(new Set([...(found?.tags ?? []), ...(found?.objects ?? []), inp.albumName])),
+        analyzedByGemini: Boolean(found?.title || found?.aiSummary),
+      };
+    });
+
+    res.json({ items: out });
+  } catch (err: unknown) {
+    console.error('Batch analyze photo error:', err);
+    res.status(500).json({ error: '사진 일괄 분석에 실패했습니다.' });
+  }
+});
+
 function ensureWavBase64(base64Data: string, sampleRate = 24000): string {
   const pcmOrWav = Buffer.from(base64Data, 'base64');
   if (pcmOrWav.length >= 4 && pcmOrWav.subarray(0, 4).toString('ascii') === 'RIFF') {

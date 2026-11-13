@@ -43,6 +43,15 @@ export interface PhotoItem {
   aiSummary: string;
   /** True once Gemini Vision has analyzed the actual image pixels */
   aiAnalyzed?: boolean;
+  /** True once compressed & stored in local IndexedDB vault (~135KB WebP + ~14KB AI thumb) so it never shows filename */
+  vaultCached?: boolean;
+  /** Exact byte size of optimized local display blob in IndexedDB */
+  optimizedBytes?: number;
+  /** Structured AI search metadata for instant <1ms memory lookup */
+  season?: string;
+  mood?: string;
+  people?: string;
+  objects?: string[];
 }
 
 export interface DigitalAlbum {
@@ -60,8 +69,10 @@ export interface DigitalAlbum {
 export interface PhotoAnalysisProgress {
   active: boolean;
   geminiConnected: boolean;
+  phase?: 'optimizing' | 'analyzing';
   done: number;
   total: number;
+  savedBytesTotal?: number;
   currentAlbumName?: string;
   currentPhotoTitle?: string;
   completedToast?: string;
@@ -106,12 +117,30 @@ export interface WeatherPayload {
   updatedAt: string;
 }
 
+export type CalendarSourceType = 'android_device' | 'ics_url' | 'kr_holidays';
+
+export interface SelectableCalendarSource {
+  id: string;
+  name: string;
+  accountName: string;
+  sourceType: CalendarSourceType;
+  colorHex: string;
+  selected: boolean;
+  nativeCalendarId?: string;
+  icsUrl?: string;
+}
+
 export interface ScheduleItem {
   id: string;
   title: string;
   date: string;
   time: string;
   location: string;
+  calendarId?: string;
+  calendarName?: string;
+  calendarColor?: string;
+  isSynced?: boolean;
+  sortTimestamp?: number;
 }
 
 export interface MartTickerItem {

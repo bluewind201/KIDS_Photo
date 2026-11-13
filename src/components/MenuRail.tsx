@@ -130,7 +130,7 @@ export const MenuRail: React.FC<MenuRailProps> = ({
         <button
           type="button"
           onClick={() => onOpenSettings('life')}
-          title="위치 및 마트 휴무·세일 설정"
+          title="캘린더 선택 연동 · 위치 · 마트 설정"
           className="w-9 h-9 rounded-xl hover:bg-white/10 text-zinc-300 flex items-center justify-center transition-colors"
         >
           <MapPin className="w-4 h-4" />
