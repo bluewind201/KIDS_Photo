@@ -3,7 +3,8 @@ export type StorageProvider =
   | 'onedrive'
   | 'synology_webdav'
   | 'synology_api'
-  | 'local_folder';
+  | 'local_folder'
+  | 'share_link';
 
 export type FrameTransitionMode = 'ken_burns' | 'frame_sway' | 'gallery_matte' | 'dual_split';
 

@@ -316,9 +316,26 @@ interface BrowserSpeechRecognitionInstance {
   stop: () => void;
 }
 
+const getApiBase = () => {
+  try {
+    return (localStorage.getItem('kids_photo_backend_url') || '').trim().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+};
+
 export default function App() {
-  // Core Smart Frame State
-  const [albums, setAlbums] = useState<DigitalAlbum[]>(INITIAL_ALBUMS);
+  // Core Smart Frame State (오프라인/앱 단독 모드를 위해 localStorage 영구 보존)
+  const [albums, setAlbums] = useState<DigitalAlbum[]>(() => {
+    try {
+      const cached = localStorage.getItem('kids_photo_albums');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return INITIAL_ALBUMS;
+  });
   const [currentPhotoIdx, setCurrentPhotoIdx] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
   const [slideIntervalSec, setSlideIntervalSec] = useState(12);
@@ -436,12 +453,18 @@ export default function App() {
     }
   }, [activePhotos.length, currentPhotoIdx]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('kids_photo_albums', JSON.stringify(albums));
+    } catch {}
+  }, [albums]);
+
   // Hydrate persisted settings from backend on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/state');
+        const res = await fetch(`${getApiBase()}/api/state`);
         if (!res.ok) return;
         const saved = (await res.json()) as {
           saved?: boolean;
@@ -508,7 +531,7 @@ export default function App() {
   useEffect(() => {
     if (!hasHydratedState) return;
     const timeout = window.setTimeout(() => {
-      fetch('/api/state', {
+      fetch(`${getApiBase()}/api/state`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -628,7 +651,7 @@ export default function App() {
         lng: String(locationInfo.lng),
         city: locationInfo.city,
       });
-      const res = await fetch(`/api/weather?${params.toString()}`);
+      const res = await fetch(`${getApiBase()}/api/weather?${params.toString()}`);
       if (res.ok) {
         const data = (await res.json()) as WeatherPayload;
         setWeather(data);
@@ -862,7 +885,7 @@ export default function App() {
       showTemporaryToast(`AI 문의 확인 중: "${queryText}"`);
 
       try {
-        const res = await fetch('/api/gemini/assistant', {
+        const res = await fetch(`${getApiBase()}/api/gemini/assistant`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1023,7 +1046,7 @@ export default function App() {
             ? '햇살 쨍쨍 맑음 (잔디밭에 앉아 쉬기 좋은 날)'
             : '산들바람 불고 쾌청함';
 
-        const res = await fetch('/api/gemini/bunny-chat', {
+        const res = await fetch(`${getApiBase()}/api/gemini/bunny-chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

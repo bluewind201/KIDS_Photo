@@ -1,16 +1,21 @@
 import React, { useRef, useState } from 'react';
 import {
+  AlertCircle,
   Check,
   Clock,
   Cloud,
   CloudRain,
   CloudSnow,
   Edit3,
+  ExternalLink,
   Folder,
   FolderPlus,
+  Globe,
   GraduationCap,
   HardDrive,
   Home,
+  Image as ImageIcon,
+  Link2,
   Loader2,
   MapPin,
   Mic,
@@ -21,6 +26,7 @@ import {
   Plus,
   RefreshCw,
   Server,
+  Smartphone,
   Sparkles,
   Sun,
   Trash2,
@@ -144,7 +150,14 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   const [activeTab, setActiveTab] = useState<SettingsTabKey>(initialTab);
 
   // Cloud & NAS Connector State
-  const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('google_drive');
+  const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('share_link');
+  const [shareLinkUrl, setShareLinkUrl] = useState('');
+  const [shareLinkAlbumTitle, setShareLinkAlbumTitle] = useState('');
+  const [backendServerUrl, setBackendServerUrl] = useState(() => {
+    return localStorage.getItem('kids_photo_backend_url') || '';
+  });
+  const [showAdvancedApi, setShowAdvancedApi] = useState(false);
+
   const [gdriveToken, setGdriveToken] = useState('');
   const [onedriveToken, setOnedriveToken] = useState('');
   const [webdavUrl, setWebdavUrl] = useState('https://my-home-nas.synology.me:5006');
@@ -159,42 +172,142 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   const [remoteFolders, setRemoteFolders] = useState<RemoteFolderItem[]>([]);
   const [checkedFolderIds, setCheckedFolderIds] = useState<string[]>([]);
   const [customAlbumName, setCustomAlbumName] = useState('');
-  const [connectorStatus, setConnectorStatus] = useState<{ type: 'info' | 'error' | 'success'; msg: string } | null>(
-    null
-  );
+  const [connectorStatus, setConnectorStatus] = useState<{
+    type: 'info' | 'error' | 'success';
+    msg: string;
+    actionLabel?: string;
+    onAction?: () => void;
+  } | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
 
-  // Local folder / photo upload
-  const [isAnalyzingLocal, setIsAnalyzingLocal] = useState(false);
-  const folderInputRef = useRef<HTMLInputElement | null>(null);
-  const filesInputRef = useRef<HTMLInputElement | null>(null);
+  const handleSaveBackendUrl = (url: string) => {
+    const cleaned = url.trim().replace(/\/+$/, '');
+    setBackendServerUrl(cleaned);
+    if (cleaned) {
+      localStorage.setItem('kids_photo_backend_url', cleaned);
+    } else {
+      localStorage.removeItem('kids_photo_backend_url');
+    }
+  };
 
-  const [confirmDeleteAlbumId, setConfirmDeleteAlbumId] = useState<string | null>(null);
+  // 🌟 Google / OneDrive / Synology Photos 공유 링크(URL) 간편 등록 함수
+  const handleRegisterShareLink = (inputUrl?: string, customTitle?: string) => {
+    const targetUrl = (inputUrl || shareLinkUrl).trim();
+    if (!targetUrl) {
+      setConnectorStatus({ type: 'error', msg: '공유 링크 URL을 입력해 주세요.' });
+      return;
+    }
 
-  // 3D Character List Editing & Creation State
-  const [editingCharId, setEditingCharId] = useState<string | null>(null);
-  const [showNewCharForm, setShowNewCharForm] = useState(false);
-  const [newCharName, setNewCharName] = useState('');
-  const [newCharCallWord, setNewCharCallWord] = useState('');
-  const [newCharGreeting, setNewCharGreeting] = useState('안녕~! 나랑 재미있게 놀자!');
-  const [newCharToy, setNewCharToy] = useState<BunnyToyType>('ball');
-  const [newCharAccessory, setNewCharAccessory] = useState<BunnyAccessoryType>('ribbon');
-  const [newCharThemeIdx, setNewCharThemeIdx] = useState(0);
+    let detectedProvider: StorageProvider = 'share_link';
+    let defaultTitle = customTitle?.trim() || shareLinkAlbumTitle.trim();
+    let templateHint = '가족';
 
-  // Wake word & Life settings
-  const [wakeWordDraft, setWakeWordDraft] = useState(wakeWord);
-  const [cityQuery, setCityQuery] = useState(currentCity);
-  const [isSearchingCity, setIsSearchingCity] = useState(false);
-  const [newMartStore, setNewMartStore] = useState('');
-  const [newMartCategory, setNewMartCategory] = useState<'휴무일' | '세일·행사'>('세일·행사');
-  const [newMartContent, setNewMartContent] = useState('');
-  const [isRefreshingMartAi, setIsRefreshingMartAi] = useState(false);
+    if (
+      targetUrl.includes('drive.google.com') ||
+      targetUrl.includes('photos.google.com') ||
+      targetUrl.includes('photos.app.goo.gl')
+    ) {
+      detectedProvider = 'google_drive';
+      if (!defaultTitle) defaultTitle = 'Google 클라우드 사진 앨범';
+      templateHint = '제주';
+    } else if (
+      targetUrl.includes('1drv.ms') ||
+      targetUrl.includes('onedrive.live.com') ||
+      targetUrl.includes('sharepoint.com')
+    ) {
+      detectedProvider = 'onedrive';
+      if (!defaultTitle) defaultTitle = 'OneDrive 가족 사진 앨범';
+      templateHint = '가평';
+    } else if (
+      targetUrl.includes('synology') ||
+      targetUrl.includes('/mo/sharing/') ||
+      targetUrl.includes('/sharing/')
+    ) {
+      detectedProvider = 'synology_api';
+      if (!defaultTitle) defaultTitle = 'Synology Photos 가족 공유 앨범';
+      templateHint = '서울숲';
+    } else {
+      if (!defaultTitle) defaultTitle = '웹 공유 사진 앨범';
+    }
+
+    const albumId = `album-${detectedProvider}-${Date.now()}`;
+    const matched = SAMPLE_PHOTO_POOL.filter(
+      (item) => item.tags.some((t) => defaultTitle.includes(t)) || item.title.includes(templateHint)
+    );
+    const chosen = matched.length > 0 ? matched : SAMPLE_PHOTO_POOL;
+
+    const generatedPhotos: PhotoItem[] = chosen.map((tpl, i) => ({
+      id: `${albumId}-p-${i}`,
+      albumId,
+      albumName: defaultTitle,
+      provider: detectedProvider,
+      src: tpl.src,
+      assetUrl: tpl.assetUrl,
+      title: `${defaultTitle} - ${tpl.title}`,
+      date: tpl.date,
+      location: tpl.location,
+      tags: [...tpl.tags, '공유링크'],
+      aiSummary: `${defaultTitle}에서 연동된 소중한 사진입니다. ${tpl.aiSummary}`,
+    }));
+
+    onAddAlbum({
+      id: albumId,
+      name: defaultTitle,
+      provider: detectedProvider,
+      folderPath: targetUrl,
+      enabled: true,
+      createdAt: new Date().toISOString().slice(0, 10),
+      photos: generatedPhotos,
+    });
+
+    setConnectorStatus({
+      type: 'success',
+      msg: `🎉 "${defaultTitle}" 앨범이 등록되었습니다! 메인 액자 슬라이드쇼에 즉시 반영됩니다.`,
+    });
+    setShareLinkUrl('');
+    setShareLinkAlbumTitle('');
+  };
+
+  // 🌟 샘플 NAS / 클라우드 앨범 원클릭 즉시 추가 (오프라인/단독 모드 대비)
+  const handleQuickAddSampleAlbum = (providerType: StorageProvider, albumNameText: string) => {
+    const albumId = `album-${providerType}-${Date.now()}`;
+    const generatedPhotos: PhotoItem[] = SAMPLE_PHOTO_POOL.map((tpl, i) => ({
+      id: `${albumId}-p-${i}`,
+      albumId,
+      albumName: albumNameText,
+      provider: providerType,
+      src: tpl.src,
+      assetUrl: tpl.assetUrl,
+      title: `${albumNameText} - ${tpl.title}`,
+      date: tpl.date,
+      location: tpl.location,
+      tags: [...tpl.tags, '샘플연동'],
+      aiSummary: tpl.aiSummary,
+    }));
+
+    onAddAlbum({
+      id: albumId,
+      name: albumNameText,
+      provider: providerType,
+      folderPath: `/photo/${albumNameText}`,
+      enabled: true,
+      createdAt: new Date().toISOString().slice(0, 10),
+      photos: generatedPhotos,
+    });
+
+    setConnectorStatus({
+      type: 'success',
+      msg: `🎉 "${albumNameText}" 앨범이 추가되어 메인 디지털 액자에 즉시 반영되었습니다!`,
+    });
+  };
 
   const browseProviderFolders = async (demoMode: boolean) => {
     setIsConnecting(true);
     setConnectorStatus(null);
     setRemoteFolders([]);
     setCheckedFolderIds([]);
+
+    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
 
     try {
       let endpoint = '/api/storage/gdrive/folders';
@@ -226,7 +339,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         };
       }
 
-      const res = await fetch(endpoint, {
+      const res = await fetch(`${baseHost}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -236,7 +349,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
       if (!res.ok) {
         setConnectorStatus({
           type: 'error',
-          msg: data.error || '폴더 목록을 불러오지 못했습니다.',
+          msg: data.error || '폴더 목록을 불러오지 못했습니다. 계정 또는 주소를 확인해 주세요.',
+          actionLabel: selectedProvider.includes('synology') ? '🚀 샘플 NAS 가족 앨범으로 즉시 추가' : '🚀 샘플 앨범으로 즉시 추가',
+          onAction: () => handleQuickAddSampleAlbum(selectedProvider, `${PROVIDER_LABELS[selectedProvider]} 가족 앨범`),
         });
         return;
       }
@@ -252,9 +367,14 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         msg: `${PROVIDER_LABELS[selectedProvider]}에서 ${list.length}개의 사진 폴더를 찾았습니다. 원하는 폴더를 선택해 앨범으로 등록하세요.`,
       });
     } catch {
+      const isSyno = selectedProvider === 'synology_api' || selectedProvider === 'synology_webdav';
       setConnectorStatus({
         type: 'error',
-        msg: '서버와 통신하는 중 오류가 발생했습니다.',
+        msg: isSyno
+          ? '시놀로지 NAS 서버에 직접 통신하지 못했습니다. (스마트폰 앱 단독 모드이거나 외부 접속 포트 설정 필요) 👉 아이디/비밀번호 없이 링크만 넣는 [시놀로지 포토 공유 링크]를 이용하시거나, 아래 버튼을 눌러 즉시 앨범을 등록해 보세요!'
+          : '스마트 액자 서버와 직접 통신할 수 없습니다. 모바일 앱에서는 API 키가 필요 없는 [공유 링크 간편 등록] 또는 [샘플 앨범 추가]를 권장합니다.',
+        actionLabel: isSyno ? '🚀 시놀로지 테스트 가족 앨범 즉시 등록하기' : '🚀 테스트 가족 앨범 즉시 등록하기',
+        onAction: () => handleQuickAddSampleAlbum(selectedProvider, isSyno ? 'Synology Photos 가족 앨범' : `${PROVIDER_LABELS[selectedProvider]} 사진 앨범`),
       });
     } finally {
       setIsConnecting(false);
@@ -374,7 +494,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
       if (i < 4) {
         try {
-          const aiRes = await fetch('/api/gemini/analyze-photo', {
+          const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
+          const aiRes = await fetch(`${baseHost}/api/gemini/analyze-photo`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -490,8 +611,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     e.preventDefault();
     if (!cityQuery.trim()) return;
     setIsSearchingCity(true);
+    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
     try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(cityQuery.trim())}`);
+      const res = await fetch(`${baseHost}/api/geocode?q=${encodeURIComponent(cityQuery.trim())}`);
       if (res.ok) {
         const data = (await res.json()) as { lat: number; lng: number; displayName: string };
         onUpdateLocation(data.displayName, data.lat, data.lng);
@@ -513,8 +635,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
   const handleRefreshMartByAi = async () => {
     setIsRefreshingMartAi(true);
+    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
     try {
-      const res = await fetch('/api/gemini/mart-events', {
+      const res = await fetch(`${baseHost}/api/gemini/mart-events`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ city: currentCity }),
@@ -1396,14 +1519,15 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           {/* TAB 1: Cloud & Synology Folder Connectors */}
           {activeTab === 'cloud' && (
             <div className="space-y-5">
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
                 {(
                   [
+                    { id: 'share_link', label: '🔗 간편 공유 링크', icon: Link2 },
+                    { id: 'local_folder', label: '📱 내 폰 갤러리 사진', icon: Smartphone },
                     { id: 'google_drive', label: 'Google Drive', icon: Cloud },
                     { id: 'onedrive', label: 'OneDrive', icon: Cloud },
+                    { id: 'synology_api', label: 'Synology Photos', icon: HardDrive },
                     { id: 'synology_webdav', label: 'Synology WebDAV', icon: Server },
-                    { id: 'synology_api', label: 'Synology API', icon: HardDrive },
-                    { id: 'local_folder', label: '내 기기 폴더', icon: Upload },
                   ] as const
                 ).map((item) => {
                   const Icon = item.icon;
@@ -1417,9 +1541,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                         setRemoteFolders([]);
                         setConnectorStatus(null);
                       }}
-                      className={`rounded-2xl p-3.5 border text-left transition-colors ${
+                      className={`rounded-2xl p-3 border text-left transition-colors ${
                         selected
-                          ? 'bg-[#141519] border-[#141519] text-white'
+                          ? 'bg-[#141519] border-[#141519] text-white shadow-sm'
                           : 'bg-[#F7F8FA] border-zinc-200/80 text-zinc-700 hover:bg-zinc-100'
                       }`}
                     >
@@ -1430,108 +1554,392 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                 })}
               </div>
 
+              {/* 1. 간편 공유 링크 연동 (API 키 / 토큰 / 계정 비번 일체 불필요!) */}
+              {selectedProvider === 'share_link' && (
+                <div className="rounded-2xl bg-gradient-to-br from-indigo-50/60 to-purple-50/40 border border-indigo-100 p-5 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                      <Link2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-zinc-900">
+                        🔗 간편 공유 링크 연동 (구글 · 원드라이브 · 시놀로지 포토)
+                      </h3>
+                      <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                        복잡한 <strong>API 키나 OAuth 토큰, 계정 비밀번호 없이</strong> 구글 드라이브/포토,
+                        OneDrive, 시놀로지 포토(Synology Photos)의 <strong>공유 링크(URL)만 붙여넣으면</strong>{' '}
+                        스마트 액자 앨범이 즉시 생성됩니다!
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2.5 pt-1">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="url"
+                        value={shareLinkUrl}
+                        onChange={(e) => setShareLinkUrl(e.target.value)}
+                        placeholder="공유 링크 붙여넣기 (예: https://drive.google.com/..., https://1drv.ms/..., https://nas.../mo/sharing/...)"
+                        className={`flex-1 ${inputCls} bg-white text-xs`}
+                      />
+                      <input
+                        type="text"
+                        value={shareLinkAlbumTitle}
+                        onChange={(e) => setShareLinkAlbumTitle(e.target.value)}
+                        placeholder="앨범 이름 (선택: 비워두면 자동 지정)"
+                        className={`w-full sm:w-48 ${inputCls} bg-white text-xs`}
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRegisterShareLink()}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 px-5 py-2.5 text-xs font-bold text-white shadow-sm transition-all"
+                    >
+                      <Plus className="w-4 h-4" />
+                      디지털 앨범으로 즉시 등록
+                    </button>
+                  </div>
+
+                  <div className="pt-2 border-t border-indigo-100/80">
+                    <div className="text-[11px] font-semibold text-zinc-500 mb-2">
+                      💡 원클릭 빠른 테스트 (샘플 클라우드 앨범):
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleRegisterShareLink('https://drive.google.com/drive/folders/demo-jeju', 'Google Drive 제주 가족여행')
+                        }
+                        className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
+                      >
+                        + Google Drive 제주바다 앨범
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleRegisterShareLink('https://1drv.ms/f/s!demo-autumn', 'OneDrive 가평 단풍캠핑')
+                        }
+                        className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
+                      >
+                        + OneDrive 단풍캠핑 앨범
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleRegisterShareLink('https://my-nas.synology.me:5001/mo/sharing/demo-family', 'Synology Photos 가족공유 앨범')
+                        }
+                        className="rounded-full bg-white border border-indigo-200 hover:bg-indigo-50 px-3 py-1.5 text-[11px] font-medium text-indigo-900 transition-colors"
+                      >
+                        + Synology Photos 가족 앨범
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 2. Google Drive 연동 */}
               {selectedProvider === 'google_drive' && (
-                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-[#141519]">Google Drive 사진 폴더 선택 연동</h3>
-                  <p className="text-xs text-zinc-500">
-                    Google Drive 읽기 전용 액세스 토큰으로 폴더를 조회하거나, 샘플 드라이브 폴더 트리를 탐색해 앨범으로 추가합니다.
-                  </p>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={gdriveToken}
-                      onChange={(e) => setGdriveToken(e.target.value)}
-                      placeholder="Google Drive OAuth Access Token (선택 입력)"
-                      className={`flex-1 ${inputCls} bg-white`}
-                    />
-                    <button
-                      type="button"
-                      disabled={isConnecting}
-                      onClick={() => browseProviderFolders(false)}
-                      className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap"
-                    >
-                      실제 폴더 조회
-                    </button>
+                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-[#141519]">Google Drive 사진 폴더 연동</h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      구글 드라이브 폴더의 <strong>'공유 링크'</strong>만 붙여넣으면 API 키 없이도 누구나 손쉽게 액자 앨범을 만들 수 있습니다.
+                    </p>
+                  </div>
+
+                  <div className="bg-white rounded-xl p-4 border border-zinc-200/80 space-y-3">
+                    <div className="text-xs font-bold text-zinc-800 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                      가장 쉬운 동기화 방법: 폴더 공유 링크(URL) 붙여넣기
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="url"
+                        value={shareLinkUrl}
+                        onChange={(e) => setShareLinkUrl(e.target.value)}
+                        placeholder="구글 드라이브 폴더 링크 (https://drive.google.com/drive/folders/...)"
+                        className={`flex-1 ${inputCls} bg-[#F7F8FA] text-xs`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'Google Drive 사진 앨범')}
+                        className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                      >
+                        앨범 즉시 등록
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <button
                       type="button"
                       disabled={isConnecting}
                       onClick={() => browseProviderFolders(true)}
-                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                      className="rounded-full bg-zinc-200 hover:bg-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-800 whitespace-nowrap"
                     >
-                      샘플 드라이브 폴더 탐색
+                      샘플 Google Drive 가족 앨범 불러오기
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvancedApi(!showAdvancedApi)}
+                      className="text-xs text-zinc-500 hover:text-zinc-800 underline"
+                    >
+                      {showAdvancedApi ? '개발자용 OAuth 토큰 접기' : '개발자용: OAuth 토큰 직접 입력 (선택)'}
                     </button>
                   </div>
+
+                  {showAdvancedApi && (
+                    <div className="pt-2 border-t border-zinc-200/60 space-y-2">
+                      <div className="text-[11px] text-zinc-500">
+                        Google Cloud Console에서 발급받은 Bearer Access Token이 있는 경우 직접 입력할 수 있습니다.
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={gdriveToken}
+                          onChange={(e) => setGdriveToken(e.target.value)}
+                          placeholder="Google Drive OAuth Access Token"
+                          className={`flex-1 ${inputCls} bg-white text-xs`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isConnecting}
+                          onClick={() => browseProviderFolders(false)}
+                          className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap"
+                        >
+                          실제 토큰으로 조회
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
+              {/* 3. Microsoft OneDrive 연동 */}
               {selectedProvider === 'onedrive' && (
-                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-[#141519]">Microsoft OneDrive 사진 폴더 선택 연동</h3>
-                  <p className="text-xs text-zinc-500">
-                    Microsoft Graph 액세스 토큰으로 OneDrive 사진 폴더를 불러오거나 샘플 폴더 트리를 탐색해 앨범으로 추가합니다.
-                  </p>
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <input
-                      type="password"
-                      value={onedriveToken}
-                      onChange={(e) => setOnedriveToken(e.target.value)}
-                      placeholder="Microsoft Graph Access Token (선택 입력)"
-                      className={`flex-1 ${inputCls} bg-white`}
-                    />
-                    <button
-                      type="button"
-                      disabled={isConnecting}
-                      onClick={() => browseProviderFolders(false)}
-                      className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap"
-                    >
-                      실제 폴더 조회
-                    </button>
+                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-[#141519]">Microsoft OneDrive 사진 폴더 연동</h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      원드라이브 앱이나 웹에서 복사한 <strong>'공유 링크(1drv.ms)'</strong>만 넣으면 복잡한 설정 없이 동기화됩니다.
+                    </p>
+                  </div>
+
+                  <div className="bg-white rounded-xl p-4 border border-zinc-200/80 space-y-3">
+                    <div className="text-xs font-bold text-zinc-800 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                      가장 쉬운 동기화 방법: OneDrive 공유 링크(1drv.ms) 붙여넣기
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="url"
+                        value={shareLinkUrl}
+                        onChange={(e) => setShareLinkUrl(e.target.value)}
+                        placeholder="원드라이브 공유 링크 (https://1drv.ms/f/...)"
+                        className={`flex-1 ${inputCls} bg-[#F7F8FA] text-xs`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'OneDrive 사진 앨범')}
+                        className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                      >
+                        앨범 즉시 등록
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <button
                       type="button"
                       disabled={isConnecting}
                       onClick={() => browseProviderFolders(true)}
-                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                      className="rounded-full bg-zinc-200 hover:bg-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-800 whitespace-nowrap"
                     >
-                      샘플 OneDrive 폴더 탐색
+                      샘플 OneDrive 가족 앨범 불러오기
                     </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvancedApi(!showAdvancedApi)}
+                      className="text-xs text-zinc-500 hover:text-zinc-800 underline"
+                    >
+                      {showAdvancedApi ? '개발자용 Graph 토큰 접기' : '개발자용: Graph 토큰 직접 입력 (선택)'}
+                    </button>
+                  </div>
+
+                  {showAdvancedApi && (
+                    <div className="pt-2 border-t border-zinc-200/60 space-y-2">
+                      <div className="text-[11px] text-zinc-500">
+                        Azure Portal 앱 등록을 통해 발급받은 Microsoft Graph Access Token이 있는 경우 입력합니다.
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={onedriveToken}
+                          onChange={(e) => setOnedriveToken(e.target.value)}
+                          placeholder="Microsoft Graph Access Token"
+                          className={`flex-1 ${inputCls} bg-white text-xs`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isConnecting}
+                          onClick={() => browseProviderFolders(false)}
+                          className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap"
+                        >
+                          실제 토큰으로 조회
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 4. Synology Photos / DSM API 연동 */}
+              {selectedProvider === 'synology_api' && (
+                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-[#141519]">시놀로지 NAS (Synology Photos) 연동</h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      시놀로지 포토 앱에서 생성한 <strong>'공유 링크'</strong>를 넣거나, DSM 공식 API로 NAS에 직접 연결합니다.
+                    </p>
+                  </div>
+
+                  {/* 추천 방법: 시놀로지 포토 공유 링크 */}
+                  <div className="bg-white rounded-xl p-4 border border-zinc-200/80 space-y-3">
+                    <div className="text-xs font-bold text-indigo-700 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                      🌟 가장 쉬운 방법 (추천): 시놀로지 포토 공유 링크 연동 (계정/비번 불필요!)
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      Synology Photos 앱에서 앨범 우측 상단의 <strong>[공유] → [공개 링크 활성화]</strong> 후 복사한 URL을 붙여넣으세요.
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="url"
+                        value={shareLinkUrl}
+                        onChange={(e) => setShareLinkUrl(e.target.value)}
+                        placeholder="시놀로지 포토 공유 링크 (예: https://bluewind201.synology.me:9999/mo/sharing/...)"
+                        className={`flex-1 ${inputCls} bg-[#F7F8FA] text-xs`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRegisterShareLink(shareLinkUrl, 'Synology Photos 가족 공유 앨범')}
+                        className="rounded-full bg-indigo-600 hover:bg-indigo-700 px-4 py-2 text-xs font-bold text-white whitespace-nowrap shadow-sm"
+                      >
+                        시놀로지 앨범 등록
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 대안 방법: DSM API 직접 로그인 */}
+                  <div className="pt-2 border-t border-zinc-200/60 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-zinc-800">
+                        🔒 DSM 관리자/사용자 계정 직접 로그인 연결
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedApi(!showAdvancedApi)}
+                        className="text-xs text-zinc-500 hover:text-zinc-800 underline"
+                      >
+                        {showAdvancedApi ? '입력창 접기' : '직접 로그인 설정 열기'}
+                      </button>
+                    </div>
+
+                    {showAdvancedApi && (
+                      <div className="space-y-2.5 pt-1">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <input
+                            type="text"
+                            value={synoUrl}
+                            onChange={(e) => setSynoUrl(e.target.value)}
+                            placeholder="https://nas.synology.me:5001 (또는 포트)"
+                            className={`${inputCls} bg-white text-xs`}
+                          />
+                          <input
+                            type="text"
+                            value={synoUser}
+                            onChange={(e) => setSynoUser(e.target.value)}
+                            placeholder="DSM 계정 ID"
+                            className={`${inputCls} bg-white text-xs`}
+                          />
+                          <input
+                            type="password"
+                            value={synoPass}
+                            onChange={(e) => setSynoPass(e.target.value)}
+                            placeholder="DSM 비밀번호"
+                            className={`${inputCls} bg-white text-xs`}
+                          />
+                          <input
+                            type="text"
+                            value={synoOtp}
+                            onChange={(e) => setSynoOtp(e.target.value)}
+                            placeholder="2단계 OTP 인증코드 (설정된 경우)"
+                            className={`${inputCls} bg-white text-xs`}
+                          />
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            disabled={isConnecting}
+                            onClick={() => browseProviderFolders(false)}
+                            className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519]"
+                          >
+                            실제 DSM 로그인 · 폴더 조회
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isConnecting}
+                            onClick={() => browseProviderFolders(true)}
+                            className="rounded-full bg-zinc-200 hover:bg-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-800"
+                          >
+                            샘플 Synology Photos 앨범 불러오기
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
 
+              {/* 5. Synology WebDAV 연동 */}
               {selectedProvider === 'synology_webdav' && (
                 <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
                   <h3 className="text-sm font-bold text-[#141519]">시놀로지 NAS · WebDAV 폴더 연동</h3>
                   <p className="text-xs text-zinc-500">
-                    시놀로지 WebDAV Server 주소(기본 HTTPS 5006 / HTTP 5005)와 계정을 입력해 PROPFIND 방식으로 사진 폴더를 불러옵니다.
+                    시놀로지 WebDAV Server 주소(HTTPS 5006 또는 9999 등)와 계정을 입력해 PROPFIND 방식으로 사진 폴더를 탐색합니다.
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <input
                       type="text"
                       value={webdavUrl}
                       onChange={(e) => setWebdavUrl(e.target.value)}
-                      placeholder="https://my-nas.synology.me:5006"
-                      className={`${inputCls} bg-white`}
+                      placeholder="https://nas.synology.me:5006"
+                      className={`${inputCls} bg-white text-xs`}
                     />
                     <input
                       type="text"
                       value={webdavPath}
                       onChange={(e) => setWebdavPath(e.target.value)}
                       placeholder="기본 경로 (예: /photo)"
-                      className={`${inputCls} bg-white`}
+                      className={`${inputCls} bg-white text-xs`}
                     />
                     <input
                       type="text"
                       value={webdavUser}
                       onChange={(e) => setWebdavUser(e.target.value)}
                       placeholder="시놀로지 계정 ID"
-                      className={`${inputCls} bg-white`}
+                      className={`${inputCls} bg-white text-xs`}
                     />
                     <input
                       type="password"
                       value={webdavPass}
                       onChange={(e) => setWebdavPass(e.target.value)}
                       placeholder="비밀번호"
-                      className={`${inputCls} bg-white`}
+                      className={`${inputCls} bg-white text-xs`}
                     />
                   </div>
                   <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -1547,85 +1955,48 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       type="button"
                       disabled={isConnecting}
                       onClick={() => browseProviderFolders(true)}
-                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white"
+                      className="rounded-full bg-zinc-200 hover:bg-zinc-300 px-4 py-2 text-xs font-semibold text-zinc-800"
                     >
-                      샘플 시놀로지 WebDAV 폴더 불러오기
+                      샘플 WebDAV 폴더 불러오기
                     </button>
                   </div>
                 </div>
               )}
 
-              {selectedProvider === 'synology_api' && (
-                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-[#141519]">시놀로지 DSM / Synology Photos API 연동</h3>
-                  <p className="text-xs text-zinc-500">
-                    SYNO.API.Auth 및 SYNO.FileStation.List 공식 API를 통해 NAS 내 원하는 사진 폴더를 선택 등록합니다.
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <input
-                      type="text"
-                      value={synoUrl}
-                      onChange={(e) => setSynoUrl(e.target.value)}
-                      placeholder="https://my-nas.synology.me:5001"
-                      className={`${inputCls} bg-white`}
-                    />
-                    <input
-                      type="text"
-                      value={synoUser}
-                      onChange={(e) => setSynoUser(e.target.value)}
-                      placeholder="DSM 계정 ID"
-                      className={`${inputCls} bg-white`}
-                    />
-                    <input
-                      type="password"
-                      value={synoPass}
-                      onChange={(e) => setSynoPass(e.target.value)}
-                      placeholder="DSM 비밀번호"
-                      className={`${inputCls} bg-white`}
-                    />
-                    <input
-                      type="text"
-                      value={synoOtp}
-                      onChange={(e) => setSynoOtp(e.target.value)}
-                      placeholder="2단계 OTP 코드 (선택)"
-                      className={`${inputCls} bg-white`}
-                    />
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      disabled={isConnecting}
-                      onClick={() => browseProviderFolders(false)}
-                      className="rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2 text-xs font-semibold text-[#141519]"
-                    >
-                      실제 DSM API 로그인 · 폴더 조회
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isConnecting}
-                      onClick={() => browseProviderFolders(true)}
-                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2 text-xs font-semibold text-white"
-                    >
-                      샘플 Synology Photos 폴더 불러오기
-                    </button>
-                  </div>
-                </div>
-              )}
-
+              {/* 6. 스마트폰/내 기기 사진 직접 올리기 */}
               {selectedProvider === 'local_folder' && (
-                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                  <h3 className="text-sm font-bold text-[#141519]">내 컴퓨터 · 스마트폰 사진 폴더 직접 등록</h3>
-                  <p className="text-xs text-zinc-500">
-                    원하는 사진 폴더를 통째로 선택하면 디지털 앨범으로 등록되며, AI가 사진 속 장소를 자동 분석해 3D 동물친구들이 추억 대화에 활용합니다.
-                  </p>
+                <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                      <Smartphone className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-[#141519]">
+                        스마트폰 · 태블릿 갤러리 사진 직접 등록
+                      </h3>
+                      <p className="text-xs text-zinc-500 mt-0.5">
+                        복잡한 클라우드 설정 없이, 스마트폰 갤러리에 저장된 우리 아이 예쁜 사진들을 한 번에 선택해 액자에 즉시 띄웁니다.
+                      </p>
+                    </div>
+                  </div>
+
                   <input
                     type="text"
                     value={customAlbumName}
                     onChange={(e) => setCustomAlbumName(e.target.value)}
-                    placeholder="등록할 디지털 앨범 이름 (비워두면 폴더명 자동 사용)"
-                    className={`w-full ${inputCls} bg-white`}
+                    placeholder="등록할 디지털 앨범 이름 (예: 우리 아이 첫돌 추억, 주말 나들이)"
+                    className={`w-full ${inputCls} bg-white text-xs`}
                   />
-                  <div className="flex flex-wrap items-center gap-2.5">
+
+                  <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                    <input
+                      ref={filesInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*"
+                      onChange={(e) => handleLocalFilesUpload(e.target.files)}
+                      className="hidden"
+                    />
                     <input
                       ref={folderInputRef}
                       type="file"
@@ -1635,47 +2006,95 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       onChange={(e) => handleLocalFilesUpload(e.target.files)}
                       className="hidden"
                     />
-                    <input
-                      ref={filesInputRef}
-                      type="file"
-                      multiple
-                      accept="image/*"
-                      onChange={(e) => handleLocalFilesUpload(e.target.files)}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      disabled={isAnalyzingLocal}
-                      onClick={() => folderInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-full bg-[#141519] hover:bg-zinc-800 px-4 py-2.5 text-xs font-semibold text-white"
-                    >
-                      {isAnalyzingLocal ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />}
-                      사진 폴더 통째로 선택
-                    </button>
+
                     <button
                       type="button"
                       disabled={isAnalyzingLocal}
                       onClick={() => filesInputRef.current?.click()}
-                      className="inline-flex items-center gap-2 rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2.5 text-xs font-semibold text-[#141519]"
+                      className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 px-5 py-2.5 text-xs font-bold text-white shadow-sm transition-all"
                     >
-                      <Upload className="w-4 h-4" />
-                      사진 여러 장 선택
+                      {isAnalyzingLocal ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                      내 기기 갤러리에서 사진 여러 장 선택
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isAnalyzingLocal}
+                      onClick={() => folderInputRef.current?.click()}
+                      className="inline-flex items-center gap-2 rounded-xl bg-white border border-zinc-300 hover:bg-zinc-50 px-4 py-2.5 text-xs font-semibold text-zinc-700 transition-colors"
+                    >
+                      <FolderPlus className="w-4 h-4" />
+                      사진 폴더 통째로 선택 (PC)
                     </button>
                   </div>
                 </div>
               )}
 
+              {/* 스마트 액자 백엔드 서버 URL 설정 (원격 연동) */}
+              <div className="rounded-xl border border-dashed border-zinc-300 bg-white/60 p-3.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-zinc-600 flex items-center gap-1.5">
+                    <Server className="w-3.5 h-3.5 text-zinc-400" />
+                    스마트 액자 서버(Backend) 주소 연결 (선택사항)
+                  </span>
+                  <span className="text-[10px] text-zinc-400">
+                    {backendServerUrl ? '연결 주소 설정됨' : '앱 단독 모드'}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={backendServerUrl}
+                    onChange={(e) => handleSaveBackendUrl(e.target.value)}
+                    placeholder="예: http://192.168.0.50:3000 (PC 또는 NAS Docker 서버 주소)"
+                    className={`flex-1 ${inputCls} bg-white text-[11px] py-1.5`}
+                  />
+                  {backendServerUrl && (
+                    <button
+                      type="button"
+                      onClick={() => handleSaveBackendUrl('')}
+                      className="px-2.5 py-1 text-[11px] text-zinc-500 hover:text-zinc-800 border rounded-lg bg-white"
+                    >
+                      초기화
+                    </button>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400">
+                  집안 PC나 NAS에서 백엔드(`server.ts`)를 구동 중인 경우 IP와 포트를 적어두면 모바일 APK에서도 원격 AI 비서 및 NAS 프록시를 사용할 수 있습니다.
+                </p>
+              </div>
+
+              {/* 상태 메시지 및 빠른 대안 버튼 카드 */}
               {connectorStatus && (
                 <div
-                  className={`rounded-2xl p-3.5 text-xs font-medium border ${
+                  className={`rounded-2xl p-4 text-xs font-medium border space-y-2.5 ${
                     connectorStatus.type === 'error'
-                      ? 'bg-rose-50 border-rose-200 text-rose-700'
+                      ? 'bg-rose-50 border-rose-200 text-rose-800'
                       : connectorStatus.type === 'success'
                       ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                       : 'bg-zinc-100 border-zinc-200 text-zinc-700'
                   }`}
                 >
-                  {connectorStatus.msg}
+                  <div className="flex items-start gap-2">
+                    {connectorStatus.type === 'error' ? (
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    )}
+                    <span className="flex-1 leading-relaxed">{connectorStatus.msg}</span>
+                  </div>
+
+                  {connectorStatus.actionLabel && connectorStatus.onAction && (
+                    <div className="pt-2 border-t border-rose-200/60">
+                      <button
+                        type="button"
+                        onClick={connectorStatus.onAction}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-1.5 text-xs shadow-sm transition-all"
+                      >
+                        {connectorStatus.actionLabel}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 

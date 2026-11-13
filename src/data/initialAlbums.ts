@@ -6,6 +6,7 @@ import snowSleddingImg from '../assets/images/album_snow_sledding_1794490218862.
 import { DigitalAlbum, MartTickerItem, ScheduleItem, StorageProvider } from '../types';
 
 export const PROVIDER_LABELS: Record<StorageProvider, string> = {
+  share_link: '공유 링크 간편 등록 (추천)',
   google_drive: 'Google Drive',
   onedrive: 'Microsoft OneDrive',
   synology_webdav: 'Synology WebDAV',

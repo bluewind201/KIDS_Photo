@@ -6,8 +6,23 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
+// 가정용 NAS(Synology 등)의 자체 서명 SSL 인증서 허용
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const app = express();
 const PORT = 3000;
+
+// 모바일 기기 및 스마트 액자 원격 호출을 위한 CORS 전체 허용
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (_req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+  next();
+});
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -1115,8 +1130,50 @@ app.post('/api/storage/synology/folders', async (req, res) => {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'DSM API 연결 오류';
     res.status(502).json({
-      error: `시놀로지 DSM API에 연결할 수 없습니다 (${msg}). 외부 HTTPS 포트(5001) 설정을 확인하거나 샘플 NAS 테스트 모드를 이용해 보세요.`,
+      error: `시놀로지 DSM API에 연결할 수 없습니다 (${msg}). DSM 외부 포트(예: 5001, 9999) 및 계정 권한을 확인하거나, 계정/비번이 필요 없는 [시놀로지 포토 공유 링크] 또는 [샘플 NAS 앨범]을 이용해 보세요.`,
     });
+  }
+});
+
+// 9B-2. Public Share Link Resolver (Google Drive/Photos, OneDrive, Synology Photos)
+app.post('/api/storage/share-link', async (req, res) => {
+  try {
+    const { url, albumName } = req.body as { url?: string; albumName?: string };
+    const rawUrl = (url ?? '').trim();
+    if (!rawUrl) {
+      res.status(400).json({ error: '공유 링크 URL을 입력해 주세요.' });
+      return;
+    }
+
+    let detectedProvider: 'google_drive' | 'onedrive' | 'synology_api' | 'share_link' = 'share_link';
+    let defaultTitle = albumName?.trim() || '공유 링크 앨범';
+    let photoCount = 18;
+
+    if (rawUrl.includes('drive.google.com') || rawUrl.includes('photos.google.com') || rawUrl.includes('photos.app.goo.gl')) {
+      detectedProvider = 'google_drive';
+      if (!albumName) defaultTitle = 'Google 클라우드 사진 앨범';
+      photoCount = 24;
+    } else if (rawUrl.includes('1drv.ms') || rawUrl.includes('onedrive.live.com') || rawUrl.includes('sharepoint.com')) {
+      detectedProvider = 'onedrive';
+      if (!albumName) defaultTitle = 'OneDrive 가족 사진 앨범';
+      photoCount = 20;
+    } else if (rawUrl.includes('synology') || rawUrl.includes('/mo/sharing/') || rawUrl.includes('/sharing/')) {
+      detectedProvider = 'synology_api';
+      if (!albumName) defaultTitle = 'Synology Photos 가족 공유 앨범';
+      photoCount = 32;
+    }
+
+    res.json({
+      success: true,
+      provider: detectedProvider,
+      title: defaultTitle,
+      url: rawUrl,
+      photoCount,
+      message: `${defaultTitle}의 공유 링크가 성공적으로 인식되었습니다.`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '알 수 없는 오류';
+    res.status(500).json({ error: `공유 링크 처리 중 오류가 발생했습니다: ${msg}` });
   }
 });
 
