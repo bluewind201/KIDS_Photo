@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.net.http.SslError;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +28,8 @@ import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 import com.getcapacitor.BridgeWebViewClient;
+import java.io.File;
+import java.io.FileInputStream;
 import java.net.CookieHandler;
 import java.net.CookiePolicy;
 import java.security.SecureRandom;
@@ -37,6 +40,9 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -48,6 +54,9 @@ public class MainActivity extends BridgeActivity {
     private static final int MIC_PERMISSION_FOR_STT_CODE = 1002;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService neuralTtsExecutor = Executors.newFixedThreadPool(2);
+    private final AtomicLong activeSpeechGeneration = new AtomicLong(0L);
+    private MediaPlayer activeNeuralPlayer = null;
     private TextToSpeech nativeTts = null;
     private boolean isTtsInitialized = false;
     private PendingSpeech pendingSpeech = null;
@@ -178,7 +187,7 @@ public class MainActivity extends BridgeActivity {
                     if (pendingSpeech != null) {
                         PendingSpeech queued = pendingSpeech;
                         pendingSpeech = null;
-                        performNativeSpeak(
+                        performOfflineLocalSpeak(
                             queued.text,
                             queued.lang,
                             queued.pitch,
@@ -201,6 +210,21 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    private void stopActiveNeuralPlayerOnMainThread() {
+        if (activeNeuralPlayer != null) {
+            try {
+                if (activeNeuralPlayer.isPlaying()) {
+                    activeNeuralPlayer.stop();
+                }
+            } catch (Exception ignored) {}
+            try {
+                activeNeuralPlayer.reset();
+                activeNeuralPlayer.release();
+            } catch (Exception ignored) {}
+            activeNeuralPlayer = null;
+        }
+    }
+
     private void performNativeSpeak(
         String text,
         String lang,
@@ -209,9 +233,18 @@ public class MainActivity extends BridgeActivity {
         String speakerKey,
         String utteranceId
     ) {
+        final long myGen = activeSpeechGeneration.incrementAndGet();
+
         mainHandler.post(() -> {
             // Stop active STT mic before speaking so Android does not route TTS to earpiece or hear its own voice
             stopNativeListeningInternal(false);
+            stopActiveNeuralPlayerOnMainThread();
+
+            if (nativeTts != null) {
+                try {
+                    nativeTts.stop();
+                } catch (Exception ignored) {}
+            }
 
             try {
                 AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
@@ -221,7 +254,122 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ignored) {
                 // Ignore AudioManager mode reset
             }
+        });
 
+        final boolean isEnglish = lang != null && lang.toLowerCase(Locale.ROOT).startsWith("en");
+
+        // Primary Engine: Natural Human-Grade Neural Voice (Edge Read-Aloud Neural TTS with Disk Cache)
+        neuralTtsExecutor.execute(() -> {
+            if (activeSpeechGeneration.get() != myGen) return;
+            try {
+                File mp3File = EdgeNeuralTtsClient.synthesizeToCachedMp3(
+                    getApplicationContext(),
+                    text,
+                    speakerKey,
+                    isEnglish
+                );
+                if (activeSpeechGeneration.get() != myGen) return;
+
+                mainHandler.post(() -> {
+                    if (activeSpeechGeneration.get() != myGen) return;
+                    playSynthesizedNeuralMp3OnMainThread(
+                        mp3File,
+                        myGen,
+                        text,
+                        lang,
+                        pitch,
+                        rate,
+                        speakerKey,
+                        utteranceId
+                    );
+                });
+            } catch (Exception neuralErr) {
+                if (activeSpeechGeneration.get() != myGen) return;
+                // Offline / Network Fallback: Local Android TextToSpeech with gentle non-robotic pitch
+                mainHandler.post(() -> {
+                    if (activeSpeechGeneration.get() != myGen) return;
+                    performOfflineLocalSpeak(text, lang, pitch, rate, speakerKey, utteranceId);
+                });
+            }
+        });
+    }
+
+    private void playSynthesizedNeuralMp3OnMainThread(
+        File mp3File,
+        long myGen,
+        String text,
+        String lang,
+        float pitch,
+        float rate,
+        String speakerKey,
+        String utteranceId
+    ) {
+        stopActiveNeuralPlayerOnMainThread();
+        MediaPlayer mp = new MediaPlayer();
+        activeNeuralPlayer = mp;
+        try {
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build();
+            mp.setAudioAttributes(attrs);
+
+            try (FileInputStream fis = new FileInputStream(mp3File)) {
+                mp.setDataSource(fis.getFD());
+            }
+            mp.setVolume(1.0f, 1.0f);
+
+            mp.setOnCompletionListener(player -> {
+                if (activeNeuralPlayer == player) {
+                    stopActiveNeuralPlayerOnMainThread();
+                } else {
+                    try {
+                        player.release();
+                    } catch (Exception ignored) {}
+                }
+                if (activeSpeechGeneration.get() == myGen) {
+                    dispatchJsTtsEvent(utteranceId, "done");
+                }
+            });
+
+            mp.setOnErrorListener((player, what, extra) -> {
+                if (activeNeuralPlayer == player) {
+                    stopActiveNeuralPlayerOnMainThread();
+                } else {
+                    try {
+                        player.release();
+                    } catch (Exception ignored) {}
+                }
+                if (activeSpeechGeneration.get() == myGen) {
+                    performOfflineLocalSpeak(text, lang, pitch, rate, speakerKey, utteranceId);
+                }
+                return true;
+            });
+
+            mp.prepare();
+            if (activeSpeechGeneration.get() != myGen) {
+                stopActiveNeuralPlayerOnMainThread();
+                return;
+            }
+            dispatchJsTtsEvent(utteranceId, "start");
+            mp.start();
+        } catch (Exception playErr) {
+            stopActiveNeuralPlayerOnMainThread();
+            if (activeSpeechGeneration.get() == myGen) {
+                performOfflineLocalSpeak(text, lang, pitch, rate, speakerKey, utteranceId);
+            }
+        }
+    }
+
+    private void performOfflineLocalSpeak(
+        String text,
+        String lang,
+        float pitch,
+        float rate,
+        String speakerKey,
+        String utteranceId
+    ) {
+        mainHandler.post(() -> {
             if (nativeTts == null) {
                 initNativeTextToSpeech();
                 pendingSpeech = new PendingSpeech(text, lang, pitch, rate, speakerKey, utteranceId);
@@ -249,8 +397,9 @@ public class MainActivity extends BridgeActivity {
                 // Select distinct installed voice when multiple local voices exist for the language
                 selectBestVoiceForSpeaker(isEnglish ? "en" : "ko", speakerKey);
 
-                float safePitch = Math.max(0.55f, Math.min(2.0f, pitch));
-                float safeRate = Math.max(0.55f, Math.min(1.8f, rate));
+                // Clamp offline fallback pitch to a natural human range (0.92 ~ 1.18) so it never sounds metallic
+                float safePitch = Math.max(0.92f, Math.min(1.18f, pitch));
+                float safeRate = Math.max(0.82f, Math.min(1.15f, rate));
                 nativeTts.setPitch(safePitch);
                 nativeTts.setSpeechRate(safeRate);
 
@@ -537,7 +686,7 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public boolean isTtsReady() {
-            return isTtsInitialized;
+            return true;
         }
 
         @JavascriptInterface
@@ -565,8 +714,10 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void stopSpeak() {
+            activeSpeechGeneration.incrementAndGet();
             mainHandler.post(() -> {
                 pendingSpeech = null;
+                stopActiveNeuralPlayerOnMainThread();
                 if (nativeTts != null) {
                     try {
                         nativeTts.stop();
@@ -593,6 +744,12 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onDestroy() {
+        activeSpeechGeneration.incrementAndGet();
+        stopActiveNeuralPlayerOnMainThread();
+        try {
+            neuralTtsExecutor.shutdownNow();
+        } catch (Exception ignored) {}
+
         try {
             if (nativeTts != null) {
                 nativeTts.stop();

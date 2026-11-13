@@ -968,9 +968,9 @@ export async function fetchCloudProviderFolderPhotos(params: {
         albumName: params.albumName,
         provider: 'google_drive',
         src: f.thumbnailLink
-          ? f.thumbnailLink.replace(/=s\d+.*$/, '=s1920')
-          : `https://drive.google.com/thumbnail?id=${f.id}&sz=w1920`,
-        assetUrl: `https://lh3.googleusercontent.com/d/${f.id}=w1920`,
+          ? f.thumbnailLink.replace(/=s\d+.*$/, '=s2560')
+          : `https://drive.google.com/thumbnail?id=${f.id}&sz=w2560`,
+        assetUrl: `https://lh3.googleusercontent.com/d/${f.id}=w2560`,
         title: f.name.replace(/\.[^.]+$/, ''),
         date: f.createdTime
           ? new Date(f.createdTime).toLocaleDateString('ko-KR', {
@@ -1723,8 +1723,8 @@ export async function resolvePublicShareLinkUnified(params: {
       albumId: params.albumId,
       albumName: albumTitle,
       provider: 'google_drive',
-      src: `${baseUrl}=w1920-h1080`,
-      assetUrl: `${baseUrl}=w2560-h1440`,
+      src: `${baseUrl}=w2560-h2560`,
+      assetUrl: `${baseUrl}=w3840-h3840`,
       title: `${albumTitle} #${idx + 1}`,
       date: todayLabel,
       location: albumTitle,
@@ -1766,8 +1766,8 @@ export async function resolvePublicShareLinkUnified(params: {
               albumId: params.albumId,
               albumName: albumTitle,
               provider: 'google_drive',
-              src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
-              assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+              src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w2560`,
+              assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w2560`,
               fallbackUrls: [
                 `https://drive.usercontent.google.com/download?id=${fileId}&export=view`,
                 `https://drive.google.com/uc?export=view&id=${fileId}`,
@@ -1878,8 +1878,8 @@ export async function resolvePublicShareLinkUnified(params: {
         albumId: params.albumId,
         albumName: albumTitle,
         provider: 'google_drive',
-        src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
-        assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+        src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w2560`,
+        assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w2560`,
         fallbackUrls: [
           `https://drive.usercontent.google.com/download?id=${fileId}&export=view`,
           `https://drive.google.com/uc?export=view&id=${fileId}`,

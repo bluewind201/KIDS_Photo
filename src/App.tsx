@@ -325,6 +325,30 @@ interface BrowserSpeechRecognitionInstance {
   stop: () => void;
 }
 
+function upgradeLegacyPhotoResolutions(rawAlbums: DigitalAlbum[]): DigitalAlbum[] {
+  return rawAlbums.map((album) => ({
+    ...album,
+    photos: Array.isArray(album.photos)
+      ? album.photos.map((p) => {
+          const upgradeUrl = (u?: string) => {
+            if (!u) return u;
+            return u
+              .replace(/=w1920-h1080\b/g, '=w2560-h2560')
+              .replace(/=w2560-h1440\b/g, '=w3840-h3840')
+              .replace(/([?&]sz=)w1920\b/g, '$1w2560')
+              .replace(/=s1920\b/g, '=s2560')
+              .replace(/(\/d\/[a-zA-Z0-9_-]+)=w1920\b/g, '$1=w2560');
+          };
+          return {
+            ...p,
+            src: upgradeUrl(p.src) ?? p.src,
+            assetUrl: upgradeUrl(p.assetUrl),
+          };
+        })
+      : [],
+  }));
+}
+
 export default function App() {
   // Core Smart Frame State (오프라인/앱 단독 모드를 위해 localStorage 영구 보존)
   const [albums, setAlbums] = useState<DigitalAlbum[]>(() => {
@@ -332,7 +356,9 @@ export default function App() {
       const cached = localStorage.getItem('kids_photo_albums');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return upgradeLegacyPhotoResolutions(parsed);
+        }
       }
     } catch {}
     return INITIAL_ALBUMS;

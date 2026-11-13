@@ -179,16 +179,47 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       ? 'animate-frame-sway'
       : '';
 
+  const renderFittedPhotoWithAmbientMargins = (
+    srcUrl: string,
+    imgKey: string,
+    photo: PhotoItem,
+    compact: boolean,
+    onErrorHandler?: () => void
+  ) => (
+    <div className="relative w-full h-full overflow-hidden bg-[#141519] flex items-center justify-center">
+      {/* Soft ambient blurred pillarbox/letterbox fill for natural left/right or top/bottom margins */}
+      <img
+        src={srcUrl}
+        alt=""
+        aria-hidden="true"
+        referrerPolicy="no-referrer"
+        decoding="async"
+        className="pointer-events-none absolute inset-0 w-full h-full object-cover scale-110 blur-2xl opacity-40 select-none"
+      />
+      <div className="pointer-events-none absolute inset-0 bg-black/20" />
+      {/* Full uncropped original-aspect-ratio photo (never stretched or zoomed/pixelated) */}
+      <img
+        key={imgKey}
+        src={srcUrl}
+        alt={`${photo.title} (${photo.location})`}
+        referrerPolicy="no-referrer"
+        decoding="async"
+        onError={onErrorHandler}
+        className={`relative z-10 w-full h-full object-contain select-none drop-shadow-[0_8px_24px_rgba(0,0,0,0.28)] ${
+          compact ? '' : motionClass
+        }`}
+      />
+    </div>
+  );
+
   const renderPhotoSurface = (photo: PhotoItem, compact = false) => {
     const resolvedBlobUrl = nativeBlobUrls[photo.id];
     if (resolvedBlobUrl) {
-      return (
-        <img
-          key={`${photo.id}-blob`}
-          src={resolvedBlobUrl}
-          alt={`${photo.title} (${photo.location})`}
-          className={`w-full h-full object-cover select-none ${compact ? '' : motionClass}`}
-        />
+      return renderFittedPhotoWithAmbientMargins(
+        resolvedBlobUrl,
+        `${photo.id}-blob`,
+        photo,
+        compact
       );
     }
 
@@ -241,20 +272,16 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
 
     const activeSrc = candidateUrls[stage] || photo.src;
 
-    return (
-      <img
-        key={`${photo.id}-${stage}`}
-        src={activeSrc}
-        alt={`${photo.title} (${photo.location})`}
-        referrerPolicy="no-referrer"
-        onError={() =>
-          setImgErrorStage((prev) => ({
-            ...prev,
-            [photo.id]: (prev[photo.id] ?? 0) + 1,
-          }))
-        }
-        className={`w-full h-full object-cover select-none ${compact ? '' : motionClass}`}
-      />
+    return renderFittedPhotoWithAmbientMargins(
+      activeSrc,
+      `${photo.id}-${stage}`,
+      photo,
+      compact,
+      () =>
+        setImgErrorStage((prev) => ({
+          ...prev,
+          [photo.id]: (prev[photo.id] ?? 0) + 1,
+        }))
     );
   };
 

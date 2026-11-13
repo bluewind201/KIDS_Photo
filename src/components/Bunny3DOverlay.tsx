@@ -3274,7 +3274,8 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                           src={heldPhoto.src}
                           alt={heldPhoto.title}
                           referrerPolicy="no-referrer"
-                          className="w-full h-16 object-cover"
+                          decoding="async"
+                          className="w-full h-16 object-contain bg-[#181A20]"
                         />
                       </button>
                     )}

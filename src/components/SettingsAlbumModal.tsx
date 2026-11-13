@@ -536,7 +536,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     }
   };
 
-  const compressImageFileToDataUrl = (file: File, maxDim = 1600, quality = 0.82): Promise<string> =>
+  const compressImageFileToDataUrl = (file: File, maxDim = 2400, quality = 0.9): Promise<string> =>
     new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = () => {
@@ -2422,7 +2422,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                           src={albumThumbBlobs[album.id] || album.photos[0].src}
                           alt={album.name}
                           referrerPolicy="no-referrer"
-                          className="w-16 h-11 rounded-xl object-cover shrink-0 bg-zinc-200"
+                          decoding="async"
+                          className="w-16 h-11 rounded-xl object-contain shrink-0 bg-[#181A20]"
                         />
                       )}
                       <div className="min-w-0">
@@ -2532,13 +2533,20 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (TTS & 효과음)</h3>
+                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (자연 신경망 성우 TTS & 효과음)</h3>
                 <div className="flex items-center justify-between">
-                  <span className="text-xs text-zinc-600">AI 브리핑 및 3D 캐릭터 목소리 출력</span>
+                  <div className="space-y-0.5 pr-3">
+                    <span className="block text-xs font-semibold text-zinc-700">
+                      AI 브리핑 및 5종 토끼 캐릭터 자연 신경망 목소리 출력
+                    </span>
+                    <span className="block text-[11px] text-zinc-500">
+                      별도 API 키 없이 실제 성우처럼 자연스러운 한국어·영어 신경망 음성이 기본 적용되며, 오프라인 상태에서는 기기 내장 음성으로 자동 전환됩니다.
+                    </span>
+                  </div>
                   <button
                     type="button"
                     onClick={() => onChangeTtsEnabled(!ttsEnabled)}
-                    className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-colors ${
+                    className={`rounded-full px-4 py-1.5 text-xs font-semibold shrink-0 transition-colors ${
                       ttsEnabled ? 'bg-[#141519] text-white' : 'bg-zinc-200 text-zinc-600'
                     }`}
                   >

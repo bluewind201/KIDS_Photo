@@ -1,7 +1,9 @@
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import tls from 'tls';
 import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
@@ -841,7 +843,321 @@ function ensureWavBase64(base64Data: string, sampleRate = 24000): string {
   return Buffer.concat([header, pcmOrWav]).toString('base64');
 }
 
-// 7. Gemini TTS Endpoint (gemini-3.8-flash-lite-tts via Interactions API + clean fallback, Korean & English Teacher support)
+const EDGE_TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+const EDGE_CHROMIUM_FULL_VERSION = '143.0.3650.75';
+const EDGE_CHROMIUM_MAJOR_VERSION = '143';
+const EDGE_SEC_MS_GEC_VERSION = `2-${EDGE_CHROMIUM_FULL_VERSION}`;
+const EDGE_WIN_EPOCH = 11644473600n;
+const EDGE_SHA256_INITIAL = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+const EDGE_SHA256_STATE = [0xfd9fbea2, 0x91243ce7, 0xbe499094, 0xcd2e1e0a, 0x6c006f49, 0x04bd35ab, 0xfeb0a7e4, 0x03effbd2];
+const EDGE_SHA256_SCHEDULE = [
+  0xeb24bf9e, 0x1558691f, 0xa0c09ee2, 0x0cfa32ba, 0xa622ee8c, 0xd1dd9491, 0xc0dd25a0,
+  0xf9e70ab6, 0xf0c31573, 0x7058ce4e, 0x7188e606, 0x00e5ab33, 0xd258b060, 0x72766564,
+];
+const EDGE_SHA256_ROUND_CONSTANTS = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+const EDGE_CS64_COEFFICIENTS: Array<[number, number]> = [
+  [0xe82e91b1, 0xb32700d0], [0x44de24c6, 0x88dff51d], [0x3beb65bc, 0x29514038], [0xc89c5933, 0xb328cbdf],
+  [0x8d1ec211, 0xd405b4d5], [0x314ef5d5, 0x26e55f3c], [0xe92491b1, 0x607801c6], [0xf0a5b9d5, 0x82b2c1fb],
+  [0x06064cf3, 0xfa51a3da], [0xda79fa60, 0x207cc464], [0xbed20560, 0x3c3c74f3], [0x89f9c9f8, 0xd2d14b61],
+  [0x35fa38c6, 0xbb04a2c1], [0xcb49e3c6, 0xc5626167],
+];
+
+function generateEdgeSecMsGecV2(): string {
+  const u32 = (x: number) => x >>> 0;
+  const mul32 = (a: number, b: number) => Math.imul(a, b) >>> 0;
+  const rol16 = (v: number) => (((v >>> 0) << 16) | ((v >>> 0) >>> 16)) >>> 0;
+  const rotr = (v: number, n: number) => (((v >>> 0) >>> n) | ((v >>> 0) << (32 - n))) >>> 0;
+  const sigma0 = (v: number) => (rotr(v, 7) ^ rotr(v, 18) ^ ((v >>> 0) >>> 3)) >>> 0;
+  const sigma1 = (v: number) => (rotr(v, 17) ^ rotr(v, 19) ^ ((v >>> 0) >>> 10)) >>> 0;
+
+  const sha256Rounds = (state: number[], words: number[], firstRound = 0) => {
+    let [a, b, c, d, e, f, g, h] = state.map(u32);
+    for (let i = firstRound; i < 64; i++) {
+      const k = firstRound === 14 && i === 14 ? 0xc9dc06a7 : EDGE_SHA256_ROUND_CONSTANTS[i];
+      const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = u32(h + s1 + u32(ch) + k + words[i]);
+      const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = u32(s0 + u32(maj));
+      h = g; g = f; f = e; e = u32(d + t1);
+      d = c; c = b; b = a; a = u32(t1 + t2);
+    }
+    return [a, b, c, d, e, f, g, h];
+  };
+
+  const expandSchedule = (words: number[], firstWord = 16) => {
+    for (let i = firstWord; i < 64; i++) {
+      words[i] = u32(sigma1(words[i - 2]) + words[i - 7] + sigma0(words[i - 15]) + words[i - 16]);
+    }
+  };
+
+  let ticks = BigInt(Math.floor(Date.now() / 1000)) + EDGE_WIN_EPOCH;
+  ticks -= ticks % 300n;
+  ticks *= 10000000n;
+  const data = Buffer.from(`${ticks}${EDGE_TRUSTED_CLIENT_TOKEN}`, 'ascii');
+
+  const initWords = new Array<number>(64).fill(0);
+  initWords[14] = ((data[0] << 16) | (data[1] << 8) | data[2]) >>> 0;
+  initWords[15] = ((data[3] << 24) | (data[4] << 16) | (data[5] << 8) | data[6]) >>> 0;
+  for (let i = 16; i < 30; i++) {
+    let val = EDGE_SHA256_SCHEDULE[i - 16];
+    if (i - 2 >= 14) val = u32(val + (i === 16 ? sigma1(initWords[i - 2]) ^ 0x000b92c0 : sigma1(initWords[i - 2])));
+    if (i - 7 >= 14) val = u32(val + initWords[i - 7]);
+    if (i - 15 >= 14) val = u32(val + (i === 29 ? sigma0(initWords[i - 15]) ^ 0x059c0b80 : sigma0(initWords[i - 15])));
+    initWords[i] = u32(val);
+  }
+  initWords[30] = u32(sigma1(initWords[28]) + initWords[23] + sigma0(initWords[15]) + initWords[14] + 0xc9dc06a7 - EDGE_SHA256_ROUND_CONSTANTS[14]);
+  expandSchedule(initWords, 31);
+  const initWorking = sha256Rounds(EDGE_SHA256_STATE, initWords, 14);
+  let state = EDGE_SHA256_INITIAL.map((x, idx) => u32(x + initWorking[idx]));
+
+  const length = 57 + data.length;
+  const tail = data.subarray(7);
+  const padZeroCount = (((55 - length) % 64) + 64) % 64;
+  const padded = Buffer.alloc(tail.length + 1 + padZeroCount + 8);
+  tail.copy(padded, 0);
+  padded[tail.length] = 0x80;
+  padded.writeBigUInt64BE(BigInt(length) * 8n, padded.length - 8);
+
+  for (let off = 0; off < padded.length; off += 64) {
+    const blockWords = new Array<number>(64).fill(0);
+    for (let j = 0; j < 16; j++) blockWords[j] = padded.readUInt32BE(off + j * 4);
+    expandSchedule(blockWords, 16);
+    const working = sha256Rounds(state, blockWords, 0);
+    state = state.map((x, idx) => u32(x + working[idx]));
+  }
+  const digest = Buffer.alloc(32);
+  for (let i = 0; i < 8; i++) digest.writeUInt32BE(state[i], i * 4);
+
+  const keyA = u32(digest.readUInt32LE(0) | 1);
+  const keyB = u32(digest.readUInt32LE(4) | 1);
+  const factors = [mul32(keyA, 0x82893933), mul32(keyB, 0x82893933)];
+  const terms = EDGE_CS64_COEFFICIENTS.map(([coeff], idx) => mul32(coeff, factors[idx % 2]));
+  const offsets = EDGE_CS64_COEFFICIENTS.map(([, off]) => u32(off));
+
+  const prefixed = Buffer.concat([Buffer.from([0]), data]);
+  const rem = prefixed.length % 4;
+  const lePadded = rem === 0 ? prefixed : Buffer.concat([prefixed, Buffer.alloc(4 - rem)]);
+  const dataWords: number[] = [];
+  for (let i = 0; i < lePadded.length; i += 4) dataWords.push(lePadded.readUInt32LE(i));
+  if (dataWords.length % 2 === 1) dataWords.push(0);
+
+  for (let idx = 0; idx < dataWords.length; idx++) {
+    const word = dataWords[idx];
+    let term = mul32(word, idx % 2 === 0 ? keyA : keyB);
+    let offset = mul32(rol16(word), idx % 2 === 0 ? 0xef0569fb : 0xc31713db);
+    if (idx === 0) {
+      term = u32(term + mul32(0xf2f90b1a, factors[0]));
+      offset = u32(offset + 0x0b1a0000);
+    }
+    terms.push(term);
+    offsets.push(offset);
+  }
+
+  let swapAcc = 0, swapLast = 0, csState = 0, acc = 0;
+  for (let idx = 0; idx < terms.length; idx += 2) {
+    const x = terms[idx], y = terms[idx + 1];
+    let t = rol16(u32(offsets[idx] + x));
+    let q = mul32(t, 0x76f50f34);
+    swapAcc = u32(swapAcc + u32(mul32(rol16(q), 0xc3efea97) + q));
+    t = rol16(u32(offsets[idx + 1] + y));
+    q = mul32(t, 0x1881ce3c);
+    swapLast = u32(mul32(rol16(q), 0x35bd1ec9) + q);
+    swapAcc = u32(swapAcc + swapLast);
+
+    csState = u32(mul32(csState, keyA) + x);
+    csState = mul32(rol16(csState), 0xcf98b111);
+    csState = mul32(rol16(csState), 0x87085b9f);
+    csState = mul32(rol16(csState), 0x12ceb96d);
+    csState = mul32(rol16(csState), 0x257e1d83);
+    acc = u32(acc + csState);
+
+    t = u32(mul32(csState, keyB) + y);
+    t = mul32(rol16(t), 0xa27416f5);
+    t = mul32(rol16(t), 0xd38396ff);
+    csState = mul32(rol16(mul32(rol16(t), 0x7c932b89)), 0xbfa49f69);
+    acc = u32(acc + csState);
+  }
+  const csOut = Buffer.alloc(8);
+  csOut.writeUInt32LE(u32(swapLast ^ csState), 0);
+  csOut.writeUInt32LE(u32(swapAcc ^ acc), 4);
+  return `${csOut.toString('hex').toUpperCase()}-${digest.toString('hex').toUpperCase()}`;
+}
+
+async function synthesizeEdgeNeuralMp3Base64(
+  text: string,
+  speaker: string,
+  lang: 'ko' | 'en'
+): Promise<string | null> {
+  const voiceSpecs: Record<string, { voice: string; pitch: string; rate: string }> =
+    lang === 'en'
+      ? {
+          tosuni: { voice: 'en-US-AvaMultilingualNeural', pitch: '+4Hz', rate: '-8%' },
+          tosili: { voice: 'en-US-AnaNeural', pitch: '+0Hz', rate: '-5%' },
+          toddungi: { voice: 'en-US-AnaNeural', pitch: '-4Hz', rate: '-8%' },
+          tobyeori: { voice: 'en-US-EmmaMultilingualNeural', pitch: '+6Hz', rate: '-8%' },
+          togureum: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+8Hz', rate: '-6%' },
+          assistant: { voice: 'en-US-AvaMultilingualNeural', pitch: '+0Hz', rate: '-5%' },
+        }
+      : {
+          tosuni: { voice: 'ko-KR-SunHiNeural', pitch: '+8Hz', rate: '+2%' },
+          tosili: { voice: 'en-US-AvaMultilingualNeural', pitch: '+14Hz', rate: '+7%' },
+          toddungi: { voice: 'ko-KR-InJoonNeural', pitch: '+16Hz', rate: '-4%' },
+          tobyeori: { voice: 'en-US-EmmaMultilingualNeural', pitch: '+12Hz', rate: '-2%' },
+          togureum: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+12Hz', rate: '+5%' },
+          assistant: { voice: 'ko-KR-SunHiNeural', pitch: '+0Hz', rate: '+0%' },
+        };
+
+  const spec = voiceSpecs[speaker] ?? voiceSpecs.assistant;
+  const xmlLang = lang === 'en' ? 'en-US' : 'ko-KR';
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+  const connId = crypto.randomUUID().replace(/-/g, '');
+  const gec = generateEdgeSecMsGecV2();
+  const muid = crypto.randomBytes(16).toString('hex').toUpperCase();
+  const wsPath = `/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${EDGE_TRUSTED_CLIENT_TOKEN}&ConnectionId=${connId}&Sec-MS-GEC=${gec}&Sec-MS-GEC-Version=${EDGE_SEC_MS_GEC_VERSION}`;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (val: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+
+    const sock = tls.connect(443, 'speech.platform.bing.com', { servername: 'speech.platform.bing.com' }, () => {
+      const wsKey = crypto.randomBytes(16).toString('base64');
+      const req = [
+        `GET ${wsPath} HTTP/1.1`,
+        'Host: speech.platform.bing.com',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${wsKey}`,
+        'Sec-WebSocket-Version: 13',
+        'Pragma: no-cache',
+        'Cache-Control: no-cache',
+        'Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+        `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${EDGE_CHROMIUM_MAJOR_VERSION}.0.0.0 Safari/537.36 Edg/${EDGE_CHROMIUM_MAJOR_VERSION}.0.0.0`,
+        `Cookie: muid=${muid};`,
+        '',
+        '',
+      ].join('\r\n');
+      sock.write(req);
+    });
+
+    const timer = setTimeout(() => {
+      sock.destroy();
+      finish(null);
+    }, 4200);
+
+    const sendWsText = (str: string) => {
+      const payload = Buffer.from(str, 'utf8');
+      const mask = crypto.randomBytes(4);
+      let hdr: Buffer;
+      if (payload.length < 126) {
+        hdr = Buffer.alloc(6);
+        hdr[0] = 0x81;
+        hdr[1] = 0x80 | payload.length;
+        mask.copy(hdr, 2);
+      } else {
+        hdr = Buffer.alloc(8);
+        hdr[0] = 0x81;
+        hdr[1] = 0x80 | 126;
+        hdr.writeUInt16BE(payload.length, 2);
+        mask.copy(hdr, 4);
+      }
+      const masked = Buffer.alloc(payload.length);
+      for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
+      sock.write(Buffer.concat([hdr, masked]));
+    };
+
+    let upgraded = false;
+    let buf: Buffer = Buffer.alloc(0);
+    const chunks: Buffer[] = [];
+
+    sock.on('data', (d: Buffer) => {
+      buf = Buffer.concat([buf, d]);
+      if (!upgraded) {
+        const idx = buf.indexOf('\r\n\r\n');
+        if (idx === -1) return;
+        const head = buf.subarray(0, idx).toString('utf8');
+        buf = buf.subarray(idx + 4);
+        if (!head.startsWith('HTTP/1.1 101')) {
+          sock.destroy();
+          finish(null);
+          return;
+        }
+        upgraded = true;
+        const ts = new Date().toUTCString();
+        sendWsText(
+          `X-Timestamp:${ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
+            `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"true","wordBoundaryEnabled":"false"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}\r\n`
+        );
+        const reqId = crypto.randomUUID().replace(/-/g, '');
+        const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${xmlLang}'><voice name='${spec.voice}'><prosody pitch='${spec.pitch}' rate='${spec.rate}' volume='+0%'>${escaped}</prosody></voice></speak>`;
+        sendWsText(`X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${ts}Z\r\nPath:ssml\r\n\r\n${ssml}`);
+      }
+
+      while (buf.length >= 2) {
+        const b0 = buf[0];
+        const b1 = buf[1];
+        const opcode = b0 & 0x0f;
+        let len = b1 & 0x7f;
+        let offset = 2;
+        if (len === 126) {
+          if (buf.length < 4) return;
+          len = buf.readUInt16BE(2);
+          offset = 4;
+        } else if (len === 127) {
+          if (buf.length < 10) return;
+          len = Number(buf.readBigUInt64BE(2));
+          offset = 10;
+        }
+        if (buf.length < offset + len) return;
+        const frame = buf.subarray(offset, offset + len);
+        buf = buf.subarray(offset + len);
+
+        if (opcode === 0x2) {
+          const hdrLen = frame.readUInt16BE(0);
+          const audioPart = frame.subarray(2 + hdrLen);
+          if (audioPart.length > 0) chunks.push(audioPart);
+        } else if (opcode === 0x1) {
+          if (frame.toString('utf8').includes('Path:turn.end')) {
+            sock.destroy();
+            const full = Buffer.concat(chunks);
+            finish(full.length > 256 ? full.toString('base64') : null);
+            return;
+          }
+        } else if (opcode === 0x8) {
+          sock.destroy();
+          const full = Buffer.concat(chunks);
+          finish(full.length > 256 ? full.toString('base64') : null);
+          return;
+        }
+      }
+    });
+
+    sock.on('error', () => finish(null));
+  });
+}
+
+// 7. Gemini TTS + Natural Neural TTS Endpoint (Korean & English Teacher support)
 app.post('/api/gemini/tts', async (req, res) => {
   const { text, speaker = 'assistant', lang = 'ko' } = req.body as {
     text?: string;
@@ -942,9 +1258,20 @@ app.post('/api/gemini/tts', async (req, res) => {
       }
     }
 
-    // Graceful browser speechSynthesis fallback when server TTS is unavailable
+    // Natural Neural TTS fallback when Gemini TTS is unavailable or GEMINI_API_KEY is not configured
+    const neuralMp3 = await synthesizeEdgeNeuralMp3Base64(cleanText, speaker, lang);
+    if (neuralMp3) {
+      res.json({ audioBase64: neuralMp3, mimeType: 'audio/mpeg' });
+      return;
+    }
+
     res.json({ fallback: true });
   } catch {
+    const neuralMp3 = await synthesizeEdgeNeuralMp3Base64(cleanText, speaker, lang);
+    if (neuralMp3) {
+      res.json({ audioBase64: neuralMp3, mimeType: 'audio/mpeg' });
+      return;
+    }
     res.json({ fallback: true });
   }
 });
@@ -1230,8 +1557,8 @@ app.post('/api/storage/share-link', async (req, res) => {
           albumId,
           albumName: title,
           provider: 'google_drive',
-          src: `${u}=w1920-h1080`,
-          assetUrl: `${u}=w2560-h1440`,
+          src: `${u}=w2560-h2560`,
+          assetUrl: `${u}=w3840-h3840`,
           title: `${title} #${i + 1}`,
           date: todayLabel,
           location: title,
@@ -1261,8 +1588,8 @@ app.post('/api/storage/share-link', async (req, res) => {
                 albumId,
                 albumName: title,
                 provider: 'google_drive',
-                src: `https://drive.google.com/thumbnail?id=${fid}&sz=w1920`,
-                assetUrl: `https://lh3.googleusercontent.com/d/${fid}=w1920`,
+                src: `https://drive.google.com/thumbnail?id=${fid}&sz=w2560`,
+                assetUrl: `https://lh3.googleusercontent.com/d/${fid}=w2560`,
                 title,
                 date: todayLabel,
                 location: title,
@@ -1312,8 +1639,8 @@ app.post('/api/storage/share-link', async (req, res) => {
             albumId,
             albumName: title,
             provider: 'google_drive',
-            src: `https://drive.google.com/thumbnail?id=${fid}&sz=w1920`,
-            assetUrl: `https://lh3.googleusercontent.com/d/${fid}=w1920`,
+            src: `https://drive.google.com/thumbnail?id=${fid}&sz=w2560`,
+            assetUrl: `https://lh3.googleusercontent.com/d/${fid}=w2560`,
             title: fname.replace(/\.[^.]+$/, ''),
             date: todayLabel,
             location: title,

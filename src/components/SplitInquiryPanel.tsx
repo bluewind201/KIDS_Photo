@@ -224,12 +224,13 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
                     onClick={() => onSelectMemoryPhoto(photo)}
                     className="group text-left rounded-2xl overflow-hidden bg-[#F7F8FA] border border-zinc-200/80 hover:border-[#141519] transition-colors"
                   >
-                    <div className="aspect-video w-full overflow-hidden bg-zinc-200">
+                    <div className="aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
                       <img
                         src={photo.src}
                         alt={photo.title}
                         referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                        decoding="async"
+                        className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
                       />
                     </div>
                     <div className="p-3">

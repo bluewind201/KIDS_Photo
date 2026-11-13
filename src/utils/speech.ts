@@ -38,47 +38,47 @@ interface SpeakerVoiceProfile {
 
 const SPEAKER_PROFILES: Record<SpeechSpeakerKey, SpeakerVoiceProfile> = {
   tosuni: {
-    // 다정하고 상냥한 첫째 언니 토순이 톤
-    pitchKo: 1.28,
-    rateKo: 1.0,
-    pitchEn: 1.22,
-    rateEn: 0.88,
+    // 다정하고 상냥한 첫째 언니 토순이 톤 (신경망 성우 ko-KR-SunHiNeural + 자연 피치)
+    pitchKo: 1.06,
+    rateKo: 1.01,
+    pitchEn: 1.04,
+    rateEn: 0.9,
     geminiVoice: 'Kore',
     chimeNotes: [587.33, 783.99, 1046.5], // D5 - G5 - C6
   },
   tosili: {
-    // 통통 튀고 발랄한 하이톤 단짝 토실이 톤
-    pitchKo: 1.54,
-    rateKo: 1.13,
-    pitchEn: 1.42,
+    // 통통 튀고 발랄한 단짝 토실이 톤 (신경망 성우 en-US-AvaMultilingualNeural + 자연 피치)
+    pitchKo: 1.14,
+    rateKo: 1.06,
+    pitchEn: 1.1,
     rateEn: 0.94,
     geminiVoice: 'Zephyr',
     chimeNotes: [659.25, 880.0, 1174.66], // E5 - A5 - D6
   },
   toddungi: {
-    // 귀염둥이 느긋하고 통통한 막내 토뚱이 톤
-    pitchKo: 0.86,
-    rateKo: 0.9,
-    pitchEn: 0.9,
-    rateEn: 0.84,
+    // 귀염둥이 느긋하고 포근한 막내 토뚱이 톤 (신경망 성우 ko-KR-InJoonNeural + 자연 피치)
+    pitchKo: 0.96,
+    rateKo: 0.94,
+    pitchEn: 0.96,
+    rateEn: 0.88,
     geminiVoice: 'Puck',
     chimeNotes: [523.25, 659.25, 783.99], // C5 - E5 - G5
   },
   tobyeori: {
-    // 맑고 고운 동화 요정 토별이 톤
-    pitchKo: 1.4,
-    rateKo: 0.95,
-    pitchEn: 1.32,
-    rateEn: 0.86,
+    // 맑고 고운 동화 요정 토별이 톤 (신경망 성우 en-US-EmmaMultilingualNeural + 자연 피치)
+    pitchKo: 1.1,
+    rateKo: 0.97,
+    pitchEn: 1.08,
+    rateEn: 0.9,
     geminiVoice: 'Aoede',
     chimeNotes: [698.46, 880.0, 1318.51], // F5 - A5 - E6
   },
   togureum: {
-    // 씩씩하고 명랑한 소년 대장 토구름 톤
-    pitchKo: 1.04,
-    rateKo: 1.08,
-    pitchEn: 1.02,
-    rateEn: 0.9,
+    // 씩씩하고 명랑한 소년 대장 토구름 톤 (신경망 성우 ko-KR-HyunsuMultilingualNeural + 자연 피치)
+    pitchKo: 1.02,
+    rateKo: 1.04,
+    pitchEn: 1.0,
+    rateEn: 0.92,
     geminiVoice: 'Fenrir',
     chimeNotes: [493.88, 659.25, 987.77], // B4 - E5 - B5
   },
@@ -388,7 +388,7 @@ function speakWithAndroidNativeBridge(
       }
     };
 
-    const maxWaitMs = Math.max(4000, text.length * 320);
+    const maxWaitMs = Math.max(8500, text.length * 420);
     const safetyTimer = window.setTimeout(() => finish(true), maxWaitMs);
 
     window.addEventListener('nativeTtsEvent', onNativeEvent as EventListener);
