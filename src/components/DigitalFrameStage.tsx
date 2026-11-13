@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import {
   ChevronLeft,
   ChevronRight,
   FolderPlus,
   Layers,
+  Loader2,
   Mic,
   Pause,
   Play,
@@ -13,6 +15,7 @@ import {
 } from 'lucide-react';
 import { PROVIDER_LABELS } from '../data/initialAlbums';
 import { FrameTransitionMode, PhotoItem } from '../types';
+import { fetchImageViaNativeHttp } from '../utils/standaloneApi';
 
 interface DigitalFrameStageProps {
   photos: PhotoItem[];
@@ -57,11 +60,84 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   onSubmitAssistantQuery,
 }) => {
   const [imgErrorStage, setImgErrorStage] = useState<Record<string, number>>({});
+  const [nativeBlobUrls, setNativeBlobUrls] = useState<Record<string, string>>({});
+  const [nativeLoadingIds, setNativeLoadingIds] = useState<Record<string, boolean>>({});
+  const [nativeFailedIds, setNativeFailedIds] = useState<Record<string, boolean>>({});
   const [quickPrompt, setQuickPrompt] = useState('');
   const [showAskInput, setShowAskInput] = useState(false);
 
   const currentPhoto = photos[currentIndex] ?? null;
   const secondaryPhoto = photos.length > 1 ? photos[(currentIndex + 1) % photos.length] : null;
+  const nextPreloadPhoto = photos.length > 2 ? photos[(currentIndex + 2) % photos.length] : null;
+
+  // Automatically load Synology / NAS / custom-header photos (or any photo whose WebView <img> failed)
+  // via Native CapacitorHttp (`HttpURLConnection` + Java CookieManager + `X-SYNO-SHARING` + self-signed SSL)!
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    const candidatesToResolve = [currentPhoto, secondaryPhoto, nextPreloadPhoto].filter(
+      (p): p is PhotoItem => Boolean(p)
+    );
+
+    for (const photo of candidatesToResolve) {
+      if (photo.src.startsWith('data:') || photo.src.startsWith('blob:') || photo.src.startsWith('/')) {
+        continue;
+      }
+
+      const candidateUrls = [
+        photo.src,
+        ...(photo.assetUrl ? [photo.assetUrl] : []),
+        ...(photo.fallbackUrls ?? []),
+      ].filter((u) => /^https?:\/\//i.test(u));
+
+      const needsImmediateNativeFetch =
+        Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
+        photo.provider === 'synology_api' ||
+        /\/webapi\/entry\.cgi/i.test(photo.src);
+
+      const allWebImgStagesExhausted = (imgErrorStage[photo.id] ?? 0) >= candidateUrls.length;
+
+      if (
+        (needsImmediateNativeFetch || allWebImgStagesExhausted) &&
+        !nativeBlobUrls[photo.id] &&
+        !nativeLoadingIds[photo.id] &&
+        !nativeFailedIds[photo.id]
+      ) {
+        let inferredHeaders = photo.nativeHeaders;
+        // Backwards compatibility for albums saved before `nativeHeaders` existed: extract `passphrase=` from URL!
+        if (!inferredHeaders && /passphrase=([^&]+)/i.test(photo.src)) {
+          const m = photo.src.match(/passphrase=([^&]+)/i);
+          if (m?.[1]) {
+            inferredHeaders = { 'X-SYNO-SHARING': decodeURIComponent(m[1]) };
+          }
+        }
+
+        setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: true }));
+        fetchImageViaNativeHttp(candidateUrls, inferredHeaders)
+          .then((blobUrl) => {
+            if (blobUrl) {
+              setNativeBlobUrls((prev) => ({ ...prev, [photo.id]: blobUrl }));
+            } else {
+              setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+            }
+          })
+          .catch(() => {
+            setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+          })
+          .finally(() => {
+            setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: false }));
+          });
+      }
+    }
+  }, [
+    currentPhoto,
+    secondaryPhoto,
+    nextPreloadPhoto,
+    imgErrorStage,
+    nativeBlobUrls,
+    nativeLoadingIds,
+    nativeFailedIds,
+  ]);
 
   const handleQuickSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,11 +180,45 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       : '';
 
   const renderPhotoSurface = (photo: PhotoItem, compact = false) => {
-    const stage = imgErrorStage[photo.id] ?? 0;
-    const hasBackup = Boolean(photo.assetUrl && photo.assetUrl !== photo.src);
-    const failed = stage >= (hasBackup ? 2 : 1);
+    const resolvedBlobUrl = nativeBlobUrls[photo.id];
+    if (resolvedBlobUrl) {
+      return (
+        <img
+          key={`${photo.id}-blob`}
+          src={resolvedBlobUrl}
+          alt={`${photo.title} (${photo.location})`}
+          className={`w-full h-full object-cover select-none ${compact ? '' : motionClass}`}
+        />
+      );
+    }
 
-    if (failed) {
+    const isNativeFetching = Boolean(nativeLoadingIds[photo.id]);
+    const needsNativeFirst =
+      Capacitor.isNativePlatform() &&
+      (Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
+        photo.provider === 'synology_api' ||
+        /\/webapi\/entry\.cgi/i.test(photo.src));
+
+    if (isNativeFetching || (needsNativeFirst && !nativeFailedIds[photo.id])) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-[#181A20] p-6 text-center text-white">
+          <Loader2 className="w-7 h-7 animate-spin text-indigo-400 mb-2.5" />
+          <span className="text-sm font-semibold">{photo.title}</span>
+          <span className="mt-1 text-xs text-zinc-400">고화질 원본 사진을 불러오는 중...</span>
+        </div>
+      );
+    }
+
+    const candidateUrls = [
+      photo.src,
+      ...(photo.assetUrl && photo.assetUrl !== photo.src ? [photo.assetUrl] : []),
+      ...(photo.fallbackUrls ?? []),
+    ];
+    const stage = imgErrorStage[photo.id] ?? 0;
+    const allWebFailed = stage >= candidateUrls.length;
+    const totallyFailed = allWebFailed && (!Capacitor.isNativePlatform() || Boolean(nativeFailedIds[photo.id]));
+
+    if (totallyFailed) {
       return (
         <div className="w-full h-full flex flex-col items-center justify-center bg-[#EAECEF] p-6 text-center">
           <span className="text-base font-semibold text-[#141519]">{photo.title}</span>
@@ -119,7 +229,17 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       );
     }
 
-    const activeSrc = stage === 1 && hasBackup ? photo.assetUrl! : photo.src;
+    if (allWebFailed) {
+      return (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-[#181A20] p-6 text-center text-white">
+          <Loader2 className="w-7 h-7 animate-spin text-indigo-400 mb-2.5" />
+          <span className="text-sm font-semibold">{photo.title}</span>
+          <span className="mt-1 text-xs text-zinc-400">네이티브 스트림으로 사진을 불러오는 중...</span>
+        </div>
+      );
+    }
+
+    const activeSrc = candidateUrls[stage] || photo.src;
 
     return (
       <img

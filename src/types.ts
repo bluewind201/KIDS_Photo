@@ -33,6 +33,10 @@ export interface PhotoItem {
   title: string;
   src: string;
   assetUrl?: string;
+  /** Optional custom HTTP headers required when loading via native CapacitorHttp (e.g. Synology `X-SYNO-SHARING`) */
+  nativeHeaders?: Record<string, string>;
+  /** Optional additional fallback URLs tried sequentially if `src` and `assetUrl` fail */
+  fallbackUrls?: string[];
   date: string;
   location: string;
   tags: string[];

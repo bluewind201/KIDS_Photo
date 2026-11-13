@@ -38,6 +38,7 @@ import {
   browseCloudDemoOrRemoteUnified,
   connectSynologyDsmUnified,
   fetchCloudProviderFolderPhotos,
+  fetchImageViaNativeHttp,
   fetchSynologyFolderPhotos,
   geocodeCityUnified,
   getSavedGeminiApiKey,
@@ -200,6 +201,27 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
   // Digital Albums Tab State
   const [confirmDeleteAlbumId, setConfirmDeleteAlbumId] = useState<string | null>(null);
+  const [albumThumbBlobs, setAlbumThumbBlobs] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (activeTab !== 'albums') return;
+    albums.forEach((album) => {
+      const p = album.photos[0];
+      if (!p || albumThumbBlobs[album.id]) return;
+      if (p.src.startsWith('data:') || p.src.startsWith('blob:') || p.src.startsWith('/')) return;
+      const urls = [p.src, ...(p.assetUrl ? [p.assetUrl] : []), ...(p.fallbackUrls ?? [])];
+      let headers = p.nativeHeaders;
+      if (!headers && /passphrase=([^&]+)/i.test(p.src)) {
+        const m = p.src.match(/passphrase=([^&]+)/i);
+        if (m?.[1]) headers = { 'X-SYNO-SHARING': decodeURIComponent(m[1]) };
+      }
+      fetchImageViaNativeHttp(urls, headers)
+        .then((blob) => {
+          if (blob) setAlbumThumbBlobs((prev) => ({ ...prev, [album.id]: blob }));
+        })
+        .catch(() => {});
+    });
+  }, [activeTab, albums, albumThumbBlobs]);
 
   // 3D Character Roster State
   const [editingCharId, setEditingCharId] = useState<BunnyId | null>(null);
@@ -2333,7 +2355,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     <div className="flex items-center gap-3.5 min-w-0">
                       {album.photos[0] && (
                         <img
-                          src={album.photos[0].src}
+                          src={albumThumbBlobs[album.id] || album.photos[0].src}
                           alt={album.name}
                           referrerPolicy="no-referrer"
                           className="w-16 h-11 rounded-xl object-cover shrink-0 bg-zinc-200"

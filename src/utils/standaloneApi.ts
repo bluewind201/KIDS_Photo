@@ -1263,6 +1263,102 @@ export async function refreshMartEventsUnified(city: string): Promise<string[]> 
 const DESKTOP_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// In-memory LRU cache so native-downloaded Blob URLs aren't re-fetched on every slide cycle!
+const NATIVE_IMAGE_BLOB_CACHE = new Map<string, string>();
+const MAX_BLOB_CACHE_ENTRIES = 60;
+
+/**
+ * Fetches an image binary natively via CapacitorHttp (preserving Java CookieManager sessions,
+ * custom headers like `X-SYNO-SHARING`, redirects, and self-signed NAS SSL!) and returns a fast `blob:` ObjectURL.
+ */
+export async function fetchImageViaNativeHttp(
+  candidateUrls: string[],
+  customHeaders?: Record<string, string>
+): Promise<string | null> {
+  if (!Capacitor.isNativePlatform()) return null;
+
+  const uniqueUrls = Array.from(new Set(candidateUrls.filter((u) => /^https?:\/\//i.test(u))));
+  if (uniqueUrls.length === 0) return null;
+
+  const cacheKey = `${uniqueUrls[0]}::${JSON.stringify(customHeaders ?? {})}`;
+  const cached = NATIVE_IMAGE_BLOB_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  for (const url of uniqueUrls) {
+    try {
+      const res = await CapacitorHttp.get({
+        url,
+        headers: {
+          'User-Agent': DESKTOP_USER_AGENT,
+          'x-cap-user-agent': DESKTOP_USER_AGENT,
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          ...(customHeaders ?? {}),
+        },
+        responseType: 'blob',
+        connectTimeout: 12000,
+        readTimeout: 15000,
+      });
+
+      if (res.status >= 200 && res.status < 300 && typeof res.data === 'string' && res.data.length > 64) {
+        // Make sure the server didn't return an HTML login page or JSON error with HTTP 200!
+        let cType = '';
+        if (res.headers) {
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (k.toLowerCase() === 'content-type') {
+              cType = String(v).toLowerCase();
+              break;
+            }
+          }
+        }
+        if (cType.includes('text/html') || cType.includes('application/json')) {
+          continue;
+        }
+
+        const cleanB64 = res.data.replace(/\s+/g, '');
+        // Quick magic-byte sanity check (`/` = JPEG `/9j/`, `i` = PNG `iVBOR`, `R` = GIF `R0lG`, `U` = WEBP `UklG`, `Q` = BMP)
+        if (cleanB64.startsWith('PCFET0') || cleanB64.startsWith('PGh0bW') || cleanB64.startsWith('eyJ')) {
+          // Base64 of `<!DO`, `<htm`, or `{"` -> HTML/JSON error body, not an image!
+          continue;
+        }
+
+        const binaryStr = atob(cleanB64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+
+        const mime =
+          cType && cType.startsWith('image/')
+            ? cType.split(';')[0].trim()
+            : cleanB64.startsWith('iVBOR')
+            ? 'image/png'
+            : cleanB64.startsWith('UklGR')
+            ? 'image/webp'
+            : cleanB64.startsWith('R0lGO')
+            ? 'image/gif'
+            : 'image/jpeg';
+
+        const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+
+        if (NATIVE_IMAGE_BLOB_CACHE.size >= MAX_BLOB_CACHE_ENTRIES) {
+          const oldestKey = NATIVE_IMAGE_BLOB_CACHE.keys().next().value;
+          if (oldestKey) {
+            const oldUrl = NATIVE_IMAGE_BLOB_CACHE.get(oldestKey);
+            if (oldUrl) URL.revokeObjectURL(oldUrl);
+            NATIVE_IMAGE_BLOB_CACHE.delete(oldestKey);
+          }
+        }
+        NATIVE_IMAGE_BLOB_CACHE.set(cacheKey, blobUrl);
+        return blobUrl;
+      }
+    } catch {
+      // Try next candidate URL
+    }
+  }
+
+  return null;
+}
+
 interface RawHttpResult {
   status: number;
   url: string;
@@ -1634,6 +1730,10 @@ export async function resolvePublicShareLinkUnified(params: {
               provider: 'google_drive',
               src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
               assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+              fallbackUrls: [
+                `https://drive.usercontent.google.com/download?id=${fileId}&export=view`,
+                `https://drive.google.com/uc?export=view&id=${fileId}`,
+              ],
               title: albumTitle,
               date: todayLabel,
               location: albumTitle,
@@ -1661,14 +1761,17 @@ export async function resolvePublicShareLinkUnified(params: {
           }
         }
 
-        const entryRegex =
-          /id=["']entry-([a-zA-Z0-9_-]{20,})["'][\s\S]{0,600}?class=["']flip-entry-title["']>([^<]+)</gi;
-        for (const m of embedRes.text.matchAll(entryRegex)) {
+        const entryBlockRegex =
+          /id=["']entry-([a-zA-Z0-9_-]{20,})["']([\s\S]{0,900}?)class=["']flip-entry-title["']>([^<]+)</gi;
+        for (const m of embedRes.text.matchAll(entryBlockRegex)) {
           const id = m[1];
-          const fileName = decodeHtmlEntities(m[2].trim());
-          // Exclude obvious non-image documents/videos if extension is present
+          const innerHtml = m[2] || '';
+          const fileName = decodeHtmlEntities(m[3].trim());
+          const isSubfolder = /\/drive\/folders\/|folderview\?id=/i.test(innerHtml);
+          // Exclude subfolders and obvious non-image documents/videos
           if (
             id !== folderId &&
+            !isSubfolder &&
             !/\.(mp4|mov|avi|mkv|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|mp3|wav)$/i.test(fileName)
           ) {
             foundFiles.set(id, fileName);
@@ -1676,7 +1779,7 @@ export async function resolvePublicShareLinkUnified(params: {
         }
 
         if (foundFiles.size === 0) {
-          for (const m of embedRes.text.matchAll(/id=["']entry-([a-zA-Z0-9_-]{20,})["']/gi)) {
+          for (const m of embedRes.text.matchAll(/href=["']https:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{20,})/gi)) {
             if (m[1] !== folderId) {
               foundFiles.set(m[1], `사진 #${foundFiles.size + 1}`);
             }
@@ -1700,20 +1803,22 @@ export async function resolvePublicShareLinkUnified(params: {
             }
           }
 
-          // Match `data-id="FILE_ID"` attributes on folder grid items
-          const dataIdRegex = /data-id=["']([a-zA-Z0-9_-]{25,45})["']/g;
-          for (const m of unescaped.matchAll(dataIdRegex)) {
-            const id = m[1];
-            if (id !== folderId) {
-              foundFiles.set(id, `사진 #${foundFiles.size + 1}`);
-            }
-          }
-
+          // Prefer explicit image MIME entries inside `_DRIVE_ivd` first!
           const ivdImgRegex =
             /\["([a-zA-Z0-9_-]{25,45})"\s*,\s*\["[a-zA-Z0-9_-]+"\]\s*,\s*"([^"]+)"\s*,\s*"image\/[a-zA-Z0-9.+-]+"/g;
           for (const m of unescaped.matchAll(ivdImgRegex)) {
             if (m[1] !== folderId) {
               foundFiles.set(m[1], m[2]);
+            }
+          }
+
+          if (foundFiles.size === 0) {
+            const dataIdRegex = /data-id=["']([a-zA-Z0-9_-]{25,45})["']/g;
+            for (const m of unescaped.matchAll(dataIdRegex)) {
+              const id = m[1];
+              if (id !== folderId) {
+                foundFiles.set(id, `사진 #${foundFiles.size + 1}`);
+              }
             }
           }
         } catch {
@@ -1726,7 +1831,7 @@ export async function resolvePublicShareLinkUnified(params: {
       const entries = Array.from(foundFiles.entries()).slice(0, 120);
       if (entries.length === 0) {
         throw new Error(
-          '구글 드라이브 폴더에서 사진을 찾지 못했습니다. 폴더 공유 설정이 반드시 [제한됨]이 아닌 [링크가 있는 모든 사용자(뷰어)]로 열려 있어야 하며, 폴더 안에 이미지 파일(JPG/PNG/WEBP)이 들어 있는지 확인해 주세요.'
+          '구글 드라이브 폴더에서 이미지 파일을 찾지 못했습니다. 폴더 바로 안에 사진(JPG/PNG/WEBP)이 들어 있는지(하위 폴더가 아닌 해당 폴더 직접 공유), 공유 권한이 [링크가 있는 모든 사용자]인지 확인해 주세요.'
         );
       }
 
@@ -1737,6 +1842,10 @@ export async function resolvePublicShareLinkUnified(params: {
         provider: 'google_drive',
         src: `https://drive.google.com/thumbnail?id=${fileId}&sz=w1920`,
         assetUrl: `https://lh3.googleusercontent.com/d/${fileId}=w1920`,
+        fallbackUrls: [
+          `https://drive.usercontent.google.com/download?id=${fileId}&export=view`,
+          `https://drive.google.com/uc?export=view&id=${fileId}`,
+        ],
         title: fileName.replace(/\.[^.]+$/, ''),
         date: todayLabel,
         location: albumTitle,
@@ -1798,7 +1907,7 @@ export async function resolvePublicShareLinkUnified(params: {
     for (const candidate of candidateUrls) {
       const shareId = encodeOneDriveShareToken(candidate);
       const endpoints = [
-        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children`,
+        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children($expand=thumbnails)`,
         `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($expand=thumbnails)`,
       ];
 
@@ -1835,7 +1944,13 @@ export async function resolvePublicShareLinkUnified(params: {
 
       if (imageItems.length > 0) {
         const photos: PhotoItem[] = imageItems.slice(0, 120).map((item, idx) => {
-          const imgUrl = item['@content.downloadUrl'] || item.thumbnails?.[0]?.large?.url || '';
+          const thumbLarge = item.thumbnails?.[0]?.large?.url || '';
+          const directDl = item['@content.downloadUrl'] || '';
+          // Prefer `thumbLarge` for `.heic` so Android WebView renders JPEG cleanly; otherwise use `directDl` with `thumbLarge` backup!
+          const isHeic = /\.heic$/i.test(item.name || '');
+          const primarySrc = isHeic && thumbLarge ? thumbLarge : directDl || thumbLarge;
+          const backupSrc = isHeic ? directDl : thumbLarge || undefined;
+
           const dateStr = item.photo?.takenDateTime
             ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
                 year: 'numeric',
@@ -1848,7 +1963,8 @@ export async function resolvePublicShareLinkUnified(params: {
             albumId: params.albumId,
             albumName: albumTitle,
             provider: 'onedrive',
-            src: imgUrl,
+            src: primarySrc,
+            assetUrl: backupSrc,
             title: (item.name || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
             date: dateStr,
             location: albumTitle,
@@ -2003,7 +2119,6 @@ export async function resolvePublicShareLinkUnified(params: {
                 size: 'xl',
                 cache_key: cacheKey,
                 passphrase,
-                _sharing_id: passphrase,
               });
               const thumbV1Params = new URLSearchParams({
                 api: 'SYNO.Foto.Thumbnail',
@@ -2015,7 +2130,13 @@ export async function resolvePublicShareLinkUnified(params: {
                 size: 'xl',
                 cache_key: cacheKey,
                 passphrase,
-                _sharing_id: passphrase,
+              });
+              const rawDownloadParams = new URLSearchParams({
+                api: 'SYNO.Foto.Download',
+                version: '1',
+                method: 'download',
+                unit_id: `[${item.id}]`,
+                passphrase,
               });
 
               const dateStr = item.time
@@ -2033,6 +2154,10 @@ export async function resolvePublicShareLinkUnified(params: {
                 provider: 'synology_api',
                 src: `${entryUrl}?${thumbParams.toString()}`,
                 assetUrl: `${entryUrl}?${thumbV1Params.toString()}`,
+                fallbackUrls: [`${entryUrl}?${rawDownloadParams.toString()}`],
+                nativeHeaders: {
+                  'X-SYNO-SHARING': passphrase,
+                },
                 title: (item.filename || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
                 date: dateStr,
                 location: albumTitle,
@@ -2133,6 +2258,9 @@ export async function resolvePublicShareLinkUnified(params: {
             albumName: albumTitle,
             provider: 'synology_api',
             src: `${dsmEntry}?${dlParams.toString()}`,
+            nativeHeaders: {
+              'X-SYNO-SHARING': passphrase,
+            },
             title: file.name.replace(/\.[^.]+$/, ''),
             date: dateStr,
             location: albumTitle,
