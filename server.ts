@@ -331,9 +331,9 @@ app.post('/api/gemini/assistant', async (req, res) => {
 
     const ai = getAiClient();
 
-    // First ask Gemini 3.8 Flash to parse intent & compute accurate Korean response
+    // First ask Gemini 2.5 Flash to parse intent & compute accurate Korean response
     const intentResponse = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: `현재 사용자 위치: ${currentCity} (${currentLat}, ${currentLng})
 현재 날씨 데이터: ${JSON.stringify(weatherSummary ?? {})}
 등록된 가족 일정: ${JSON.stringify(schedules)}
@@ -655,7 +655,7 @@ ${photoCatalogText || '(등록된 사진 없음)'}`;
     });
 
     const chat = ai.chats.create({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       history: normalizedHistory,
       config: {
         systemInstruction,
@@ -776,7 +776,7 @@ app.post('/api/gemini/analyze-photo', async (req, res) => {
     const ai = getAiClient();
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: 'gemini-2.5-flash',
       contents: {
         parts: [
           {
@@ -1002,19 +1002,19 @@ async function synthesizeEdgeNeuralMp3Base64(
   const voiceSpecs: Record<string, { voice: string; pitch: string; rate: string }> =
     lang === 'en'
       ? {
-          tosuni: { voice: 'en-US-AvaMultilingualNeural', pitch: '+4Hz', rate: '-8%' },
-          tosili: { voice: 'en-US-AnaNeural', pitch: '+0Hz', rate: '-5%' },
-          toddungi: { voice: 'en-US-AnaNeural', pitch: '-4Hz', rate: '-8%' },
-          tobyeori: { voice: 'en-US-EmmaMultilingualNeural', pitch: '+6Hz', rate: '-8%' },
-          togureum: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+8Hz', rate: '-6%' },
+          tosuni: { voice: 'en-US-AvaMultilingualNeural', pitch: '+2Hz', rate: '-6%' },
+          tosili: { voice: 'en-US-AnaNeural', pitch: '+0Hz', rate: '-4%' },
+          toddungi: { voice: 'en-US-AnaNeural', pitch: '-2Hz', rate: '-7%' },
+          tobyeori: { voice: 'en-US-EmmaMultilingualNeural', pitch: '+2Hz', rate: '-6%' },
+          togureum: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+2Hz', rate: '-5%' },
           assistant: { voice: 'en-US-AvaMultilingualNeural', pitch: '+0Hz', rate: '-5%' },
         }
       : {
-          tosuni: { voice: 'ko-KR-SunHiNeural', pitch: '+8Hz', rate: '+2%' },
-          tosili: { voice: 'en-US-AvaMultilingualNeural', pitch: '+14Hz', rate: '+7%' },
-          toddungi: { voice: 'ko-KR-InJoonNeural', pitch: '+16Hz', rate: '-4%' },
-          tobyeori: { voice: 'en-US-EmmaMultilingualNeural', pitch: '+12Hz', rate: '-2%' },
-          togureum: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+12Hz', rate: '+5%' },
+          tosuni: { voice: 'ko-KR-SunHiNeural', pitch: '+2Hz', rate: '+1%' },
+          tosili: { voice: 'ko-KR-SunHiNeural', pitch: '+4Hz', rate: '+6%' },
+          toddungi: { voice: 'ko-KR-HyunsuMultilingualNeural', pitch: '+3Hz', rate: '-3%' },
+          tobyeori: { voice: 'ko-KR-SunHiNeural', pitch: '+0Hz', rate: '-5%' },
+          togureum: { voice: 'ko-KR-InJoonNeural', pitch: '+2Hz', rate: '+4%' },
           assistant: { voice: 'ko-KR-SunHiNeural', pitch: '+0Hz', rate: '+0%' },
         };
 
@@ -1173,34 +1173,40 @@ app.post('/api/gemini/tts', async (req, res) => {
 
   const voiceMap: Record<string, { voiceName: string; style: string; enStyle: string }> = {
     tosuni: {
-      voiceName: 'Kore',
-      style: 'Warm, gentle, affectionate Korean young sister speaking softly and cheerfully to a 5-year-old child',
-      enStyle: 'Warm, clear, friendly preschool English teacher pronouncing English slowly and cheerfully for a 5-year-old child',
+      voiceName: 'Leda',
+      style:
+        '실제 다정하고 따뜻한 한국인 유치원 선생님처럼 자연스러운 호흡과 미소 섞인 사람 목소리로 부드럽게 말해 주세요',
+      enStyle:
+        'Warm, clear, friendly real human preschool English teacher speaking naturally and cheerfully to a 5-year-old child',
     },
     tosili: {
       voiceName: 'Zephyr',
-      style: 'Bright, energetic, playful little friend speaking excitedly in Korean to a young child',
-      enStyle: 'Bright, cheerful, encouraging kid-friendly English pronunciation spoken clearly and slowly',
+      style:
+        '실제 밝고 명랑한 한국인 젊은 여성 친구처럼 자연스럽고 생동감 있는 일상 대화 톤으로 말해 주세요',
+      enStyle: 'Bright, cheerful, natural real human English voice spoken clearly and warmly',
     },
     toddungi: {
       voiceName: 'Puck',
-      style: 'Cute, bubbly, cheerful little bunny speaking warmly in Korean to a young child',
-      enStyle: 'Cute, friendly, slow and clear English pronunciation for young children',
+      style:
+        '실제 포근하고 다정한 한국인 동화 구연가처럼 친근하고 따뜻한 사람 목소리로 말해 주세요',
+      enStyle: 'Friendly, gentle, natural real human English pronunciation for young children',
     },
     tobyeori: {
       voiceName: 'Aoede',
-      style: 'Sweet, fairytale-like, crystal-clear gentle Korean voice speaking affectionately to a young child',
-      enStyle: 'Sweet, musical, crystal-clear English pronunciation spoken slowly for young children',
+      style:
+        '실제 차분하고 고운 목소리의 한국인 성우가 아이에게 옛날이야기를 들려주듯 자연스럽게 말해 주세요',
+      enStyle: 'Calm, gentle, natural real human English voice spoken slowly for young children',
     },
     togureum: {
       voiceName: 'Fenrir',
-      style: 'Brave, cheerful, friendly little boy bunny speaking energetically in Korean to a young child',
-      enStyle: 'Brave, cheerful, clear English pronunciation for young children',
+      style:
+        '실제 유쾌하고 다정한 한국인 삼촌이나 형처럼 밝고 자연스러운 사람 목소리로 말해 주세요',
+      enStyle: 'Cheerful, friendly, natural real human English pronunciation for young children',
     },
     assistant: {
       voiceName: 'Kore',
-      style: 'Calm, clear, friendly Korean smart home family assistant',
-      enStyle: 'Clear, warm, friendly English voice',
+      style: '실제 친절하고 차분한 한국인 안내원처럼 자연스러운 사람 억양으로 읽어 주세요',
+      enStyle: 'Clear, warm, natural real human English voice',
     },
   };
 
@@ -1209,53 +1215,30 @@ app.post('/api/gemini/tts', async (req, res) => {
 
   try {
     const ai = getAiClient();
+    const prompt =
+      lang === 'en'
+        ? `${targetStyle}: "${cleanText}"`
+        : `${targetStyle} (기계적인 낭독 투 없이 실제 사람이 대화하듯 아래 대사만 발화하세요): "${cleanText}"`;
 
-    // Primary path: Interactions API (native support for gemini-3.8-flash-lite-tts)
-    try {
-      const interaction = await ai.interactions.create({
-        model: 'gemini-3.8-flash-lite-tts',
-        input: [
-          {
-            type: 'text',
-            text: cleanText,
-            annotations: [
-              {
-                type: 'speech_metadata',
-                style: targetStyle,
-              },
-            ],
-          },
-        ],
-        response_format: { type: 'audio' },
-        generation_config: {
-          speech_config: [
-            {
-              voice: chosen.voiceName,
+    const geminiRes = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-preview-tts',
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: chosen.voiceName,
             },
-          ],
+          },
         },
-      });
+      },
+    });
 
-      const audioData = interaction.output_audio?.data;
-      if (audioData) {
-        res.json({ audioBase64: ensureWavBase64(audioData), mimeType: 'audio/wav' });
-        return;
-      }
-    } catch {
-      // Secondary fallback: generateContent with plain AUDIO modality
-      const fallbackRes = await ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
-        contents: cleanText,
-        config: {
-          responseModalities: ['AUDIO'],
-        },
-      });
-
-      const fallbackAudio = fallbackRes.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (fallbackAudio) {
-        res.json({ audioBase64: ensureWavBase64(fallbackAudio), mimeType: 'audio/wav' });
-        return;
-      }
+    const geminiAudio = geminiRes.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (geminiAudio) {
+      res.json({ audioBase64: ensureWavBase64(geminiAudio), mimeType: 'audio/wav' });
+      return;
     }
 
     // Natural Neural TTS fallback when Gemini TTS is unavailable or GEMINI_API_KEY is not configured

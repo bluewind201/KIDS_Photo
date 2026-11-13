@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
   FolderPlus,
@@ -9,12 +10,14 @@ import {
   Mic,
   Pause,
   Play,
+  RefreshCw,
   Search,
   Send,
+  Sparkles,
   X,
 } from 'lucide-react';
 import { PROVIDER_LABELS } from '../data/initialAlbums';
-import { FrameTransitionMode, PhotoItem } from '../types';
+import { FrameTransitionMode, PhotoAnalysisProgress, PhotoItem } from '../types';
 import { fetchImageViaNativeHttp } from '../utils/standaloneApi';
 
 interface DigitalFrameStageProps {
@@ -26,6 +29,9 @@ interface DigitalFrameStageProps {
   wakeWord: string;
   isVoiceListening: boolean;
   isAssistantLoading: boolean;
+  albumPasswords?: Record<string, string>;
+  photoAnalysisProgress?: PhotoAnalysisProgress | null;
+  onRequestRefreshAlbum?: (albumId: string) => Promise<boolean>;
   onPrev: () => void;
   onNext: () => void;
   onTogglePlay: () => void;
@@ -51,6 +57,9 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   wakeWord,
   isVoiceListening,
   isAssistantLoading,
+  albumPasswords,
+  photoAnalysisProgress,
+  onRequestRefreshAlbum,
   onPrev,
   onNext,
   onTogglePlay,
@@ -63,6 +72,9 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   const [nativeBlobUrls, setNativeBlobUrls] = useState<Record<string, string>>({});
   const [nativeLoadingIds, setNativeLoadingIds] = useState<Record<string, boolean>>({});
   const [nativeFailedIds, setNativeFailedIds] = useState<Record<string, boolean>>({});
+  const [refreshingAlbumIds, setRefreshingAlbumIds] = useState<Record<string, boolean>>({});
+  const attemptedAutoRefreshAlbumsRef = useRef<Set<string>>(new Set());
+  const prevSrcByPhotoIdRef = useRef<Record<string, string>>({});
   const [quickPrompt, setQuickPrompt] = useState('');
   const [showAskInput, setShowAskInput] = useState(false);
 
@@ -70,8 +82,64 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   const secondaryPhoto = photos.length > 1 ? photos[(currentIndex + 1) % photos.length] : null;
   const nextPreloadPhoto = photos.length > 2 ? photos[(currentIndex + 2) % photos.length] : null;
 
-  // Automatically load Synology / NAS / custom-header photos (or any photo whose WebView <img> failed)
-  // via Native CapacitorHttp (`HttpURLConnection` + Java CookieManager + `X-SYNO-SHARING` + self-signed SSL)!
+  // Whenever an album's photo URLs are refreshed (e.g. fresh OneDrive/Google/Synology tokens), clear stale error flags!
+  useEffect(() => {
+    const resetIds: string[] = [];
+    for (const p of photos) {
+      const prevSrc = prevSrcByPhotoIdRef.current[p.id];
+      if (prevSrc && prevSrc !== p.src) {
+        resetIds.push(p.id);
+      }
+      prevSrcByPhotoIdRef.current[p.id] = p.src;
+    }
+    if (resetIds.length > 0) {
+      setImgErrorStage((prev) => {
+        const next = { ...prev };
+        resetIds.forEach((id) => delete next[id]);
+        return next;
+      });
+      setNativeFailedIds((prev) => {
+        const next = { ...prev };
+        resetIds.forEach((id) => delete next[id]);
+        return next;
+      });
+      setNativeBlobUrls((prev) => {
+        const next = { ...prev };
+        resetIds.forEach((id) => delete next[id]);
+        return next;
+      });
+    }
+  }, [photos]);
+
+  const triggerAlbumRecovery = (albumId: string, photoId?: string) => {
+    if (!onRequestRefreshAlbum || refreshingAlbumIds[albumId]) return;
+    setRefreshingAlbumIds((prev) => ({ ...prev, [albumId]: true }));
+    onRequestRefreshAlbum(albumId)
+      .then((refreshed) => {
+        if (refreshed || photoId) {
+          setImgErrorStage((prev) => {
+            const next = { ...prev };
+            photos
+              .filter((p) => p.albumId === albumId)
+              .forEach((p) => delete next[p.id]);
+            return next;
+          });
+          setNativeFailedIds((prev) => {
+            const next = { ...prev };
+            photos
+              .filter((p) => p.albumId === albumId)
+              .forEach((p) => delete next[p.id]);
+            return next;
+          });
+        }
+      })
+      .finally(() => {
+        setRefreshingAlbumIds((prev) => ({ ...prev, [albumId]: false }));
+      });
+  };
+
+  // Automatically load Synology / NAS / OneDrive / custom-header photos (or any photo whose WebView <img> failed)
+  // via Native CapacitorHttp (`HttpURLConnection` + auto Synology share re-login + self-signed SSL)!
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
 
@@ -93,12 +161,14 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       const needsImmediateNativeFetch =
         Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
         photo.provider === 'synology_api' ||
-        /\/webapi\/entry\.cgi/i.test(photo.src);
+        photo.provider === 'synology_webdav' ||
+        photo.provider === 'onedrive' ||
+        /\/webapi\/entry\.cgi|1drv\.ms|microsoftpersonalcontent\.com|onedrive\.live\.com/i.test(photo.src);
 
-      const allWebImgStagesExhausted = (imgErrorStage[photo.id] ?? 0) >= candidateUrls.length;
+      const anyWebImgError = (imgErrorStage[photo.id] ?? 0) >= 1;
 
       if (
-        (needsImmediateNativeFetch || allWebImgStagesExhausted) &&
+        (needsImmediateNativeFetch || anyWebImgError) &&
         !nativeBlobUrls[photo.id] &&
         !nativeLoadingIds[photo.id] &&
         !nativeFailedIds[photo.id]
@@ -112,17 +182,27 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
           }
         }
 
+        const sharePassword = albumPasswords?.[photo.albumId];
+
         setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: true }));
-        fetchImageViaNativeHttp(candidateUrls, inferredHeaders)
+        fetchImageViaNativeHttp(candidateUrls, inferredHeaders, sharePassword)
           .then((blobUrl) => {
             if (blobUrl) {
               setNativeBlobUrls((prev) => ({ ...prev, [photo.id]: blobUrl }));
             } else {
               setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+              if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
+                attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
+                triggerAlbumRecovery(photo.albumId, photo.id);
+              }
             }
           })
           .catch(() => {
             setNativeFailedIds((prev) => ({ ...prev, [photo.id]: true }));
+            if (!attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
+              attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
+              triggerAlbumRecovery(photo.albumId, photo.id);
+            }
           })
           .finally(() => {
             setNativeLoadingIds((prev) => ({ ...prev, [photo.id]: false }));
@@ -137,6 +217,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
     nativeBlobUrls,
     nativeLoadingIds,
     nativeFailedIds,
+    albumPasswords,
   ]);
 
   const handleQuickSubmit = (e: React.FormEvent) => {
@@ -224,18 +305,25 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
     }
 
     const isNativeFetching = Boolean(nativeLoadingIds[photo.id]);
+    const isAlbumRefreshing = Boolean(refreshingAlbumIds[photo.albumId]);
     const needsNativeFirst =
       Capacitor.isNativePlatform() &&
       (Boolean(photo.nativeHeaders && Object.keys(photo.nativeHeaders).length > 0) ||
         photo.provider === 'synology_api' ||
-        /\/webapi\/entry\.cgi/i.test(photo.src));
+        photo.provider === 'synology_webdav' ||
+        photo.provider === 'onedrive' ||
+        /\/webapi\/entry\.cgi|1drv\.ms|microsoftpersonalcontent\.com|onedrive\.live\.com/i.test(photo.src));
 
-    if (isNativeFetching || (needsNativeFirst && !nativeFailedIds[photo.id])) {
+    if (isNativeFetching || isAlbumRefreshing || (needsNativeFirst && !nativeFailedIds[photo.id])) {
       return (
         <div className="w-full h-full flex flex-col items-center justify-center bg-[#181A20] p-6 text-center text-white">
           <Loader2 className="w-7 h-7 animate-spin text-indigo-400 mb-2.5" />
           <span className="text-sm font-semibold">{photo.title}</span>
-          <span className="mt-1 text-xs text-zinc-400">고화질 원본 사진을 불러오는 중...</span>
+          <span className="mt-1 text-xs text-zinc-400">
+            {isAlbumRefreshing
+              ? '공유 앨범 연결 세션을 자동 갱신하여 사진을 복구하고 있어요...'
+              : '고화질 원본 사진을 불러오는 중...'}
+          </span>
         </div>
       );
     }
@@ -247,15 +335,41 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
     ];
     const stage = imgErrorStage[photo.id] ?? 0;
     const allWebFailed = stage >= candidateUrls.length;
-    const totallyFailed = allWebFailed && (!Capacitor.isNativePlatform() || Boolean(nativeFailedIds[photo.id]));
+    const totallyFailed =
+      allWebFailed && (!Capacitor.isNativePlatform() || Boolean(nativeFailedIds[photo.id]));
 
     if (totallyFailed) {
+      if (!Capacitor.isNativePlatform() && !attemptedAutoRefreshAlbumsRef.current.has(photo.albumId)) {
+        attemptedAutoRefreshAlbumsRef.current.add(photo.albumId);
+        triggerAlbumRecovery(photo.albumId, photo.id);
+      }
       return (
-        <div className="w-full h-full flex flex-col items-center justify-center bg-[#EAECEF] p-6 text-center">
-          <span className="text-base font-semibold text-[#141519]">{photo.title}</span>
-          <span className="mt-1 text-xs text-zinc-500">
+        <div className="w-full h-full flex flex-col items-center justify-center bg-[#181A20] p-6 text-center text-white">
+          <span className="text-base font-semibold text-white">{photo.title}</span>
+          <span className="mt-1 text-xs text-zinc-400">
             {photo.date} · {photo.location}
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              attemptedAutoRefreshAlbumsRef.current.delete(photo.albumId);
+              setNativeFailedIds((prev) => {
+                const next = { ...prev };
+                delete next[photo.id];
+                return next;
+              });
+              setImgErrorStage((prev) => {
+                const next = { ...prev };
+                delete next[photo.id];
+                return next;
+              });
+              triggerAlbumRecovery(photo.albumId, photo.id);
+            }}
+            className="mt-3.5 inline-flex items-center gap-1.5 rounded-full bg-white/15 hover:bg-white/25 px-4 py-1.5 text-xs font-semibold text-white transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            사진 다시 불러오기
+          </button>
         </div>
       );
     }
@@ -413,6 +527,55 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Real-Time Gemini Vision Photo Analysis Status Banner ("사진을 분석 중입니다") */}
+      {photoAnalysisProgress &&
+        (photoAnalysisProgress.active || Boolean(photoAnalysisProgress.completedToast)) && (
+          <div className="pointer-events-none absolute inset-x-0 top-13 z-25 flex justify-center px-4">
+            {photoAnalysisProgress.active ? (
+              <div className="w-full max-w-md rounded-2xl bg-[#141519]/90 backdrop-blur-md border border-white/15 px-4 py-2.5 text-white shadow-[0_10px_28px_rgba(0,0,0,0.35)]">
+                <div className="flex items-center justify-between gap-2 text-xs font-bold">
+                  <span className="inline-flex items-center gap-1.5 text-amber-300 truncate">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                    <span>Gemini AI 연결됨 · 수집한 사진을 분석 중입니다...</span>
+                  </span>
+                  <span className="font-mono text-[11px] text-zinc-200 shrink-0">
+                    {photoAnalysisProgress.done} / {photoAnalysisProgress.total}장
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-zinc-300 truncate">
+                  {photoAnalysisProgress.currentPhotoTitle
+                    ? `사진 속 장소·추억 파악 중: "${photoAnalysisProgress.currentPhotoTitle}"`
+                    : '토끼 친구들이 대화할 수 있도록 어떤 사진인지 살펴보고 있어요'}
+                </div>
+                <div className="mt-1.5 h-1.5 w-full rounded-full bg-white/15 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-indigo-400 via-purple-400 to-amber-300 transition-all duration-300"
+                    style={{
+                      width: `${Math.max(
+                        6,
+                        Math.min(
+                          100,
+                          Math.round(
+                            (photoAnalysisProgress.done /
+                              Math.max(1, photoAnalysisProgress.total)) *
+                              100
+                          )
+                        )
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-2 rounded-full bg-emerald-600/95 backdrop-blur-md border border-emerald-300/30 px-4 py-1.5 text-xs font-semibold text-white shadow-lg">
+                <Check className="w-3.5 h-3.5 shrink-0" />
+                <span>{photoAnalysisProgress.completedToast}</span>
+              </div>
+            )}
+          </div>
+        )}
 
       {/* Bottom Photo Caption & Minimal Playback Controls */}
       {transitionMode !== 'gallery_matte' && (

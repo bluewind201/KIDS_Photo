@@ -32,6 +32,7 @@ import {
   FrameTransitionMode,
   LayoutSide,
   MartTickerItem,
+  PhotoAnalysisProgress,
   PhotoItem,
   PowerScheduleConfig,
   ScheduleItem,
@@ -48,10 +49,14 @@ import {
   stopCurrentSpeech,
 } from './utils/speech';
 import {
+  analyzePhotoUnified,
   askAssistantUnified,
   askBunnyChatUnified,
+  checkGeminiVisionAvailable,
+  extractPhotoBase64ForVision,
   fetchWeatherUnified,
   FRAME_SETTINGS_STORAGE_KEY,
+  resolvePublicShareLinkUnified,
   tryBackendJson,
 } from './utils/standaloneApi';
 
@@ -325,6 +330,14 @@ interface BrowserSpeechRecognitionInstance {
   stop: () => void;
 }
 
+function isBuiltInOrSampleAlbum(album: DigitalAlbum): boolean {
+  return (
+    album.id === 'album-gdrive-family-2026' ||
+    album.id === 'album-synology-camping-winter' ||
+    album.id.startsWith('album-sample-')
+  );
+}
+
 function upgradeLegacyPhotoResolutions(rawAlbums: DigitalAlbum[]): DigitalAlbum[] {
   return rawAlbums.map((album) => ({
     ...album,
@@ -339,10 +352,18 @@ function upgradeLegacyPhotoResolutions(rawAlbums: DigitalAlbum[]): DigitalAlbum[
               .replace(/=s1920\b/g, '=s2560')
               .replace(/(\/d\/[a-zA-Z0-9_-]+)=w1920\b/g, '$1=w2560');
           };
+          const extraFallbacks: string[] = [...(p.fallbackUrls ?? [])];
+          if (/lh3\.googleusercontent\.com\/(pw\/|(?:[a-zA-Z0-9_-]+\/)?AF1Qip)/i.test(p.src)) {
+            const base = p.src.split('=')[0];
+            for (const cand of [`${base}=w1920-h1080`, `${base}=d`, base]) {
+              if (!extraFallbacks.includes(cand)) extraFallbacks.push(cand);
+            }
+          }
           return {
             ...p,
             src: upgradeUrl(p.src) ?? p.src,
             assetUrl: upgradeUrl(p.assetUrl),
+            fallbackUrls: extraFallbacks.length > 0 ? extraFallbacks : p.fallbackUrls,
           };
         })
       : [],
@@ -430,6 +451,306 @@ export default function App() {
   // Settings Modal State
   const [settingsModalTab, setSettingsModalTab] = useState<SettingsTabKey | null>(null);
   const [hasHydratedState, setHasHydratedState] = useState(false);
+
+  // Real-Time Gemini Vision Photo Analysis State & Share-Link Auto-Recovery
+  const [geminiVisionConnected, setGeminiVisionConnected] = useState<boolean>(false);
+  const [photoAnalysisProgress, setPhotoAnalysisProgress] = useState<PhotoAnalysisProgress | null>(
+    null
+  );
+  const [analysisRunNonce, setAnalysisRunNonce] = useState(0);
+  const analysisRunningRef = useRef(false);
+  const failedAnalysisIdsRef = useRef<Set<string>>(new Set());
+  const albumsRef = useRef<DigitalAlbum[]>(albums);
+  useEffect(() => {
+    albumsRef.current = albums;
+  }, [albums]);
+
+  const albumPasswordsMap = useMemo<Record<string, string>>(() => {
+    const map: Record<string, string> = {};
+    albums.forEach((a) => {
+      if (a.sharePassword) map[a.id] = a.sharePassword;
+    });
+    return map;
+  }, [albums]);
+
+  /**
+   * Re-resolves public share links (OneDrive `1drv.ms`, Google Photos, Google Drive, Synology `/sharing/`)
+   * so expired `@content.downloadUrl` tokens or wiped app-update cookies refresh cleanly while keeping
+   * existing photo IDs and Gemini AI analyzed titles/summaries/tags intact!
+   */
+  const refreshShareLinkAlbumUrls = useCallback(async (targetAlbumId?: string): Promise<boolean> => {
+    const candidates = albumsRef.current.filter((a) => {
+      if (isBuiltInOrSampleAlbum(a)) return false;
+      if (!/^https?:\/\//i.test(a.folderPath || '')) return false;
+      if (targetAlbumId) return a.id === targetAlbumId;
+      return a.enabled;
+    });
+
+    if (candidates.length === 0) return false;
+    let anyUpdated = false;
+
+    for (const album of candidates) {
+      try {
+        const resolved = await resolvePublicShareLinkUnified({
+          url: album.folderPath,
+          customTitle: album.name,
+          password: album.sharePassword,
+          albumId: album.id,
+        });
+        if (!Array.isArray(resolved.photos) || resolved.photos.length === 0) continue;
+
+        anyUpdated = true;
+        setAlbums((prev) =>
+          prev.map((curAlbum) => {
+            if (curAlbum.id !== album.id) return curAlbum;
+            const existingPhotos = curAlbum.photos;
+            const mergedPhotos: PhotoItem[] = resolved.photos.map((fresh, idx) => {
+              const prior = existingPhotos[idx];
+              if (!prior) {
+                return {
+                  ...fresh,
+                  id: `${curAlbum.id}-p-${idx}`,
+                  albumId: curAlbum.id,
+                  albumName: curAlbum.name,
+                };
+              }
+              return {
+                ...prior,
+                src: fresh.src,
+                assetUrl: fresh.assetUrl,
+                fallbackUrls: fresh.fallbackUrls,
+                nativeHeaders: fresh.nativeHeaders ?? prior.nativeHeaders,
+                date: prior.date || fresh.date,
+                // Preserve Gemini Vision metadata if already analyzed!
+                title: prior.aiAnalyzed ? prior.title : prior.title || fresh.title,
+                location: prior.aiAnalyzed ? prior.location : prior.location || fresh.location,
+                aiSummary: prior.aiAnalyzed ? prior.aiSummary : prior.aiSummary || fresh.aiSummary,
+                tags: prior.aiAnalyzed && prior.tags?.length ? prior.tags : fresh.tags,
+              };
+            });
+            return {
+              ...curAlbum,
+              photos: mergedPhotos,
+            };
+          })
+        );
+      } catch {
+        // Keep cached album metadata if offline or temporarily unreachable
+      }
+    }
+
+    return anyUpdated;
+  }, []);
+
+  // Automatically refresh enabled share-link albums once on app startup (fixes expired tokens & post-update sessions!)
+  const didInitialShareRefreshRef = useRef(false);
+  useEffect(() => {
+    if (!hasHydratedState || didInitialShareRefreshRef.current) return;
+    didInitialShareRefreshRef.current = true;
+    void refreshShareLinkAlbumUrls();
+  }, [hasHydratedState, refreshShareLinkAlbumUrls]);
+
+  // Monitor Gemini Vision availability (saved Gemini API key OR connected backend)
+  useEffect(() => {
+    let cancelled = false;
+    const refreshAvailability = async () => {
+      const ok = await checkGeminiVisionAvailable();
+      if (!cancelled) {
+        setGeminiVisionConnected(ok);
+        setPhotoAnalysisProgress((prev) =>
+          prev ? { ...prev, geminiConnected: ok } : { active: false, geminiConnected: ok, done: 0, total: 0 }
+        );
+        if (ok) {
+          failedAnalysisIdsRef.current.clear();
+          setAnalysisRunNonce((n) => n + 1);
+        }
+      }
+    };
+
+    void refreshAvailability();
+    const onKeyUpdated = () => {
+      void refreshAvailability();
+    };
+    window.addEventListener('kidsPhotoGeminiKeyUpdated', onKeyUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kidsPhotoGeminiKeyUpdated', onKeyUpdated);
+    };
+  }, []);
+
+  const handleForceReanalyzePhotos = useCallback(() => {
+    failedAnalysisIdsRef.current.clear();
+    setAlbums((prev) =>
+      prev.map((a) =>
+        isBuiltInOrSampleAlbum(a)
+          ? a
+          : {
+              ...a,
+              photos: a.photos.map((p) => ({ ...p, aiAnalyzed: false })),
+            }
+      )
+    );
+    setAnalysisRunNonce((n) => n + 1);
+  }, []);
+
+  // Background Gemini Vision Photo Analysis Queue ("제미나이가 연결돼서 분석 진행할 때 사진을 분석 중이라고 안내")
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!geminiVisionConnected || analysisRunningRef.current) return;
+
+    const collectPendingItems = () => {
+      const items: Array<{ album: DigitalAlbum; photo: PhotoItem }> = [];
+      for (const album of albumsRef.current) {
+        if (isBuiltInOrSampleAlbum(album)) continue;
+        for (const photo of album.photos) {
+          if (!photo.aiAnalyzed && !failedAnalysisIdsRef.current.has(photo.id)) {
+            items.push({ album, photo });
+          }
+        }
+      }
+      return items;
+    };
+
+    const initialPending = collectPendingItems();
+    if (initialPending.length === 0) return;
+
+    analysisRunningRef.current = true;
+
+    (async () => {
+      let total = initialPending.length;
+      let completedCount = 0;
+      let successCount = 0;
+      const processedInRun = new Set<string>();
+
+      setPhotoAnalysisProgress({
+        active: true,
+        geminiConnected: true,
+        done: 0,
+        total,
+        currentAlbumName: initialPending[0].album.name,
+        currentPhotoTitle: initialPending[0].photo.title,
+      });
+
+      while (isMountedRef.current) {
+        const currentPending = collectPendingItems().filter(
+          (it) => !processedInRun.has(it.photo.id)
+        );
+        if (currentPending.length === 0) break;
+
+        total = completedCount + currentPending.length;
+        const { album, photo } = currentPending[0];
+        processedInRun.add(photo.id);
+
+        setPhotoAnalysisProgress({
+          active: true,
+          geminiConnected: true,
+          done: completedCount,
+          total,
+          currentAlbumName: album.name,
+          currentPhotoTitle: photo.title,
+        });
+
+        try {
+          const latestAlbum = albumsRef.current.find((a) => a.id === album.id);
+          const latestPhoto = latestAlbum?.photos.find((p) => p.id === photo.id) ?? photo;
+
+          const extracted = await extractPhotoBase64ForVision(
+            latestPhoto,
+            latestAlbum?.sharePassword ?? album.sharePassword
+          );
+
+          if (extracted && isMountedRef.current) {
+            const meta = await analyzePhotoUnified({
+              base64Data: extracted.base64Data,
+              mimeType: extracted.mimeType,
+              fileName: latestPhoto.title,
+            });
+
+            if (meta && (meta.title || meta.aiSummary)) {
+              successCount += 1;
+              setAlbums((prev) =>
+                prev.map((curA) => {
+                  if (curA.id !== album.id) return curA;
+                  return {
+                    ...curA,
+                    photos: curA.photos.map((curP) =>
+                      curP.id !== photo.id
+                        ? curP
+                        : {
+                            ...curP,
+                            title: meta.title?.trim() || curP.title,
+                            location: meta.location?.trim() || curP.location,
+                            aiSummary: meta.aiSummary?.trim() || curP.aiSummary,
+                            tags:
+                              Array.isArray(meta.tags) && meta.tags.length > 0
+                                ? meta.tags
+                                : curP.tags,
+                            aiAnalyzed: true,
+                          }
+                    ),
+                  };
+                })
+              );
+            } else {
+              failedAnalysisIdsRef.current.add(photo.id);
+            }
+          } else {
+            failedAnalysisIdsRef.current.add(photo.id);
+          }
+        } catch {
+          failedAnalysisIdsRef.current.add(photo.id);
+        }
+
+        completedCount += 1;
+        if (isMountedRef.current) {
+          setPhotoAnalysisProgress({
+            active: true,
+            geminiConnected: true,
+            done: completedCount,
+            total,
+            currentAlbumName: album.name,
+            currentPhotoTitle: photo.title,
+          });
+        }
+
+        // Gentle 320ms pacing between Vision requests to keep animations smooth and respect API rate limits
+        await new Promise((r) => window.setTimeout(r, 320));
+      }
+
+      analysisRunningRef.current = false;
+
+      if (isMountedRef.current) {
+        const toast =
+          successCount > 0
+            ? `✨ Gemini AI 사진 분석 완료 (${successCount}장) · 이제 토끼들과 사진 속 추억 이야기를 나눌 수 있어요!`
+            : undefined;
+
+        setPhotoAnalysisProgress({
+          active: false,
+          geminiConnected: true,
+          done: completedCount,
+          total,
+          completedToast: toast,
+        });
+
+        if (toast) {
+          window.setTimeout(() => {
+            if (!isMountedRef.current) return;
+            setPhotoAnalysisProgress((prev) =>
+              prev && !prev.active ? { ...prev, completedToast: undefined } : prev
+            );
+          }, 6000);
+        }
+      }
+    })();
+  }, [albums, geminiVisionConnected, analysisRunNonce]);
 
   useEffect(() => {
     installGlobalAudioUnlock();
@@ -2236,6 +2557,9 @@ export default function App() {
               wakeWord={wakeWord}
               isVoiceListening={isVoiceListening}
               isAssistantLoading={isAssistantLoading}
+              albumPasswords={albumPasswordsMap}
+              photoAnalysisProgress={photoAnalysisProgress}
+              onRequestRefreshAlbum={refreshShareLinkAlbumUrls}
               onPrev={() =>
                 setCurrentPhotoIdx((prev) =>
                   activePhotos.length > 0 ? (prev - 1 + activePhotos.length) % activePhotos.length : 0
@@ -2330,6 +2654,9 @@ export default function App() {
           ttsEnabled={ttsEnabled}
           currentCity={locationInfo.city}
           martItems={martItems}
+          photoAnalysisProgress={photoAnalysisProgress}
+          onReanalyzePhotos={handleForceReanalyzePhotos}
+          onRefreshAlbumUrls={refreshShareLinkAlbumUrls}
           onClose={() => setSettingsModalTab(null)}
           onAddAlbum={(newAlbum) => {
             const isSampleAlbum = newAlbum.id.startsWith('album-sample-');

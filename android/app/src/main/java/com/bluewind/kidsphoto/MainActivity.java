@@ -307,6 +307,7 @@ public class MainActivity extends BridgeActivity {
         stopActiveNeuralPlayerOnMainThread();
         MediaPlayer mp = new MediaPlayer();
         activeNeuralPlayer = mp;
+        FileInputStream fis = null;
         try {
             AudioAttributes attrs = new AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -314,9 +315,10 @@ public class MainActivity extends BridgeActivity {
                 .build();
             mp.setAudioAttributes(attrs);
 
-            try (FileInputStream fis = new FileInputStream(mp3File)) {
-                mp.setDataSource(fis.getFD());
-            }
+            // CRITICAL: Keep FileInputStream open until AFTER mp.prepare() completes!
+            // Closing fis before mp.prepare() invalidates the OS file descriptor on Android.
+            fis = new FileInputStream(mp3File);
+            mp.setDataSource(fis.getFD(), 0, mp3File.length());
             mp.setVolume(1.0f, 1.0f);
 
             mp.setOnCompletionListener(player -> {
@@ -357,6 +359,12 @@ public class MainActivity extends BridgeActivity {
             stopActiveNeuralPlayerOnMainThread();
             if (activeSpeechGeneration.get() == myGen) {
                 performOfflineLocalSpeak(text, lang, pitch, rate, speakerKey, utteranceId);
+            }
+        } finally {
+            if (fis != null) {
+                try {
+                    fis.close();
+                } catch (Exception ignored) {}
             }
         }
     }

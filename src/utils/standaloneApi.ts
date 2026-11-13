@@ -39,9 +39,19 @@ export function saveGeminiApiKey(key: string): void {
     } else {
       localStorage.removeItem(GEMINI_KEY_STORAGE_KEY);
     }
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('kidsPhotoGeminiKeyUpdated'));
+    }
   } catch {
     // ignore storage errors
   }
+}
+
+export async function checkGeminiVisionAvailable(): Promise<boolean> {
+  if (getSavedGeminiApiKey().length > 8) return true;
+  const health = await tryBackendJson<{ geminiConfigured?: boolean }>('/api/health', undefined, 3000);
+  if (health.ok && health.data.geminiConfigured) return true;
+  return false;
 }
 
 function getClientGemini(): GoogleGenAI | null {
@@ -1210,23 +1220,36 @@ export async function analyzePhotoUnified(params: {
     location?: string;
     aiSummary?: string;
     tags?: string[];
-  }>('/api/gemini/analyze-photo', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  }, 8000);
-  if (backend.ok) return backend.data;
+  }>(
+    '/api/gemini/analyze-photo',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    },
+    12000
+  );
+  if (backend.ok && (backend.data.title || backend.data.aiSummary)) return backend.data;
 
   const ai = getClientGemini();
   if (ai) {
     try {
-      const cleanBase64 = params.base64Data.includes(',') ? params.base64Data.split(',')[1] : params.base64Data;
+      const cleanBase64 = params.base64Data.includes(',')
+        ? params.base64Data.split(',')[1]
+        : params.base64Data;
       const resp = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: {
           parts: [
-            { inlineData: { mimeType: params.mimeType, data: cleanBase64 } },
-            { text: `파일명: "${params.fileName}" — 가족 사진을 분석해 한국어 제목(title), 장소(location), 설명(aiSummary), 태그 배열(tags)을 JSON으로 만들어 주세요.` },
+            { inlineData: { mimeType: params.mimeType || 'image/jpeg', data: cleanBase64 } },
+            {
+              text: `원본 파일명: "${params.fileName}"
+이 사진을 보고 스마트 디지털 액자 화면 캡션 및 3D 토끼 캐릭터의 어린이 추억 대화에 사용할 한국어 메타데이터를 작성해 주세요:
+- title: 파일명(IMG_1234 등) 대신 사진 속 순간을 따뜻하게 표현하는 짧은 한국어 제목 (예: "햇살 가득 봄날 공원 나들이", "모래사장에서 조개 줍는 날")
+- location: 사진 배경으로 유추되는 장소 유형이나 풍경 (예: "푸른 바닷가 해변", "잔디밭 공원", "따뜻한 거실")
+- aiSummary: 인물(아이/가족)의 표정·행동·계절감·배경을 다정하게 묘사한 한국어 2문장 설명
+- tags: 아이가 "바다 사진 보여줘", "눈사람 사진 언제야?" 하고 찾을 때 매칭될 한국어 핵심 키워드 5~7개`,
+            },
           ],
         },
         config: {
@@ -1239,6 +1262,7 @@ export async function analyzePhotoUnified(params: {
               aiSummary: { type: Type.STRING },
               tags: { type: Type.ARRAY, items: { type: Type.STRING } },
             },
+            required: ['title', 'location', 'aiSummary', 'tags'],
           },
         },
       });
@@ -1247,6 +1271,119 @@ export async function analyzePhotoUnified(params: {
       return null;
     }
   }
+  return null;
+}
+
+/**
+ * Loads any photo (`data:`, `blob:`, Synology NAS share, OneDrive, Google Photos, Google Drive)
+ * and downscales to a compact max-768px JPEG base64 payload for fast Gemini Vision analysis.
+ */
+export async function extractPhotoBase64ForVision(
+  photo: PhotoItem,
+  sharePassword?: string
+): Promise<{ base64Data: string; mimeType: string } | null> {
+  if (typeof document === 'undefined') return null;
+
+  const downscaleImgSourceToJpeg = (imgSrc: string, revokeAfter = false): Promise<string | null> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      if (!imgSrc.startsWith('data:') && !imgSrc.startsWith('blob:')) {
+        img.crossOrigin = 'anonymous';
+        img.referrerPolicy = 'no-referrer';
+      }
+      const timer = window.setTimeout(() => {
+        if (revokeAfter && imgSrc.startsWith('blob:')) URL.revokeObjectURL(imgSrc);
+        resolve(null);
+      }, 12000);
+
+      img.onload = () => {
+        window.clearTimeout(timer);
+        try {
+          const maxDim = 768;
+          let { naturalWidth: w, naturalHeight: h } = img;
+          if (!w || !h) {
+            resolve(null);
+            return;
+          }
+          if (w > maxDim || h > maxDim) {
+            const ratio = Math.min(maxDim / w, maxDim / h);
+            w = Math.max(1, Math.round(w * ratio));
+            h = Math.max(1, Math.round(h * ratio));
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(null);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          resolve(dataUrl);
+        } catch {
+          resolve(null);
+        }
+      };
+
+      img.onerror = () => {
+        window.clearTimeout(timer);
+        resolve(null);
+      };
+
+      img.src = imgSrc;
+    });
+
+  // 1) Local gallery `data:` or `blob:` URL
+  if (photo.src.startsWith('data:') || photo.src.startsWith('blob:')) {
+    const resized = await downscaleImgSourceToJpeg(photo.src);
+    if (resized) return { base64Data: resized, mimeType: 'image/jpeg' };
+    if (photo.src.startsWith('data:image/')) {
+      return { base64Data: photo.src, mimeType: 'image/jpeg' };
+    }
+    return null;
+  }
+
+  const candidateUrls = [
+    photo.src,
+    ...(photo.assetUrl ? [photo.assetUrl] : []),
+    ...(photo.fallbackUrls ?? []),
+  ].filter((u) => /^https?:\/\//i.test(u));
+
+  // 2) Native Android: fetch via CapacitorHttp (handles Synology share cookies, OneDrive, Google redirects, CORS!)
+  if (Capacitor.isNativePlatform() && candidateUrls.length > 0) {
+    let headers = photo.nativeHeaders;
+    if (!headers && /passphrase=([^&]+)/i.test(photo.src)) {
+      const m = photo.src.match(/passphrase=([^&]+)/i);
+      if (m?.[1]) headers = { 'X-SYNO-SHARING': decodeURIComponent(m[1]) };
+    }
+    const blobUrl = await fetchImageViaNativeHttp(candidateUrls, headers, sharePassword);
+    if (blobUrl) {
+      const resized = await downscaleImgSourceToJpeg(blobUrl, false);
+      if (resized) return { base64Data: resized, mimeType: 'image/jpeg' };
+    }
+  }
+
+  // 3) Web browser fallback (`fetch` blob or CORS `<img>`)
+  for (const url of candidateUrls) {
+    try {
+      const r = await fetch(url, { mode: 'cors', referrerPolicy: 'no-referrer' });
+      if (r.ok) {
+        const blob = await r.blob();
+        if (blob.type.startsWith('image/') && blob.size > 128) {
+          const tempUrl = URL.createObjectURL(blob);
+          const resized = await downscaleImgSourceToJpeg(tempUrl, true);
+          URL.revokeObjectURL(tempUrl);
+          if (resized) return { base64Data: resized, mimeType: 'image/jpeg' };
+        }
+      }
+    } catch {
+      // Try direct Image load next
+    }
+    const directResized = await downscaleImgSourceToJpeg(url);
+    if (directResized) return { base64Data: directResized, mimeType: 'image/jpeg' };
+  }
+
   return null;
 }
 
@@ -1303,15 +1440,158 @@ const DESKTOP_USER_AGENT =
 
 // In-memory LRU cache so native-downloaded Blob URLs aren't re-fetched on every slide cycle!
 const NATIVE_IMAGE_BLOB_CACHE = new Map<string, string>();
-const MAX_BLOB_CACHE_ENTRIES = 60;
+const MAX_BLOB_CACHE_ENTRIES = 70;
+
+// Tracks Synology public share sessions unlocked in this app run (`entryUrl|passphrase` -> auth metadata).
+// Crucial after APK updates or app restarts because Java CookieManager is in-memory!
+const AUTHENTICATED_SYNO_SHARES = new Map<
+  string,
+  { authenticatedAt: number; sharingSid?: string }
+>();
+const SYNO_SHARE_AUTH_INFLIGHT = new Map<string, Promise<string | undefined>>();
+
+async function ensureSynologyShareAuthenticated(
+  rawImgUrl: string,
+  customHeaders?: Record<string, string>,
+  sharePassword?: string,
+  forceRefresh = false
+): Promise<{ updatedUrl: string; headers: Record<string, string> }> {
+  const mergedHeaders: Record<string, string> = { ...(customHeaders ?? {}) };
+
+  if (!/\/webapi\/entry\.cgi/i.test(rawImgUrl)) {
+    return { updatedUrl: rawImgUrl, headers: mergedHeaders };
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawImgUrl);
+  } catch {
+    return { updatedUrl: rawImgUrl, headers: mergedHeaders };
+  }
+
+  const passphrase =
+    parsedUrl.searchParams.get('passphrase') ||
+    parsedUrl.searchParams.get('sharing_id') ||
+    mergedHeaders['X-SYNO-SHARING'] ||
+    mergedHeaders['x-syno-sharing'] ||
+    '';
+
+  if (!passphrase) {
+    return { updatedUrl: rawImgUrl, headers: mergedHeaders };
+  }
+
+  mergedHeaders['X-SYNO-SHARING'] = passphrase;
+  const entryBaseUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
+  const shareKey = `${entryBaseUrl}::${passphrase}`;
+
+  const existing = AUTHENTICATED_SYNO_SHARES.get(shareKey);
+  const ttlMs = 20 * 60 * 1000;
+  if (!forceRefresh && existing && Date.now() - existing.authenticatedAt < ttlMs) {
+    if (existing.sharingSid && parsedUrl.searchParams.has('sharing_id')) {
+      parsedUrl.searchParams.set('_sharing_sid', existing.sharingSid);
+    }
+    return { updatedUrl: parsedUrl.toString(), headers: mergedHeaders };
+  }
+
+  let inflight = SYNO_SHARE_AUTH_INFLIGHT.get(shareKey);
+  if (!inflight || forceRefresh) {
+    inflight = (async () => {
+      let obtainedSharingSid: string | undefined;
+      const isFolderSharing =
+        parsedUrl.searchParams.has('sharing_id') ||
+        /SYNO\.FolderSharing/i.test(parsedUrl.searchParams.get('api') || '');
+
+      // 1) Authenticate Synology Photos Share (`SYNO.Foto.Sharing.Passphrase`) to populate CookieManager
+      try {
+        const fotoLogin = new URLSearchParams({
+          api: 'SYNO.Foto.Sharing.Passphrase',
+          version: '1',
+          method: 'login',
+          passphrase,
+        });
+        if (sharePassword?.trim()) {
+          fotoLogin.set('password', sharePassword.trim());
+        }
+        await CapacitorHttp.post({
+          url: entryBaseUrl,
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': DESKTOP_USER_AGENT,
+            'x-cap-user-agent': DESKTOP_USER_AGENT,
+            'X-SYNO-SHARING': passphrase,
+          },
+          data: fotoLogin.toString(),
+          connectTimeout: 8000,
+          readTimeout: 8000,
+        });
+      } catch {
+        // Ignore if NAS only runs FileStation sharing
+      }
+
+      // 2) Authenticate DSM File Station Share (`SYNO.Core.Sharing.Login`) if FolderSharing URL
+      if (isFolderSharing) {
+        try {
+          const dsmEntry = `${parsedUrl.origin}/webapi/entry.cgi`;
+          const fsLogin = new URLSearchParams({
+            api: 'SYNO.Core.Sharing.Login',
+            version: '1',
+            method: 'login',
+            sharing_id: passphrase,
+          });
+          if (sharePassword?.trim()) {
+            fsLogin.set('password', sharePassword.trim());
+          }
+          const loginRes = await CapacitorHttp.post({
+            url: dsmEntry,
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'User-Agent': DESKTOP_USER_AGENT,
+              'x-cap-user-agent': DESKTOP_USER_AGENT,
+              'X-SYNO-SHARING': passphrase,
+            },
+            data: fsLogin.toString(),
+            connectTimeout: 8000,
+            readTimeout: 8000,
+          });
+          const loginObj = (
+            typeof loginRes.data === 'string' ? JSON.parse(loginRes.data) : loginRes.data
+          ) as { data?: { sharing_sid?: string } } | undefined;
+          if (loginObj?.data?.sharing_sid) {
+            obtainedSharingSid = loginObj.data.sharing_sid;
+          }
+        } catch {
+          // Ignore FileStation login error
+        }
+      }
+
+      AUTHENTICATED_SYNO_SHARES.set(shareKey, {
+        authenticatedAt: Date.now(),
+        sharingSid: obtainedSharingSid,
+      });
+      return obtainedSharingSid;
+    })().finally(() => {
+      SYNO_SHARE_AUTH_INFLIGHT.delete(shareKey);
+    });
+
+    SYNO_SHARE_AUTH_INFLIGHT.set(shareKey, inflight);
+  }
+
+  const sid = await inflight;
+  if (sid && parsedUrl.searchParams.has('sharing_id')) {
+    parsedUrl.searchParams.set('_sharing_sid', sid);
+  }
+  return { updatedUrl: parsedUrl.toString(), headers: mergedHeaders };
+}
 
 /**
  * Fetches an image binary natively via CapacitorHttp (preserving Java CookieManager sessions,
- * custom headers like `X-SYNO-SHARING`, redirects, and self-signed NAS SSL!) and returns a fast `blob:` ObjectURL.
+ * auto-unlocking Synology Share passphrases after app restarts/updates, following redirects, and self-signed NAS SSL!)
+ * and returns a fast `blob:` ObjectURL.
  */
 export async function fetchImageViaNativeHttp(
   candidateUrls: string[],
-  customHeaders?: Record<string, string>
+  customHeaders?: Record<string, string>,
+  sharePassword?: string
 ): Promise<string | null> {
   if (!Capacitor.isNativePlatform()) return null;
 
@@ -1322,75 +1602,108 @@ export async function fetchImageViaNativeHttp(
   const cached = NATIVE_IMAGE_BLOB_CACHE.get(cacheKey);
   if (cached) return cached;
 
-  for (const url of uniqueUrls) {
-    try {
-      const res = await CapacitorHttp.get({
-        url,
-        headers: {
-          'User-Agent': DESKTOP_USER_AGENT,
-          'x-cap-user-agent': DESKTOP_USER_AGENT,
-          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-          ...(customHeaders ?? {}),
-        },
-        responseType: 'blob',
-        connectTimeout: 12000,
-        readTimeout: 15000,
-      });
+  for (const rawCandidateUrl of uniqueUrls) {
+    const isSynoShareUrl =
+      /\/webapi\/entry\.cgi/i.test(rawCandidateUrl) &&
+      (/passphrase=|sharing_id=/i.test(rawCandidateUrl) ||
+        Boolean(customHeaders?.['X-SYNO-SHARING']));
 
-      if (res.status >= 200 && res.status < 300 && typeof res.data === 'string' && res.data.length > 64) {
-        // Make sure the server didn't return an HTML login page or JSON error with HTTP 200!
-        let cType = '';
-        if (res.headers) {
-          for (const [k, v] of Object.entries(res.headers)) {
-            if (k.toLowerCase() === 'content-type') {
-              cType = String(v).toLowerCase();
-              break;
+    // Allow 1 automatic re-auth retry if a Synology session cookie expired mid-run
+    const maxAttempts = isSynoShareUrl ? 2 : 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const prepared = isSynoShareUrl
+          ? await ensureSynologyShareAuthenticated(
+              rawCandidateUrl,
+              customHeaders,
+              sharePassword,
+              attempt > 0
+            )
+          : { updatedUrl: rawCandidateUrl, headers: { ...(customHeaders ?? {}) } };
+
+        const res = await CapacitorHttp.get({
+          url: prepared.updatedUrl,
+          headers: {
+            'User-Agent': DESKTOP_USER_AGENT,
+            'x-cap-user-agent': DESKTOP_USER_AGENT,
+            Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            ...prepared.headers,
+          },
+          responseType: 'blob',
+          connectTimeout: 12000,
+          readTimeout: 16000,
+        });
+
+        if (
+          res.status >= 200 &&
+          res.status < 300 &&
+          typeof res.data === 'string' &&
+          res.data.length > 64
+        ) {
+          let cType = '';
+          if (res.headers) {
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (k.toLowerCase() === 'content-type') {
+                cType = String(v).toLowerCase();
+                break;
+              }
             }
           }
-        }
-        if (cType.includes('text/html') || cType.includes('application/json')) {
-          continue;
-        }
-
-        const cleanB64 = res.data.replace(/\s+/g, '');
-        // Quick magic-byte sanity check (`/` = JPEG `/9j/`, `i` = PNG `iVBOR`, `R` = GIF `R0lG`, `U` = WEBP `UklG`, `Q` = BMP)
-        if (cleanB64.startsWith('PCFET0') || cleanB64.startsWith('PGh0bW') || cleanB64.startsWith('eyJ')) {
-          // Base64 of `<!DO`, `<htm`, or `{"` -> HTML/JSON error body, not an image!
-          continue;
-        }
-
-        const binaryStr = atob(cleanB64);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
-        }
-
-        const mime =
-          cType && cType.startsWith('image/')
-            ? cType.split(';')[0].trim()
-            : cleanB64.startsWith('iVBOR')
-            ? 'image/png'
-            : cleanB64.startsWith('UklGR')
-            ? 'image/webp'
-            : cleanB64.startsWith('R0lGO')
-            ? 'image/gif'
-            : 'image/jpeg';
-
-        const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
-
-        if (NATIVE_IMAGE_BLOB_CACHE.size >= MAX_BLOB_CACHE_ENTRIES) {
-          const oldestKey = NATIVE_IMAGE_BLOB_CACHE.keys().next().value;
-          if (oldestKey) {
-            const oldUrl = NATIVE_IMAGE_BLOB_CACHE.get(oldestKey);
-            if (oldUrl) URL.revokeObjectURL(oldUrl);
-            NATIVE_IMAGE_BLOB_CACHE.delete(oldestKey);
+          if (cType.includes('text/html') || cType.includes('application/json')) {
+            // Session expired or login page returned -> retry once with forced Synology re-auth if applicable
+            continue;
           }
+
+          // Strip possible `data:image/...;base64,` prefix before `atob`!
+          const strippedDataPrefix = res.data.includes(',')
+            ? res.data.slice(res.data.indexOf(',') + 1)
+            : res.data;
+          const cleanB64 = strippedDataPrefix.replace(/[^A-Za-z0-9+/=]/g, '');
+
+          if (
+            cleanB64.length < 64 ||
+            cleanB64.startsWith('PCFET0') ||
+            cleanB64.startsWith('PGh0bW') ||
+            cleanB64.startsWith('eyJ')
+          ) {
+            // Base64 of `<!DO`, `<htm`, or `{"` -> HTML/JSON error body, not an image!
+            continue;
+          }
+
+          const binaryStr = atob(cleanB64);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+          }
+
+          const mime =
+            cType && cType.startsWith('image/')
+              ? cType.split(';')[0].trim()
+              : cleanB64.startsWith('iVBOR')
+              ? 'image/png'
+              : cleanB64.startsWith('UklGR')
+              ? 'image/webp'
+              : cleanB64.startsWith('R0lGO')
+              ? 'image/gif'
+              : 'image/jpeg';
+
+          const blobUrl = URL.createObjectURL(new Blob([bytes], { type: mime }));
+
+          if (NATIVE_IMAGE_BLOB_CACHE.size >= MAX_BLOB_CACHE_ENTRIES) {
+            const oldestKey = NATIVE_IMAGE_BLOB_CACHE.keys().next().value;
+            if (oldestKey) {
+              const oldUrl = NATIVE_IMAGE_BLOB_CACHE.get(oldestKey);
+              if (oldUrl) URL.revokeObjectURL(oldUrl);
+              NATIVE_IMAGE_BLOB_CACHE.delete(oldestKey);
+            }
+          }
+          NATIVE_IMAGE_BLOB_CACHE.set(cacheKey, blobUrl);
+          return blobUrl;
         }
-        NATIVE_IMAGE_BLOB_CACHE.set(cacheKey, blobUrl);
-        return blobUrl;
+      } catch {
+        // Retry or move to next candidate URL
       }
-    } catch {
-      // Try next candidate URL
     }
   }
 
@@ -1724,7 +2037,8 @@ export async function resolvePublicShareLinkUnified(params: {
       albumName: albumTitle,
       provider: 'google_drive',
       src: `${baseUrl}=w2560-h2560`,
-      assetUrl: `${baseUrl}=w3840-h3840`,
+      assetUrl: `${baseUrl}=w1920-h1080`,
+      fallbackUrls: [`${baseUrl}=w3840-h3840`, `${baseUrl}=d`, baseUrl],
       title: `${albumTitle} #${idx + 1}`,
       date: todayLabel,
       location: albumTitle,

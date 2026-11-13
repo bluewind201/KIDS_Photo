@@ -9,11 +9,11 @@ export const TOY_LABELS: Record<BunnyToyType, string> = {
 };
 
 export const VOICE_SPEAKER_LABELS: Record<BunnyVoiceSpeaker, string> = {
-  tosuni: '토순이 자연 신경망 음성 (다정한 언니 성우 · SunHi Neural)',
-  tosili: '토실이 자연 신경망 음성 (발랄한 단짝 성우 · Ava Neural)',
-  toddungi: '토뚱이 자연 신경망 음성 (포근한 막내 성우 · InJoon Neural)',
-  tobyeori: '토별이 자연 신경망 음성 (맑은 요정 성우 · Emma Neural)',
-  togureum: '토구름 자연 신경망 음성 (씩씩한 소년 성우 · Hyunsu Neural)',
+  tosuni: '토순이 한국인 사람 음성 (다정한 언니 · SunHi / Supertone F1)',
+  tosili: '토실이 한국인 사람 음성 (생동감 단짝 · SunHi 밝은톤 / Supertone F2)',
+  toddungi: '토뚱이 한국인 사람 음성 (포근한 막내 · Hyunsu / Supertone F5)',
+  tobyeori: '토별이 한국인 사람 음성 (동화 구연 톤 · SunHi 차분톤 / Supertone F3)',
+  togureum: '토구름 한국인 사람 음성 (명랑한 소년 · InJoon / Supertone M1)',
 };
 
 export const INITIAL_CHARACTERS: BunnyCharacterConfig[] = [

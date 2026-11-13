@@ -42,8 +42,8 @@ public final class EdgeNeuralTtsClient {
     private static final String CHROMIUM_MAJOR_VERSION = "143";
     private static final String SEC_MS_GEC_VERSION = "2-" + CHROMIUM_FULL_VERSION;
     private static final long WIN_EPOCH_SECONDS = 11644473600L;
-    private static final int SOCKET_TIMEOUT_MS = 4500;
-    private static final int MAX_CACHE_FILES = 80;
+    private static final int SOCKET_TIMEOUT_MS = 7000;
+    private static final int MAX_CACHE_FILES = 100;
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
@@ -120,39 +120,41 @@ public final class EdgeNeuralTtsClient {
         if (isEnglish) {
             switch (key) {
                 case "tosuni":
-                    return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+4Hz", "-8%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+2Hz", "-6%", "en-US");
                 case "tosili":
                     // Real American child neural voice for bright kid English coaching!
-                    return new NeuralVoiceSpec("en-US-AnaNeural", "+0Hz", "-5%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+0Hz", "-4%", "en-US");
                 case "toddungi":
-                    return new NeuralVoiceSpec("en-US-AnaNeural", "-4Hz", "-8%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "-2Hz", "-7%", "en-US");
                 case "tobyeori":
-                    return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+6Hz", "-8%", "en-US");
+                    return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+2Hz", "-6%", "en-US");
                 case "togureum":
-                    return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+8Hz", "-6%", "en-US");
+                    return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+2Hz", "-5%", "en-US");
                 default:
                     return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+0Hz", "-5%", "en-US");
             }
         }
 
+        // 100% Native Korean Neural Human Voices with natural unwarped human prosody (-2Hz ~ +4Hz max).
+        // Eliminates foreign English accents on Korean sentences and prevents vocoder pitch distortion!
         switch (key) {
             case "tosuni":
-                // 다정하고 포근한 첫째 언니 토순이 (한국어 자연 여성 성우)
-                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+8Hz", "+2%", "ko-KR");
+                // 다정하고 포근한 첫째 언니 토순이 (자연 한국어 여성 성우)
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+2Hz", "+1%", "ko-KR");
             case "tosili":
-                // 밝고 경쾌한 단짝 토실이 (다국어 신경망 젊은 여성 성우)
-                return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+14Hz", "+7%", "ko-KR");
+                // 밝고 생동감 있는 단짝 토실이 (자연 한국어 여성 성우 경쾌한 호흡)
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+4Hz", "+6%", "ko-KR");
             case "toddungi":
-                // 귀엽고 포근한 막내 토뚱이 (자연 한국어 소년/남성 성우 소프트 톤)
-                return new NeuralVoiceSpec("ko-KR-InJoonNeural", "+16Hz", "-4%", "ko-KR");
+                // 포근하고 다정한 막내 토뚱이 (자연 한국어 청년 성우 부드러운 톤)
+                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+3Hz", "-3%", "ko-KR");
             case "tobyeori":
-                // 맑고 고운 동화 요정 토별이 (다국어 신경망 맑은 여성 성우)
-                return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+12Hz", "-2%", "ko-KR");
+                // 맑고 차분한 동화 구연 토별이 (자연 한국어 여성 성우 차분한 톤)
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+0Hz", "-5%", "ko-KR");
             case "togureum":
-                // 씩씩하고 명랑한 소년 대장 토구름 (다국어 한국어 남성 성우)
-                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+12Hz", "+5%", "ko-KR");
+                // 씩씩하고 명랑한 소년 대장 토구름 (자연 한국어 남성 성우 경쾌한 톤)
+                return new NeuralVoiceSpec("ko-KR-InJoonNeural", "+2Hz", "+4%", "ko-KR");
             default:
-                // 스마트 액자 AI 비서 (차분하고 또렷한 표준 아나운서 성우)
+                // 스마트 액자 AI 비서 (표준 자연 한국어 성우)
                 return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+0Hz", "+0%", "ko-KR");
         }
     }
@@ -189,8 +191,20 @@ public final class EdgeNeuralTtsClient {
             return cachedFile;
         }
 
-        byte[] mp3Bytes = fetchNeuralMp3Bytes(cleanText, spec);
+        byte[] mp3Bytes = null;
+        Exception lastFetchErr = null;
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                mp3Bytes = fetchNeuralMp3Bytes(cleanText, spec);
+                if (mp3Bytes != null && mp3Bytes.length >= 256) {
+                    break;
+                }
+            } catch (Exception err) {
+                lastFetchErr = err;
+            }
+        }
         if (mp3Bytes == null || mp3Bytes.length < 256) {
+            if (lastFetchErr != null) throw lastFetchErr;
             throw new IOException("Neural TTS returned empty audio");
         }
 

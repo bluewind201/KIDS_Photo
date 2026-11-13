@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { BunnyVoiceSpeaker } from '../types';
 import { getSavedGeminiApiKey, tryBackendJson } from './standaloneApi';
+import { trySynthesizeSupertonicWavUrl } from './supertonicTts';
 
 export type SpeechSpeakerKey = 'assistant' | BunnyVoiceSpeaker;
 
@@ -33,61 +34,73 @@ interface SpeakerVoiceProfile {
   pitchEn: number;
   rateEn: number;
   geminiVoice: string;
+  geminiStyleKo: string;
   chimeNotes: number[];
 }
 
 const SPEAKER_PROFILES: Record<SpeechSpeakerKey, SpeakerVoiceProfile> = {
   tosuni: {
-    // 다정하고 상냥한 첫째 언니 토순이 톤 (신경망 성우 ko-KR-SunHiNeural + 자연 피치)
-    pitchKo: 1.06,
-    rateKo: 1.01,
-    pitchEn: 1.04,
-    rateEn: 0.9,
-    geminiVoice: 'Kore',
+    // 다정하고 상냥한 첫째 언니 토순이 톤 (사람처럼 자연스러운 호흡과 포근한 한국어 억양)
+    pitchKo: 1.02,
+    rateKo: 1.0,
+    pitchEn: 1.02,
+    rateEn: 0.92,
+    geminiVoice: 'Leda',
+    geminiStyleKo:
+      '실제 다정하고 따뜻한 한국인 유치원 선생님처럼 자연스러운 호흡과 미소 섞인 사람 목소리로 부드럽게 말해 주세요',
     chimeNotes: [587.33, 783.99, 1046.5], // D5 - G5 - C6
   },
   tosili: {
-    // 통통 튀고 발랄한 단짝 토실이 톤 (신경망 성우 en-US-AvaMultilingualNeural + 자연 피치)
-    pitchKo: 1.14,
-    rateKo: 1.06,
-    pitchEn: 1.1,
-    rateEn: 0.94,
+    // 밝고 생동감 있는 단짝 토실이 톤
+    pitchKo: 1.04,
+    rateKo: 1.05,
+    pitchEn: 1.04,
+    rateEn: 0.95,
     geminiVoice: 'Zephyr',
+    geminiStyleKo:
+      '실제 밝고 명랑한 한국인 젊은 여성 친구처럼 자연스럽고 생동감 있는 일상 대화 톤으로 말해 주세요',
     chimeNotes: [659.25, 880.0, 1174.66], // E5 - A5 - D6
   },
   toddungi: {
-    // 귀염둥이 느긋하고 포근한 막내 토뚱이 톤 (신경망 성우 ko-KR-InJoonNeural + 자연 피치)
-    pitchKo: 0.96,
-    rateKo: 0.94,
-    pitchEn: 0.96,
-    rateEn: 0.88,
+    // 포근하고 귀여운 막내 토뚱이 톤
+    pitchKo: 0.98,
+    rateKo: 0.96,
+    pitchEn: 0.98,
+    rateEn: 0.9,
     geminiVoice: 'Puck',
+    geminiStyleKo:
+      '실제 포근하고 다정한 한국인 동화 구연가처럼 친근하고 따뜻한 사람 목소리로 말해 주세요',
     chimeNotes: [523.25, 659.25, 783.99], // C5 - E5 - G5
   },
   tobyeori: {
-    // 맑고 고운 동화 요정 토별이 톤 (신경망 성우 en-US-EmmaMultilingualNeural + 자연 피치)
-    pitchKo: 1.1,
+    // 맑고 고운 동화 요정 토별이 톤
+    pitchKo: 1.01,
     rateKo: 0.97,
-    pitchEn: 1.08,
-    rateEn: 0.9,
+    pitchEn: 1.02,
+    rateEn: 0.91,
     geminiVoice: 'Aoede',
+    geminiStyleKo:
+      '실제 차분하고 고운 목소리의 한국인 성우가 아이에게 옛날이야기를 들려주듯 자연스럽게 말해 주세요',
     chimeNotes: [698.46, 880.0, 1318.51], // F5 - A5 - E6
   },
   togureum: {
-    // 씩씩하고 명랑한 소년 대장 토구름 톤 (신경망 성우 ko-KR-HyunsuMultilingualNeural + 자연 피치)
-    pitchKo: 1.02,
-    rateKo: 1.04,
+    // 씩씩하고 명랑한 소년 대장 토구름 톤
+    pitchKo: 1.0,
+    rateKo: 1.03,
     pitchEn: 1.0,
-    rateEn: 0.92,
+    rateEn: 0.93,
     geminiVoice: 'Fenrir',
+    geminiStyleKo:
+      '실제 유쾌하고 다정한 한국인 삼촌이나 형처럼 밝고 자연스러운 사람 목소리로 말해 주세요',
     chimeNotes: [493.88, 659.25, 987.77], // B4 - E5 - B5
   },
   assistant: {
     pitchKo: 1.0,
     rateKo: 1.0,
     pitchEn: 1.0,
-    rateEn: 0.92,
+    rateEn: 0.93,
     geminiVoice: 'Kore',
+    geminiStyleKo: '실제 친절하고 차분한 한국인 안내원처럼 자연스러운 사람 억양으로 읽어 주세요',
     chimeNotes: [523.25, 783.99],
   },
 };
@@ -136,8 +149,13 @@ function getAudioContext(): AudioContext | null {
  */
 function sanitizeTextForSpeech(raw: string): string {
   return raw
+    .replace(
+      /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]+/gu,
+      ''
+    )
     .replace(/[*_#`]/g, '')
-    .replace(/~+/g, ', ')
+    .replace(/~+/g, '')
+    .replace(/\s+([!?.,])/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -300,9 +318,12 @@ async function playAudioDataUrl(url: string, speechToken: number): Promise<boole
   });
 }
 
+const GEMINI_AUDIO_LRU = new Map<string, string>();
+const MAX_GEMINI_AUDIO_LRU = 40;
+
 /**
- * Tier 1: Optional Client-Side Gemini 2.5 Flash TTS when user saved a Gemini API Key in Settings.
- * Gives ultra-expressive neural character voices per bunny (`Kore`, `Zephyr`, `Puck`, `Aoede`, `Fenrir`).
+ * Tier 1: Client-Side Gemini 2.5 Native Audio TTS when user saved a Gemini API Key in Settings.
+ * Uses natural Korean human acting direction + studio prebuilt voices (`Leda`, `Zephyr`, `Puck`, `Aoede`, `Fenrir`).
  */
 async function trySpeakWithClientGeminiKey(
   text: string,
@@ -313,12 +334,24 @@ async function trySpeakWithClientGeminiKey(
   const apiKey = getSavedGeminiApiKey();
   if (!apiKey) return false;
 
+  const profile = SPEAKER_PROFILES[speaker] ?? SPEAKER_PROFILES.assistant;
+  const cacheKey = `${profile.geminiVoice}|${lang}|${text.slice(0, 420)}`;
+  const cachedBase64 = GEMINI_AUDIO_LRU.get(cacheKey);
+  if (cachedBase64) {
+    const wavUrl = wrapPcmBase64AsWavUrl(cachedBase64, 24000);
+    return await playAudioDataUrl(wavUrl, speechToken);
+  }
+
   try {
-    const profile = SPEAKER_PROFILES[speaker] ?? SPEAKER_PROFILES.assistant;
     const ai = new GoogleGenAI({ apiKey });
+    const promptText =
+      lang === 'en-US'
+        ? `Speak naturally and warmly like a friendly real human teacher talking to a young child: "${text.slice(0, 420)}"`
+        : `${profile.geminiStyleKo} (기계적인 낭독 투 없이 실제 사람이 대화하듯 아래 대사만 자연스럽게 발화하세요): "${text.slice(0, 420)}"`;
+
     const res = await ai.models.generateContent({
       model: 'gemini-2.5-flash-preview-tts',
-      contents: [{ parts: [{ text: text.slice(0, 420) }] }],
+      contents: [{ parts: [{ text: promptText }] }],
       config: {
         responseModalities: ['AUDIO'],
         speechConfig: {
@@ -335,13 +368,17 @@ async function trySpeakWithClientGeminiKey(
 
     const inline = res.candidates?.[0]?.content?.parts?.[0]?.inlineData;
     if (inline?.data) {
+      if (GEMINI_AUDIO_LRU.size >= MAX_GEMINI_AUDIO_LRU) {
+        const firstKey = GEMINI_AUDIO_LRU.keys().next().value;
+        if (firstKey) GEMINI_AUDIO_LRU.delete(firstKey);
+      }
+      GEMINI_AUDIO_LRU.set(cacheKey, inline.data);
       const wavUrl = wrapPcmBase64AsWavUrl(inline.data, 24000);
       return await playAudioDataUrl(wavUrl, speechToken);
     }
   } catch {
-    // Fall back immediately to Native Android TTS or Browser TTS
+    // Fall back immediately to Supertonic / Native Android Neural TTS
   }
-  void lang;
   return false;
 }
 
@@ -560,7 +597,21 @@ async function runUnifiedSpeechPipeline(
   onSpeakingChange?.(true);
 
   try {
-    // 1) Optional remote backend server `/api/gemini/tts` (fast no-op when standalone)
+    // 1) GitHub Open-Source Supertone Supertonic-2 On-Device Korean Human Voice Engine (when enabled & loaded)
+    try {
+      const supertonicUrl = await trySynthesizeSupertonicWavUrl(cleanedText, speaker, lang);
+      if (myToken !== currentSpeechToken) return;
+      if (supertonicUrl) {
+        const played = await playAudioDataUrl(supertonicUrl, myToken);
+        if (played) return;
+      }
+    } catch {
+      // Continue to Gemini / Native Neural engines
+    }
+
+    if (myToken !== currentSpeechToken) return;
+
+    // 2) Optional remote backend server `/api/gemini/tts` (fast no-op when standalone)
     try {
       const res = await tryBackendJson<{
         audioBase64?: string;
@@ -591,15 +642,15 @@ async function runUnifiedSpeechPipeline(
 
     if (myToken !== currentSpeechToken) return;
 
-    // 2) Optional client-side Gemini neural TTS if user registered a Gemini API Key
+    // 3) Optional client-side Gemini 2.5 Studio Human Acting TTS if user registered a Gemini API Key
     const geminiPlayed = await trySpeakWithClientGeminiKey(cleanedText, speaker, lang, myToken);
     if (geminiPlayed || myToken !== currentSpeechToken) return;
 
-    // 3) Primary Android APK Native TextToSpeech Bridge (100% offline-capable, distinct pitch/rate per bunny!)
+    // 4) Primary Android APK Zero-Key Native Korean Neural TTS Bridge (`EdgeNeuralTtsClient` + fixed MediaPlayer)
     const androidPlayed = await speakWithAndroidNativeBridge(cleanedText, speaker, lang, myToken);
     if (androidPlayed || myToken !== currentSpeechToken) return;
 
-    // 4) Desktop / Web Browser speechSynthesis
+    // 5) Desktop / Web Browser speechSynthesis
     const browserPlayed = await speakWithBrowserSpeechSynthesis(
       cleanedText,
       speaker,
@@ -608,7 +659,7 @@ async function runUnifiedSpeechPipeline(
     );
     if (browserPlayed || myToken !== currentSpeechToken) return;
 
-    // 5) Last-resort stream fallback
+    // 6) Last-resort stream fallback
     await speakWithCloudStreamFallback(cleanedText, speaker, lang, myToken);
   } finally {
     if (myToken === currentSpeechToken) {

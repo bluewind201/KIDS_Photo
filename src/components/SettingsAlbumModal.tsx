@@ -36,7 +36,14 @@ import { PROVIDER_LABELS, SAMPLE_PHOTO_POOL } from '../data/initialAlbums';
 import { TOY_LABELS, VOICE_SPEAKER_LABELS } from '../data/initialCharacters';
 import { speakText } from '../utils/speech';
 import {
-  analyzePhotoUnified,
+  getSupertonicStatus,
+  getSupertonicVoiceDescription,
+  initializeSupertonicEngine,
+  setSupertonicEnabled,
+  subscribeSupertonicStatus,
+  SupertonicEngineStatus,
+} from '../utils/supertonicTts';
+import {
   browseCloudDemoOrRemoteUnified,
   connectSynologyDsmUnified,
   fetchCloudProviderFolderPhotos,
@@ -61,6 +68,7 @@ import {
   FrameTransitionMode,
   LayoutSide,
   MartTickerItem,
+  PhotoAnalysisProgress,
   PhotoItem,
   PowerScheduleConfig,
   RemoteFolderItem,
@@ -86,6 +94,9 @@ interface SettingsAlbumModalProps {
   ttsEnabled: boolean;
   currentCity: string;
   martItems: MartTickerItem[];
+  photoAnalysisProgress?: PhotoAnalysisProgress | null;
+  onReanalyzePhotos?: () => void;
+  onRefreshAlbumUrls?: (albumId: string) => Promise<boolean>;
   onClose: () => void;
   onAddAlbum: (album: DigitalAlbum) => void;
   onToggleAlbum: (albumId: string) => void;
@@ -140,6 +151,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   ttsEnabled,
   currentCity,
   martItems,
+  photoAnalysisProgress,
+  onReanalyzePhotos,
+  onRefreshAlbumUrls,
   onClose,
   onAddAlbum,
   onToggleAlbum,
@@ -205,6 +219,15 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   // Digital Albums Tab State
   const [confirmDeleteAlbumId, setConfirmDeleteAlbumId] = useState<string | null>(null);
   const [albumThumbBlobs, setAlbumThumbBlobs] = useState<Record<string, string>>({});
+  const [refreshingAlbumId, setRefreshingAlbumId] = useState<string | null>(null);
+
+  // GitHub Open-Source Supertone Supertonic-2 Human Voice Engine State
+  const [supertonicState, setSupertonicState] = useState<SupertonicEngineStatus>(() =>
+    getSupertonicStatus()
+  );
+  useEffect(() => {
+    return subscribeSupertonicStatus(setSupertonicState);
+  }, []);
 
   useEffect(() => {
     if (activeTab !== 'albums') return;
@@ -218,7 +241,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         const m = p.src.match(/passphrase=([^&]+)/i);
         if (m?.[1]) headers = { 'X-SYNO-SHARING': decodeURIComponent(m[1]) };
       }
-      fetchImageViaNativeHttp(urls, headers)
+      fetchImageViaNativeHttp(urls, headers, album.sharePassword)
         .then((blob) => {
           if (blob) setAlbumThumbBlobs((prev) => ({ ...prev, [album.id]: blob }));
         })
@@ -293,19 +316,25 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         albumName: resolved.albumTitle,
       }));
 
+      const savedSharePass = shareLinkPassword.trim() || undefined;
+
       onAddAlbum({
         id: finalAlbumId,
         name: resolved.albumTitle,
         provider: resolved.provider,
         folderPath: resolved.resolvedUrl,
+        sharePassword: savedSharePass,
         enabled: true,
         createdAt: new Date().toISOString().slice(0, 10),
         photos: realPhotos,
       });
 
+      const hasGemini = Boolean(getSavedGeminiApiKey()) || Boolean(photoAnalysisProgress?.geminiConnected);
       setConnectorStatus({
         type: 'success',
-        msg: `🎉 "${resolved.albumTitle}"에서 실제 사진 ${realPhotos.length}장을 불러와 메인 액자에 즉시 반영했습니다! (기존 기본 샘플 앨범은 자동 숨김 처리됨)`,
+        msg: hasGemini
+          ? `🎉 "${resolved.albumTitle}"에서 실제 사진 ${realPhotos.length}장을 불러왔습니다! 이어서 Gemini AI가 수집한 사진이 어떤 사진인지 자동으로 분석을 시작합니다.`
+          : `🎉 "${resolved.albumTitle}"에서 실제 사진 ${realPhotos.length}장을 불러와 메인 액자에 즉시 반영했습니다! ([AI 호출 명령어 · 음성] 탭에 Gemini API 키를 연결하면 사진 내용도 자동 분석합니다)`,
       });
       setShareLinkUrl('');
       setShareLinkAlbumTitle('');
@@ -607,28 +636,10 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         day: 'numeric',
       });
 
-      let title = file.name.replace(/\.[^.]+$/, '');
-      let location = '가족 추억 장소';
-      let aiSummary = `${fileDate}에 촬영된 소중한 가족 사진입니다.`;
-      let tags = ['가족사진', '추억', folderTitle];
-
-      if (i < 4) {
-        try {
-          const meta = await analyzePhotoUnified({
-            base64Data: dataUrl,
-            mimeType: file.type || 'image/jpeg',
-            fileName: file.name,
-          });
-          if (meta) {
-            if (meta.title) title = meta.title;
-            if (meta.location) location = meta.location;
-            if (meta.aiSummary) aiSummary = meta.aiSummary;
-            if (Array.isArray(meta.tags) && meta.tags.length > 0) tags = meta.tags;
-          }
-        } catch {
-          // Keep default metadata
-        }
-      }
+      const title = file.name.replace(/\.[^.]+$/, '');
+      const location = '가족 추억 장소';
+      const aiSummary = `${fileDate}에 촬영된 소중한 가족 사진입니다.`;
+      const tags = ['가족사진', '추억', folderTitle];
 
       newPhotos.push({
         id: `${albumId}-local-${i}`,
@@ -641,6 +652,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         location,
         tags,
         aiSummary,
+        aiAnalyzed: false,
       });
     }
 
@@ -654,10 +666,13 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
       photos: newPhotos,
     });
 
+    const hasGemini = Boolean(getSavedGeminiApiKey()) || Boolean(photoAnalysisProgress?.geminiConnected);
     setIsAnalyzingLocal(false);
     setConnectorStatus({
       type: 'success',
-      msg: `"${folderTitle}" 폴더(${newPhotos.length}장)가 디지털 앨범으로 추가되었습니다!`,
+      msg: hasGemini
+        ? `🎉 "${folderTitle}" 폴더(${newPhotos.length}장)가 추가되었습니다! Gemini AI가 백그라운드에서 수집한 사진을 한 장씩 분석 중입니다.`
+        : `"${folderTitle}" 폴더(${newPhotos.length}장)가 디지털 앨범으로 추가되었습니다!`,
     });
   };
 
@@ -802,6 +817,109 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     'rounded-xl bg-[#F5F6F8] border border-zinc-200 px-3.5 py-2 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none focus:border-[#141519]';
 
   const enabledCharCount = characters.filter((c) => c.enabled).length;
+
+  const userAlbums = albums.filter(
+    (a) =>
+      a.id !== 'album-gdrive-family-2026' &&
+      a.id !== 'album-synology-camping-winter' &&
+      !a.id.startsWith('album-sample-')
+  );
+  const totalUserPhotosCount = userAlbums.reduce((sum, a) => sum + a.photos.length, 0);
+  const analyzedUserPhotosCount = userAlbums.reduce(
+    (sum, a) => sum + a.photos.filter((p) => p.aiAnalyzed).length,
+    0
+  );
+  const isGeminiConnectedNow =
+    Boolean(photoAnalysisProgress?.geminiConnected) || getSavedGeminiApiKey().length > 8;
+
+  const renderGeminiAnalysisCard = () => {
+    if (photoAnalysisProgress?.active) {
+      const pct = Math.max(
+        6,
+        Math.min(
+          100,
+          Math.round((photoAnalysisProgress.done / Math.max(1, photoAnalysisProgress.total)) * 100)
+        )
+      );
+      return (
+        <div className="rounded-2xl bg-gradient-to-r from-indigo-950 via-[#191B24] to-indigo-950 border border-indigo-400/30 p-4 text-white space-y-2 shadow-sm">
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-300">
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              Gemini AI 연결됨 · 수집한 사진을 분석하고 있어요!
+            </span>
+            <span className="font-mono text-xs text-indigo-200">
+              {photoAnalysisProgress.done} / {photoAnalysisProgress.total}장 ({pct}%)
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-300 truncate">
+            {photoAnalysisProgress.currentPhotoTitle
+              ? `현재 분석 중: "${photoAnalysisProgress.currentPhotoTitle}" — 사진 속 장소·인물·계절을 읽어 제목과 추억 설명을 만드는 중`
+              : '수집한 사진이 어떤 사진인지 살펴보고 있어요...'}
+          </p>
+          <div className="h-2 w-full rounded-full bg-white/15 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-indigo-400 via-purple-400 to-amber-300 transition-all duration-300"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      );
+    }
+
+    if (isGeminiConnectedNow) {
+      return (
+        <div className="rounded-2xl bg-indigo-50/70 border border-indigo-200/80 p-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 space-y-0.5">
+            <div className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span>
+                Gemini AI 사진 비전 분석 연결됨 · 내 사진 {analyzedUserPhotosCount} /{' '}
+                {totalUserPhotosCount}장 분석 완료
+              </span>
+            </div>
+            <p className="text-[11px] text-indigo-900/75">
+              새 사진을 등록하면 Gemini가 어떤 사진인지 자동 분석하여 파일명 대신 따뜻한 제목과 추억 설명을 붙여줍니다.
+            </p>
+          </div>
+          {totalUserPhotosCount > 0 && onReanalyzePhotos && (
+            <button
+              type="button"
+              onClick={onReanalyzePhotos}
+              className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 px-3.5 py-1.5 text-xs font-semibold text-white shrink-0 transition-colors"
+            >
+              <RefreshCw className="w-3 h-3" />
+              사진 AI 분석 다시 실행
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className="rounded-2xl bg-amber-50/80 border border-amber-200/80 p-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span>수집한 사진이 어떤 사진인지 Gemini AI로 자동 분석해 보세요 (선택)</span>
+          </div>
+          <p className="text-[11px] text-amber-900/80">
+            무료 Gemini API 키를 연결하면 시놀로지·구글·원드라이브·갤러리 사진을 자동 분석하여 파일명 대신 예쁜 제목과 장소·추억 대화를 생성합니다.
+          </p>
+        </div>
+        {activeTab !== 'voice' && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('voice')}
+            className="rounded-full bg-[#141519] hover:bg-zinc-800 px-3.5 py-1.5 text-xs font-semibold text-white shrink-0"
+          >
+            Gemini 연결 설정
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1679,6 +1797,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           {/* TAB 1: Cloud & Synology Folder Connectors */}
           {activeTab === 'cloud' && (
             <div className="space-y-5">
+              {renderGeminiAnalysisCard()}
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
                 {(
                   [
@@ -2349,6 +2468,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           {/* TAB 2: Registered Digital Albums */}
           {activeTab === 'albums' && (
             <div className="space-y-5">
+              {renderGeminiAnalysisCard()}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-4">
                 <div>
                   <label className="block text-xs font-bold text-[#141519] mb-2">
@@ -2435,6 +2555,25 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
+                      {/^https?:\/\//i.test(album.folderPath) && onRefreshAlbumUrls && (
+                        <button
+                          type="button"
+                          disabled={refreshingAlbumId === album.id}
+                          onClick={() => {
+                            setRefreshingAlbumId(album.id);
+                            onRefreshAlbumUrls(album.id).finally(() => setRefreshingAlbumId(null));
+                          }}
+                          title="공유 링크 사진 세션/주소 새로고침"
+                          className="inline-flex items-center gap-1 rounded-full bg-white hover:bg-zinc-100 border border-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-700 transition-colors whitespace-nowrap"
+                        >
+                          <RefreshCw
+                            className={`w-3 h-3 ${
+                              refreshingAlbumId === album.id ? 'animate-spin text-indigo-600' : ''
+                            }`}
+                          />
+                          <span>동기화</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onToggleAlbum(album.id)}
@@ -2533,14 +2672,14 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (자연 신경망 성우 TTS & 효과음)</h3>
+                <h3 className="text-sm font-bold text-[#141519]">음성 소리 출력 (사람 목소리 AI 성우 TTS & 효과음)</h3>
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5 pr-3">
                     <span className="block text-xs font-semibold text-zinc-700">
-                      AI 브리핑 및 5종 토끼 캐릭터 자연 신경망 목소리 출력
+                      AI 브리핑 및 5종 토끼 캐릭터 자연스러운 한국인 사람 목소리 출력
                     </span>
                     <span className="block text-[11px] text-zinc-500">
-                      별도 API 키 없이 실제 성우처럼 자연스러운 한국어·영어 신경망 음성이 기본 적용되며, 오프라인 상태에서는 기기 내장 음성으로 자동 전환됩니다.
+                      기계적인 피치 변조를 제거하고 실제 한국어 성우 호흡(SunHi / Hyunsu / InJoon + Gemini Studio + Supertone 오픈소스 엔진)으로 자연스럽게 말합니다.
                     </span>
                   </div>
                   <button
@@ -2554,6 +2693,141 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* GitHub Open-Source Human-Like Korean TTS Engine (`Supertone/Supertonic-2`) */}
+              <div className="rounded-2xl bg-gradient-to-br from-indigo-50/90 via-white to-emerald-50/60 border border-indigo-200/80 p-5 space-y-3.5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 max-w-xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Volume2 className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <h3 className="text-sm font-bold text-[#141519]">
+                        GitHub 오픈소스 사람 음성 엔진 (Supertone Supertonic-2 한국어 AI 보이스)
+                      </h3>
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                          supertonicState.ready && supertonicState.enabled
+                            ? 'bg-emerald-600 text-white'
+                            : supertonicState.loading
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-zinc-200 text-zinc-700'
+                        }`}
+                      >
+                        {supertonicState.ready && supertonicState.enabled
+                          ? '활성화됨 · 실제 사람 음성'
+                          : supertonicState.loading
+                          ? `다운로드 중 ${supertonicState.progressPct}%`
+                          : supertonicState.cachedOnDisk
+                          ? '다운로드 완료 (대기중)'
+                          : '선택 설치 가능'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-zinc-600 leading-relaxed">
+                      한국 대표 음성 AI 기업 <strong>Supertone</strong>의 GitHub 오픈소스(
+                      <code>supertone-inc/supertonic</code>) 온디바이스 한국어 사람 음성 모델입니다. API 키 없이 5종 토끼가 각기 다른 실제 한국인 성우 음색(
+                      <code>F1~F5, M1</code>)으로 사람처럼 자연스럽게 대화하며, 1회 다운로드 후 오프라인에서도 영구 동작합니다.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {!supertonicState.ready ? (
+                      <button
+                        type="button"
+                        disabled={supertonicState.loading}
+                        onClick={() => {
+                          setSupertonicEnabled(true);
+                          void initializeSupertonicEngine();
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 px-4 py-2 text-xs font-bold text-white shadow-sm transition-colors"
+                      >
+                        {supertonicState.loading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5" />
+                        )}
+                        {supertonicState.loading
+                          ? '사람 음성 엔진 준비 중...'
+                          : supertonicState.cachedOnDisk
+                          ? '오픈소스 사람 음성 켜기'
+                          : '사람 음성 엔진 다운로드 · 연결'}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setSupertonicEnabled(!supertonicState.enabled)}
+                        className={`rounded-full px-4 py-2 text-xs font-bold transition-colors ${
+                          supertonicState.enabled
+                            ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                            : 'bg-zinc-200 text-zinc-700 hover:bg-zinc-300'
+                        }`}
+                      >
+                        {supertonicState.enabled ? '오픈소스 사람 음성 사용 중' : '사용 안 함'}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!ttsEnabled) onChangeTtsEnabled(true);
+                        void speakText(
+                          '안녕! 나는 토순이야. 우리 오늘 같이 예쁜 가족 사진 보면서 재미있게 이야기 나누자!',
+                          'tosuni',
+                          true
+                        );
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-white hover:bg-zinc-100 border border-zinc-300 px-3.5 py-2 text-xs font-semibold text-[#141519]"
+                    >
+                      <Play className="w-3 h-3" />
+                      목소리 테스트
+                    </button>
+                  </div>
+                </div>
+
+                {(supertonicState.loading || supertonicState.ready) && (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex items-center justify-between text-[11px] text-zinc-600">
+                      <span>{supertonicState.stageLabel}</span>
+                      <span className="font-mono font-semibold">{supertonicState.progressPct}%</span>
+                    </div>
+                    <div className="h-2 w-full rounded-full bg-zinc-200 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-indigo-600 to-emerald-500 transition-all duration-300"
+                        style={{ width: `${Math.max(4, supertonicState.progressPct)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {supertonicState.error && (
+                  <p className="text-xs font-medium text-rose-600">
+                    ⚠️ {supertonicState.error} (기본 한국어 신경망 성우 음성은 정상 동작합니다)
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1 text-[11px] text-zinc-600">
+                  {(['tosuni', 'tosili', 'toddungi', 'tobyeori', 'togureum'] as BunnyVoiceSpeaker[]).map(
+                    (sp) => (
+                      <div
+                        key={sp}
+                        className="flex items-center justify-between rounded-xl bg-white/80 border border-zinc-200/70 px-3 py-1.5"
+                      >
+                        <span className="truncate">{getSupertonicVoiceDescription(sp)}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!ttsEnabled) onChangeTtsEnabled(true);
+                            void speakText('우와 반가워! 오늘 기분이 정말 좋아!', sp, true);
+                          }}
+                          className="ml-2 text-indigo-600 hover:text-indigo-800 font-bold shrink-0"
+                        >
+                          들어보기
+                        </button>
+                      </div>
+                    )
+                  )}
+                </div>
+              </div>
+
+              {renderGeminiAnalysisCard()}
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
                 <div className="flex items-center gap-2">

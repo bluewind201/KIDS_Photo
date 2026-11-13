@@ -41,6 +41,8 @@ export interface PhotoItem {
   location: string;
   tags: string[];
   aiSummary: string;
+  /** True once Gemini Vision has analyzed the actual image pixels */
+  aiAnalyzed?: boolean;
 }
 
 export interface DigitalAlbum {
@@ -48,9 +50,21 @@ export interface DigitalAlbum {
   name: string;
   provider: StorageProvider;
   folderPath: string;
+  /** Optional share-link password persisted locally so Synology/Cloud share sessions auto-recover after app updates */
+  sharePassword?: string;
   enabled: boolean;
   createdAt: string;
   photos: PhotoItem[];
+}
+
+export interface PhotoAnalysisProgress {
+  active: boolean;
+  geminiConnected: boolean;
+  done: number;
+  total: number;
+  currentAlbumName?: string;
+  currentPhotoTitle?: string;
+  completedToast?: string;
 }
 
 export interface RemoteFolderItem {
