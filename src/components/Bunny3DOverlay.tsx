@@ -3069,21 +3069,31 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                           style={{ backgroundColor: cfg.accentHex }}
                         />
                         <span className="text-xs font-bold text-[#141519] truncate">
-                          {cfg.name} AI
+                          {cfg.name} 음성대화
                         </span>
                         <button
                           type="button"
                           onClick={() => onReplayBunnyVoice(cfg.id)}
-                          title="목소리 다시 듣기"
-                          className="inline-flex items-center gap-0.5 rounded-full bg-zinc-100 hover:bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold text-zinc-700 whitespace-nowrap shrink-0"
+                          title={`${cfg.name} 목소리 다시 듣기`}
+                          className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                            b.isSpeaking
+                              ? 'bg-emerald-500 text-white'
+                              : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
+                          }`}
                         >
                           <Volume2 className="w-3 h-3" />
-                          {b.isSpeaking ? '말하는 중' : '소리'}
+                          {b.isSpeaking ? `${cfg.name} 말하는 중` : '다시 듣기'}
                         </button>
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {!b.isThinking && !b.isSpeaking && (
+                        {!b.isThinking && !b.isSpeaking && isVoiceListening && (
+                          <span className="inline-flex items-center gap-0.5 rounded-full bg-rose-50 border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 whitespace-nowrap">
+                            <Mic className="w-2.5 h-2.5" />
+                            듣는 중
+                          </span>
+                        )}
+                        {!b.isThinking && !b.isSpeaking && !isVoiceListening && (
                           <span className="text-[10px] font-medium text-zinc-400 tabular-nums whitespace-nowrap">
                             대기 {chatWaitSeconds}초
                           </span>
@@ -3098,6 +3108,39 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
                         </button>
                       </div>
                     </div>
+
+                    {/* Quick Bunny Switcher inside Chat Bubble so user can switch designated bunny anytime */}
+                    {characters.length > 1 && (
+                      <div className="mt-1.5 flex items-center gap-1 overflow-x-auto pb-1 border-b border-zinc-100">
+                        <span className="text-[9px] font-semibold text-zinc-400 shrink-0 mr-0.5">
+                          대화 상대:
+                        </span>
+                        {characters.map((otherCfg) => {
+                          const selected = otherCfg.id === cfg.id;
+                          return (
+                            <button
+                              key={otherCfg.id}
+                              type="button"
+                              onClick={() => {
+                                if (!selected) onSummonBunny(otherCfg.id);
+                              }}
+                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 transition-colors ${
+                                selected
+                                  ? 'bg-[#141519] text-white'
+                                  : 'bg-[#F4F5F7] hover:bg-zinc-200 text-zinc-600'
+                              }`}
+                              title={`${otherCfg.name} 지명하여 ${otherCfg.name} 목소리로 대화하기`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ backgroundColor: otherCfg.accentHex }}
+                              />
+                              {otherCfg.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
 
                     {/* Multi-Turn Gemini Chat Scrollable Message Thread */}
                     <div
@@ -3253,41 +3296,56 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
         );
       })}
 
-      {/* Compact Call Bar Above the 30% Smaller Fairytale 3D Cottage Roof */}
-      {enabledCharacters.length > 0 && (
+      {/* Bunny Designation & Voice Conversation Bar Above the Fairytale 3D Cottage Roof */}
+      {characters.length > 0 && (
         <div
           ref={houseTagDomRef}
           data-bunny-ui="true"
           style={{ left: 0, top: 0 }}
           className="pointer-events-auto absolute z-30 will-change-transform"
         >
-          <div className="flex items-center gap-1 rounded-full bg-[#141519] text-white px-2 py-0.5 shadow-lg border border-white/10">
-            {enabledCharacters.map((cfg) => {
-              const st = bunnies[cfg.id]?.status ?? 'IN_HOUSE';
-              const isInside = st === 'IN_HOUSE';
-              const isTalking = st === 'CHATTING' && activeChatBunny === cfg.id;
-              return (
-                <button
-                  key={cfg.id}
-                  type="button"
-                  onClick={() => onSummonBunny(cfg.id)}
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold transition-colors whitespace-nowrap ${
-                    isTalking
-                      ? 'bg-white text-[#141519]'
-                      : isInside
-                      ? 'text-zinc-200 hover:bg-white/15'
-                      : 'text-emerald-300 hover:bg-white/15'
-                  }`}
-                  title={
-                    isInside
-                      ? `${cfg.name} 집에서 부르기`
-                      : `${cfg.name}에게 말 걸기 (밖에서 노는 중)`
-                  }
-                >
-                  {cfg.callWord}!
-                </button>
-              );
-            })}
+          <div className="flex flex-col items-center gap-1">
+            <div className="flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-[#141519]/95 backdrop-blur-md text-white px-2.5 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.32)] border border-white/15">
+              <span className="text-[10px] font-bold text-amber-300 px-1 whitespace-nowrap">
+                🐰 토끼 지명 대화
+              </span>
+              {(enabledCharacters.length > 0 ? enabledCharacters : characters.slice(0, 3)).map(
+                (cfg) => {
+                  const st = bunnies[cfg.id]?.status ?? 'IN_HOUSE';
+                  const isInside = st === 'IN_HOUSE';
+                  const isTalking = st === 'CHATTING' && activeChatBunny === cfg.id;
+                  const isSpeakingNow = Boolean(bunnies[cfg.id]?.isSpeaking);
+                  return (
+                    <button
+                      key={cfg.id}
+                      type="button"
+                      onClick={() => onSummonBunny(cfg.id)}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all whitespace-nowrap ${
+                        isTalking
+                          ? 'bg-white text-[#141519] shadow-sm scale-105'
+                          : isInside
+                          ? 'bg-white/10 text-zinc-100 hover:bg-white/25'
+                          : 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/35'
+                      }`}
+                      title={`${cfg.name} 지명하고 ${cfg.name} 목소리로 대화하기`}
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: cfg.accentHex }}
+                      />
+                      <span>{cfg.name}</span>
+                      {isTalking && (
+                        <Volume2
+                          className={`w-3 h-3 shrink-0 ${
+                            isSpeakingNow ? 'text-emerald-600 animate-pulse' : 'text-rose-500'
+                          }`}
+                        />
+                      )}
+                    </button>
+                  );
+                }
+              )}
+            </div>
           </div>
         </div>
       )}

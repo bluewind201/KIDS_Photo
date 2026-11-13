@@ -109,7 +109,7 @@ export interface MartTickerItem {
 
 export type BunnyId = string;
 
-export type BunnyVoiceSpeaker = 'tosuni' | 'tosili' | 'toddungi';
+export type BunnyVoiceSpeaker = 'tosuni' | 'tosili' | 'toddungi' | 'tobyeori' | 'togureum';
 
 export type BunnyAccessoryType = 'ribbon' | 'clover' | 'backpack' | 'star' | 'scarf';
 

@@ -845,7 +845,7 @@ function ensureWavBase64(base64Data: string, sampleRate = 24000): string {
 app.post('/api/gemini/tts', async (req, res) => {
   const { text, speaker = 'assistant', lang = 'ko' } = req.body as {
     text?: string;
-    speaker?: 'assistant' | 'tosuni' | 'tosili' | 'toddungi';
+    speaker?: 'assistant' | 'tosuni' | 'tosili' | 'toddungi' | 'tobyeori' | 'togureum';
     lang?: 'ko' | 'en';
   };
   if (!text || !text.trim()) {
@@ -870,6 +870,16 @@ app.post('/api/gemini/tts', async (req, res) => {
       voiceName: 'Puck',
       style: 'Cute, bubbly, cheerful little bunny speaking warmly in Korean to a young child',
       enStyle: 'Cute, friendly, slow and clear English pronunciation for young children',
+    },
+    tobyeori: {
+      voiceName: 'Aoede',
+      style: 'Sweet, fairytale-like, crystal-clear gentle Korean voice speaking affectionately to a young child',
+      enStyle: 'Sweet, musical, crystal-clear English pronunciation spoken slowly for young children',
+    },
+    togureum: {
+      voiceName: 'Fenrir',
+      style: 'Brave, cheerful, friendly little boy bunny speaking energetically in Korean to a young child',
+      enStyle: 'Brave, cheerful, clear English pronunciation for young children',
     },
     assistant: {
       voiceName: 'Kore',

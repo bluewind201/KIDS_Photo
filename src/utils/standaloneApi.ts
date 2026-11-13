@@ -641,11 +641,49 @@ ${photoCatalogText}
     };
   }
 
+  // Character-specific speech style so each designated bunny talks in its own distinct personality even offline!
+  const styleByBunny: Record<string, { lead: string; greetReply: string }> = {
+    tosuni: {
+      lead: '우와아~ 다정한 토순이가 잘 들었어!',
+      greetReply: '안녕~! 토순이랑 도란도란 재미있는 이야기 나누자! 오늘 기분이 어때?',
+    },
+    tosili: {
+      lead: '폴짝폴짝! 신나는 토실이 귀가 쫑긋했어!',
+      greetReply: '야호~! 토실이 여기 있지! 우리 오늘 무슨 신나는 놀이 이야기 할까?',
+    },
+    toddungi: {
+      lead: '헤헤~ 귀염둥이 막내 토뚱이도 완전 신나!',
+      greetReply: '히히 안녕~! 토뚱이는 맛있는 간식이랑 놀이 이야기 제일 좋아해! 뭐 하고 놀까?',
+    },
+    tobyeori: {
+      lead: '반짝반짝~ 별빛 요정 토별이가 귀 기울여 들었어!',
+      greetReply: '반짝반짝 안녕~! 토별이랑 동화 나라처럼 예쁜 이야기 해볼까?',
+    },
+    togureum: {
+      lead: '몽글몽글~ 씩씩한 토구름 대장이 출동했지!',
+      greetReply: '씩씩하게 안녕~! 토구름이랑 오늘 있었던 재미난 모험 이야기 해보자!',
+    },
+  };
+  const charStyle = styleByBunny[params.bunnyId] ?? {
+    lead: `우와~ ${name}가 귀를 쫑긋하고 들었어!`,
+    greetReply: `안녕~! ${name}랑 신나게 이야기하자! 오늘 무슨 재미있는 일 있었어?`,
+  };
+
+  if (/^(안녕|하이|반가워|놀자|심심해|뭐\s*해|누구야|이름이\s*뭐야)[!?.~\s]*$/i.test(trimmedMsg)) {
+    return {
+      replyText: charStyle.greetReply,
+      isPhotoMemoryQuery: false,
+      matchedPhotoIds: [],
+      shouldSuggestEnglishReask: false,
+      shouldShowFlashcard: false,
+    };
+  }
+
   // Show a fun stage-appropriate flashcard every 2nd turn
   if (params.userTurnCount >= 2 && params.userTurnCount % 2 === 0) {
     const card = pickRandomFlashcard(undefined, params.childAgeStage);
     return {
-      replyText: `헤헤 맞아맞아! ${name}랑 이야기하니까 정말 신난다~! 짜잔! 우리 "${card.koreanWord}"를 영어로 어떻게 말하는지 큰 그림카드로 같이 해볼까?`,
+      replyText: `${charStyle.lead} ${name}랑 이야기하니까 정말 즐거워! 짜잔, 우리 "${card.koreanWord}"를 영어로 어떻게 말하는지 큰 그림카드로 같이 해볼까?`,
       isPhotoMemoryQuery: false,
       matchedPhotoIds: [],
       shouldSuggestEnglishReask: false,
@@ -668,13 +706,13 @@ ${photoCatalogText}
       : { en: 'I am so happy!', ko: '아이 엠 쏘 해피!' };
 
   return {
-    replyText: `우와~ 그랬구나! ${name}도 너랑 이야기하니까 귀가 쫑긋쫑긋 신나!`,
+    replyText: `${charStyle.lead} 너랑 목소리로 대화하니까 ${name} 마음이 포근포근 정말 행복해!`,
     isPhotoMemoryQuery: false,
     matchedPhotoIds: [],
     shouldSuggestEnglishReask: true,
     englishPhrase: phrases.en,
     koreanPhonetic: phrases.ko,
-    englishNudgeText: `마이크에 대고 신나게 영어로 "${phrases.ko}" (${phrases.en}) 하고 말해볼래?`,
+    englishNudgeText: `마이크에 대고 신나게 영어로 "${phrases.ko}" 하고 말해볼래?`,
     shouldShowFlashcard: false,
   };
 }

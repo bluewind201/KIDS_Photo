@@ -39,7 +39,9 @@ import {
   WeatherPayload,
 } from './types';
 import {
+  getAndroidSpeechBridge,
   installGlobalAudioUnlock,
+  isAnyTtsSpeaking,
   playBunnyChime,
   speakEnglishPhrase,
   speakText,
@@ -508,7 +510,17 @@ export default function App() {
         setPowerSchedule(saved.powerSchedule);
       }
       if (Array.isArray(saved.characters) && saved.characters.length > 0) {
-        setCharacters(saved.characters);
+        setCharacters(
+          saved.characters.map((c) => {
+            if (c.id === 'tobyeori' && c.voiceSpeaker === 'tosuni') {
+              return { ...c, voiceSpeaker: 'tobyeori' };
+            }
+            if (c.id === 'togureum' && c.voiceSpeaker === 'tosili') {
+              return { ...c, voiceSpeaker: 'togureum' };
+            }
+            return c;
+          })
+        );
       }
       if (saved.locationInfo?.city) setLocationInfo(saved.locationInfo);
       if (Array.isArray(saved.schedules) && saved.schedules.length > 0) setSchedules(saved.schedules);
@@ -1384,22 +1396,28 @@ export default function App() {
         activePhotos.length,
         effectiveWeather
       );
-      playBunnyChime(charCfg.voiceSpeaker, ttsEnabled);
       setBunnies((prev) => ({
         ...prev,
         [bunnyId]: {
           ...(prev[bunnyId] ?? { isSpeaking: false, isThinking: false }),
           status: nextOut.status,
           bubbleText: nextOut.bubbleText,
-          isSpeaking: false,
+          isSpeaking: ttsEnabled,
           isThinking: false,
           photoIndex: nextOut.photoIndex,
           englishCoach: null,
           activeFlashcard: null,
         },
       }));
+      if (ttsEnabled) {
+        speakText(nextOut.bubbleText, charCfg.voiceSpeaker, true, (speaking) =>
+          setBunnySpeakingFlag(bunnyId, speaking)
+        );
+      } else {
+        playBunnyChime(charCfg.voiceSpeaker, true);
+      }
     },
-    [characters, activePhotos.length, effectiveWeather, ttsEnabled]
+    [characters, activePhotos.length, effectiveWeather, setBunnySpeakingFlag, ttsEnabled]
   );
 
   const handleSendCharacterHomeNow = useCallback((bunnyId: BunnyId) => {
@@ -1550,12 +1568,18 @@ export default function App() {
       });
 
       if (!silentGreeting) {
+        if (!ttsEnabled) {
+          setTtsEnabled(true);
+        }
+        showTemporaryToast(
+          `🐰 ${charCfg.name} 지명 완료! ${charCfg.name} 목소리로 대화를 시작해요`
+        );
         speakText(charCfg.greeting, charCfg.voiceSpeaker, true, (speaking) =>
           setBunnySpeakingFlag(bunnyId, speaking)
         );
       }
     },
-    [characters, activePhotos.length, effectiveWeather, setBunnySpeakingFlag]
+    [characters, activePhotos.length, effectiveWeather, setBunnySpeakingFlag, showTemporaryToast, ttsEnabled]
   );
 
   // Quick Weather Reaction Cycle Button on Header so families/kids can test Sun / Rain / Snow (Snowman & Snowball Fight + Rollable Snowball) in 1 click!
@@ -1624,6 +1648,7 @@ export default function App() {
 
   const latestStateRef = useRef({
     wakeWord,
+    characters,
     enabledCharacters,
     activeChatBunny,
     bunnies,
@@ -1641,6 +1666,7 @@ export default function App() {
   useEffect(() => {
     latestStateRef.current = {
       wakeWord,
+      characters,
       enabledCharacters,
       activeChatBunny,
       bunnies,
@@ -1665,14 +1691,29 @@ export default function App() {
       const s = latestStateRef.current;
       const compact = transcript.replace(/\s+/g, '');
 
-      // Wake up screen if sleeping and someone calls wakeWord or a bunny!
+      const getBunnyAliases = (char: BunnyCharacterConfig): string[] => {
+        const cleanCall = char.callWord.replace(/[!?\s]/g, '');
+        const cleanName = char.name.replace(/[!?\s]/g, '');
+        const baseStem = cleanName.replace(/[이아]$/, '');
+        const aliases = [cleanCall, cleanName];
+        if (baseStem.length >= 2) {
+          aliases.push(`${baseStem}아`, `${baseStem}야`, `${baseStem}이`);
+        }
+        // Common Korean STT homophones for kids calling bunnies
+        if (char.id === 'tosuni') aliases.push('토수나', '토수니', '첫째토끼');
+        if (char.id === 'tosili') aliases.push('토시라', '토시리', '둘째토끼');
+        if (char.id === 'toddungi') aliases.push('토뚜아', '토뚱야', '막내토끼');
+        if (char.id === 'tobyeori') aliases.push('토벼라', '토벼리', '별토끼');
+        if (char.id === 'togureum') aliases.push('토구르마', '구름토끼');
+        return Array.from(new Set(aliases.filter((w) => w.length >= 2)));
+      };
+
+      // Wake up screen if sleeping and someone calls wakeWord or ANY bunny!
       if (s.sleepSleeping) {
         const compactWake = s.wakeWord.replace(/\s+/g, '');
-        const calledChar = s.enabledCharacters.some((c) => {
-          const cw = c.callWord.replace(/[!?\s]/g, '');
-          const cn = c.name.replace(/[!?\s]/g, '');
-          return (cw && compact.includes(cw)) || (cn && compact.includes(cn));
-        });
+        const calledChar = s.characters.some((c) =>
+          getBunnyAliases(c).some((alias) => compact.includes(alias))
+        );
         if ((compactWake && compact.includes(compactWake)) || calledChar) {
           s.wakeTemporarilyFor30Min();
         } else {
@@ -1680,20 +1721,24 @@ export default function App() {
         }
       }
 
-      // 1. Check Enabled 3D Character Call Words dynamically
-      for (const char of s.enabledCharacters) {
-        const cleanCall = char.callWord.replace(/[!?\s]/g, '');
-        const cleanName = char.name.replace(/[!?\s]/g, '');
-        if (
-          (cleanCall && compact.includes(cleanCall)) ||
-          (cleanName && compact.includes(cleanName))
-        ) {
-          const escaped = [cleanCall, cleanName]
-            .filter(Boolean)
+      // 1. Check ALL 3D Characters (prioritize enabled, then auto-enable if user calls a resting bunny by name!)
+      const orderedChars = [
+        ...s.characters.filter((c) => c.enabled),
+        ...s.characters.filter((c) => !c.enabled),
+      ];
+      for (const char of orderedChars) {
+        const aliases = getBunnyAliases(char);
+        const matchedAlias = aliases.find((a) => compact.includes(a));
+        if (matchedAlias) {
+          const escaped = aliases
             .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+            .sort((a, b) => b.length - a.length)
             .join('|');
           const pattern = new RegExp(escaped, 'g');
-          const remainder = transcript.replace(pattern, '').replace(/^[,!?\s]+/, '').trim();
+          const remainder = transcript
+            .replace(pattern, '')
+            .replace(/^[,!?.~\s랑하고에게야아]+/, '')
+            .trim();
           if (remainder.length >= 2) {
             s.handleSummonBunny(char.id, true);
             s.handleSendBunnyMessage(char.id, remainder);
@@ -1775,8 +1820,129 @@ export default function App() {
     [showTemporaryToast, ttsEnabled]
   );
 
+  // Native Android SpeechRecognizer + Browser SpeechRecognition Dual Engine
+  // Automatically pauses mic while a bunny speaks (TTS) and resumes listening right after TTS completes!
+  const nativeSttRestartTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const clearRestartTimer = () => {
+      if (nativeSttRestartTimerRef.current !== null) {
+        window.clearTimeout(nativeSttRestartTimerRef.current);
+        nativeSttRestartTimerRef.current = null;
+      }
+    };
+
+    const scheduleNativeListenResume = (delayMs = 320) => {
+      clearRestartTimer();
+      nativeSttRestartTimerRef.current = window.setTimeout(() => {
+        nativeSttRestartTimerRef.current = null;
+        if (!latestStateRef.current.isVoiceListening) return;
+        if (isAnyTtsSpeaking()) return;
+        const bridge = getAndroidSpeechBridge();
+        if (bridge) {
+          try {
+            bridge.startListening('ko-KR');
+          } catch {
+            // Ignore bridge call error
+          }
+        } else if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+          } catch {
+            // Ignore already-running browser recognition
+          }
+        }
+      }, delayMs);
+    };
+
+    const onNativeSttResult = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ transcript?: string; isFinal?: boolean }>).detail;
+      if (detail?.isFinal && detail.transcript?.trim()) {
+        processRecognizedTranscript(detail.transcript);
+      }
+    };
+
+    const onNativeSttState = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ listening?: boolean; status?: string }>).detail;
+      if (!detail) return;
+      if (detail.status === 'not-allowed') {
+        clearRestartTimer();
+        setIsVoiceListening(false);
+        showTemporaryToast('마이크 권한을 허용하면 토끼와 음성으로 대화할 수 있어요.');
+        return;
+      }
+      if (detail.status === 'not-available') {
+        clearRestartTimer();
+        setIsVoiceListening(false);
+        showTemporaryToast('기기에 음성 인식 서비스(Google 음성 서비스)가 설치되어 있지 않아요.');
+        return;
+      }
+      if (!detail.listening && detail.status !== 'stopped') {
+        if (latestStateRef.current.isVoiceListening && !isAnyTtsSpeaking()) {
+          const backoff = detail.status === 'busy' ? 750 : 350;
+          scheduleNativeListenResume(backoff);
+        }
+      }
+    };
+
+    const onTtsActivity = (ev: Event) => {
+      const speaking = Boolean((ev as CustomEvent<{ speaking?: boolean }>).detail?.speaking);
+      if (speaking) {
+        clearRestartTimer();
+        const bridge = getAndroidSpeechBridge();
+        if (bridge) {
+          try {
+            bridge.stopListening();
+          } catch {
+            // Ignore stop error
+          }
+        } else if (recognitionRef.current) {
+          try {
+            recognitionRef.current.stop();
+          } catch {
+            // Ignore browser stop error
+          }
+        }
+      } else if (latestStateRef.current.isVoiceListening) {
+        // Bunny finished speaking! Immediately re-open mic so the child can answer naturally
+        scheduleNativeListenResume(260);
+      }
+    };
+
+    window.addEventListener('nativeSttResult', onNativeSttResult as EventListener);
+    window.addEventListener('nativeSttState', onNativeSttState as EventListener);
+    window.addEventListener('kidsPhotoTtsActive', onTtsActivity as EventListener);
+    return () => {
+      clearRestartTimer();
+      window.removeEventListener('nativeSttResult', onNativeSttResult as EventListener);
+      window.removeEventListener('nativeSttState', onNativeSttState as EventListener);
+      window.removeEventListener('kidsPhotoTtsActive', onTtsActivity as EventListener);
+    };
+  }, [processRecognizedTranscript, showTemporaryToast]);
+
   const startVoiceRecognitionEngine = useCallback(
     (showToastOnStart: boolean) => {
+      // 1) Primary on Android APK: Native Android SpeechRecognizer Bridge
+      const nativeBridge = getAndroidSpeechBridge();
+      if (nativeBridge) {
+        setIsVoiceListening(true);
+        if (!isAnyTtsSpeaking()) {
+          try {
+            nativeBridge.startListening('ko-KR');
+          } catch {
+            // Will auto-retry after TTS or state callback
+          }
+        }
+        if (showToastOnStart) {
+          const callNames = enabledCharacters.map((c) => c.callWord).join('·');
+          showTemporaryToast(
+            `🎙️ 음성 대화 켜짐: "${callNames || '토순아'}" 하고 부르거나 바로 말해 보세요!`
+          );
+        }
+        return;
+      }
+
+      // 2) Web / Desktop Fallback: W3C SpeechRecognition API
       const SpeechRecCtor =
         (
           window as unknown as {
@@ -1808,6 +1974,7 @@ export default function App() {
         rec.interimResults = false;
 
         rec.onresult = (event) => {
+          if (isAnyTtsSpeaking()) return;
           for (let i = event.resultIndex; i < event.results.length; i++) {
             if (event.results[i].isFinal) {
               processRecognizedTranscript(event.results[i][0].transcript);
@@ -1826,7 +1993,7 @@ export default function App() {
         };
 
         rec.onend = () => {
-          if (latestStateRef.current.isVoiceListening) {
+          if (latestStateRef.current.isVoiceListening && !isAnyTtsSpeaking()) {
             try {
               rec.start();
             } catch {
@@ -1835,7 +2002,9 @@ export default function App() {
           }
         };
 
-        rec.start();
+        if (!isAnyTtsSpeaking()) {
+          rec.start();
+        }
         recognitionRef.current = rec;
         setIsVoiceListening(true);
         if (showToastOnStart) {
@@ -1864,6 +2033,18 @@ export default function App() {
   const toggleVoiceListening = useCallback(() => {
     if (isVoiceListening) {
       setIsVoiceListening(false);
+      if (nativeSttRestartTimerRef.current !== null) {
+        window.clearTimeout(nativeSttRestartTimerRef.current);
+        nativeSttRestartTimerRef.current = null;
+      }
+      const nativeBridge = getAndroidSpeechBridge();
+      if (nativeBridge) {
+        try {
+          nativeBridge.stopListening();
+        } catch {
+          // Ignore stop error
+        }
+      }
       recognitionRef.current?.stop();
       recognitionRef.current = null;
       return;

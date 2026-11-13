@@ -1,4 +1,4 @@
-import { BunnyCharacterConfig, BunnyToyType } from '../types';
+import { BunnyCharacterConfig, BunnyToyType, BunnyVoiceSpeaker } from '../types';
 
 export const TOY_LABELS: Record<BunnyToyType, string> = {
   ball: '무지개 통통 공',
@@ -6,6 +6,14 @@ export const TOY_LABELS: Record<BunnyToyType, string> = {
   blocks: '파스텔 나무 블록',
   car: '원목 미니 자동차',
   bubbles: '반짝 비눗방울',
+};
+
+export const VOICE_SPEAKER_LABELS: Record<BunnyVoiceSpeaker, string> = {
+  tosuni: '토순이 목소리 (다정한 첫째 언니 톤)',
+  tosili: '토실이 목소리 (통통 튀는 발랄 하이톤)',
+  toddungi: '토뚱이 목소리 (귀염둥이 느긋한 막내 톤)',
+  tobyeori: '토별이 목소리 (맑고 고운 동화 요정 톤)',
+  togureum: '토구름 목소리 (씩씩하고 명랑한 소년 톤)',
 };
 
 export const INITIAL_CHARACTERS: BunnyCharacterConfig[] = [
@@ -66,7 +74,7 @@ export const INITIAL_CHARACTERS: BunnyCharacterConfig[] = [
     accentHex: '#8B5CF6',
     accessory: 'star',
     favoriteToy: 'bubbles',
-    voiceSpeaker: 'tosuni',
+    voiceSpeaker: 'tobyeori',
     enabled: false,
   },
   {
@@ -81,7 +89,7 @@ export const INITIAL_CHARACTERS: BunnyCharacterConfig[] = [
     accentHex: '#0EA5E9',
     accessory: 'scarf',
     favoriteToy: 'blocks',
-    voiceSpeaker: 'tosili',
+    voiceSpeaker: 'togureum',
     enabled: false,
   },
 ];
