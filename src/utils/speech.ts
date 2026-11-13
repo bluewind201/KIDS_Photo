@@ -1,3 +1,5 @@
+import { tryBackendJson } from './standaloneApi';
+
 let activeAudio: HTMLAudioElement | null = null;
 let sharedAudioCtx: AudioContext | null = null;
 let audioUnlocked = false;
@@ -180,14 +182,18 @@ export async function speakText(
   onSpeakingChange?.(true);
 
   try {
-    const res = await fetch('/api/gemini/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, speaker, lang: 'ko' }),
-    });
+    const res = await tryBackendJson<{ audioBase64?: string; mimeType?: string; fallback?: boolean }>(
+      '/api/gemini/tts',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, speaker, lang: 'ko' }),
+      },
+      4500
+    );
 
     if (res.ok) {
-      const data = (await res.json()) as { audioBase64?: string; mimeType?: string; fallback?: boolean };
+      const data = res.data;
       if (data.audioBase64 && !data.fallback) {
         const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
         activeAudio = audio;
@@ -239,14 +245,18 @@ export async function speakEnglishPhrase(
   onSpeakingChange?.(true);
 
   try {
-    const res = await fetch('/api/gemini/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: englishText, speaker, lang: 'en' }),
-    });
+    const res = await tryBackendJson<{ audioBase64?: string; mimeType?: string; fallback?: boolean }>(
+      '/api/gemini/tts',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: englishText, speaker, lang: 'en' }),
+      },
+      4500
+    );
 
     if (res.ok) {
-      const data = (await res.json()) as { audioBase64?: string; mimeType?: string; fallback?: boolean };
+      const data = res.data;
       if (data.audioBase64 && !data.fallback) {
         const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
         activeAudio = audio;

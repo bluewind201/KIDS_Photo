@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -7,14 +7,11 @@ import {
   CloudRain,
   CloudSnow,
   Edit3,
-  ExternalLink,
   Folder,
   FolderPlus,
-  Globe,
   GraduationCap,
   HardDrive,
   Home,
-  Image as ImageIcon,
   Link2,
   Loader2,
   MapPin,
@@ -36,6 +33,16 @@ import {
 } from 'lucide-react';
 import { PROVIDER_LABELS, SAMPLE_PHOTO_POOL } from '../data/initialAlbums';
 import { TOY_LABELS } from '../data/initialCharacters';
+import {
+  analyzePhotoUnified,
+  browseCloudDemoOrRemoteUnified,
+  connectSynologyDsmUnified,
+  fetchSynologyFolderPhotos,
+  geocodeCityUnified,
+  getSavedGeminiApiKey,
+  refreshMartEventsUnified,
+  saveGeminiApiKey,
+} from '../utils/standaloneApi';
 import {
   BunnyAccessoryType,
   BunnyBehaviorStatus,
@@ -148,6 +155,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   onUpdateMartItems,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabKey>(initialTab);
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   // Cloud & NAS Connector State
   const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('share_link');
@@ -168,6 +178,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   const [synoUser, setSynoUser] = useState('');
   const [synoPass, setSynoPass] = useState('');
   const [synoOtp, setSynoOtp] = useState('');
+  const [synoSession, setSynoSession] = useState<{ sid: string; cleanBase: string } | null>(null);
 
   const [remoteFolders, setRemoteFolders] = useState<RemoteFolderItem[]>([]);
   const [checkedFolderIds, setCheckedFolderIds] = useState<string[]>([]);
@@ -179,6 +190,38 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     onAction?: () => void;
   } | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isAnalyzingLocal, setIsAnalyzingLocal] = useState(false);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const filesInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Digital Albums Tab State
+  const [confirmDeleteAlbumId, setConfirmDeleteAlbumId] = useState<string | null>(null);
+
+  // 3D Character Roster State
+  const [editingCharId, setEditingCharId] = useState<BunnyId | null>(null);
+  const [showNewCharForm, setShowNewCharForm] = useState(false);
+  const [newCharName, setNewCharName] = useState('');
+  const [newCharCallWord, setNewCharCallWord] = useState('');
+  const [newCharGreeting, setNewCharGreeting] = useState('');
+  const [newCharToy, setNewCharToy] = useState<BunnyToyType>('ball');
+  const [newCharAccessory, setNewCharAccessory] = useState<BunnyAccessoryType>('ribbon');
+  const [newCharThemeIdx, setNewCharThemeIdx] = useState(0);
+
+  // Voice & Gemini API Key State
+  const [wakeWordDraft, setWakeWordDraft] = useState(wakeWord);
+  useEffect(() => {
+    setWakeWordDraft(wakeWord);
+  }, [wakeWord]);
+  const [geminiKeyDraft, setGeminiKeyDraft] = useState(() => getSavedGeminiApiKey());
+  const [geminiKeySavedToast, setGeminiKeySavedToast] = useState(false);
+
+  // Location & Mart Ticker State
+  const [cityQuery, setCityQuery] = useState(currentCity);
+  const [isSearchingCity, setIsSearchingCity] = useState(false);
+  const [newMartStore, setNewMartStore] = useState('');
+  const [newMartCategory, setNewMartCategory] = useState<'휴무일' | '세일·행사'>('휴무일');
+  const [newMartContent, setNewMartContent] = useState('');
+  const [isRefreshingMartAi, setIsRefreshingMartAi] = useState(false);
 
   const handleSaveBackendUrl = (url: string) => {
     const cleaned = url.trim().replace(/\/+$/, '');
@@ -307,74 +350,64 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     setRemoteFolders([]);
     setCheckedFolderIds([]);
 
-    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
-
     try {
-      let endpoint = '/api/storage/gdrive/folders';
-      let payload: Record<string, unknown> = { demoMode };
+      let list: RemoteFolderItem[] = [];
 
-      if (selectedProvider === 'google_drive') {
-        endpoint = '/api/storage/gdrive/folders';
-        payload = { accessToken: gdriveToken.trim(), demoMode };
-      } else if (selectedProvider === 'onedrive') {
-        endpoint = '/api/storage/onedrive/folders';
-        payload = { accessToken: onedriveToken.trim(), demoMode };
-      } else if (selectedProvider === 'synology_webdav') {
-        endpoint = '/api/storage/webdav/browse';
-        payload = {
-          serverUrl: webdavUrl.trim(),
-          username: webdavUser.trim(),
-          password: webdavPass,
-          basePath: webdavPath.trim() || '/photo',
-          demoMode,
-        };
-      } else if (selectedProvider === 'synology_api') {
-        endpoint = '/api/storage/synology/folders';
-        payload = {
+      if (selectedProvider === 'synology_api') {
+        const synoRes = await connectSynologyDsmUnified({
           dsmUrl: synoUrl.trim(),
           account: synoUser.trim(),
           passwd: synoPass,
           otpCode: synoOtp.trim(),
           demoMode,
-        };
-      }
-
-      const res = await fetch(`${baseHost}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const data = (await res.json()) as { folders?: RemoteFolderItem[]; error?: string };
-      if (!res.ok) {
-        setConnectorStatus({
-          type: 'error',
-          msg: data.error || '폴더 목록을 불러오지 못했습니다. 계정 또는 주소를 확인해 주세요.',
-          actionLabel: selectedProvider.includes('synology') ? '🚀 샘플 NAS 가족 앨범으로 즉시 추가' : '🚀 샘플 앨범으로 즉시 추가',
-          onAction: () => handleQuickAddSampleAlbum(selectedProvider, `${PROVIDER_LABELS[selectedProvider]} 가족 앨범`),
         });
-        return;
+        list = synoRes.folders;
+        if (synoRes.sid && synoRes.cleanBase) {
+          setSynoSession({ sid: synoRes.sid, cleanBase: synoRes.cleanBase });
+        } else {
+          setSynoSession(null);
+        }
+      } else {
+        setSynoSession(null);
+        list = await browseCloudDemoOrRemoteUnified({
+          provider: selectedProvider,
+          demoMode,
+          gdriveToken: gdriveToken.trim(),
+          onedriveToken: onedriveToken.trim(),
+          webdavUrl: webdavUrl.trim(),
+          webdavUser: webdavUser.trim(),
+          webdavPass: webdavPass,
+          webdavPath: webdavPath.trim() || '/photo',
+        });
       }
 
-      const list = data.folders ?? [];
       setRemoteFolders(list);
       if (list.length > 0) {
         setCheckedFolderIds([list[0].id]);
-        setCustomAlbumName(list[0].name.split('/').pop() || list[0].name);
+        setCustomAlbumName(list[0].name.split('/').pop()?.trim() || list[0].name);
       }
       setConnectorStatus({
         type: 'success',
         msg: `${PROVIDER_LABELS[selectedProvider]}에서 ${list.length}개의 사진 폴더를 찾았습니다. 원하는 폴더를 선택해 앨범으로 등록하세요.`,
       });
-    } catch {
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : '';
       const isSyno = selectedProvider === 'synology_api' || selectedProvider === 'synology_webdav';
       setConnectorStatus({
         type: 'error',
-        msg: isSyno
-          ? '시놀로지 NAS 서버에 직접 통신하지 못했습니다. (스마트폰 앱 단독 모드이거나 외부 접속 포트 설정 필요) 👉 아이디/비밀번호 없이 링크만 넣는 [시놀로지 포토 공유 링크]를 이용하시거나, 아래 버튼을 눌러 즉시 앨범을 등록해 보세요!'
-          : '스마트 액자 서버와 직접 통신할 수 없습니다. 모바일 앱에서는 API 키가 필요 없는 [공유 링크 간편 등록] 또는 [샘플 앨범 추가]를 권장합니다.',
-        actionLabel: isSyno ? '🚀 시놀로지 테스트 가족 앨범 즉시 등록하기' : '🚀 테스트 가족 앨범 즉시 등록하기',
-        onAction: () => handleQuickAddSampleAlbum(selectedProvider, isSyno ? 'Synology Photos 가족 앨범' : `${PROVIDER_LABELS[selectedProvider]} 사진 앨범`),
+        msg:
+          errMsg ||
+          (isSyno
+            ? '시놀로지 NAS 서버에 직접 통신하지 못했습니다. 주소·포트·계정을 확인하시거나, 비밀번호 없이 링크만 넣는 [시놀로지 포토 공유 링크]를 이용해 보세요!'
+            : '클라우드 폴더를 불러오지 못했습니다. API 키가 필요 없는 [공유 링크 간편 등록] 또는 [샘플 앨범 추가]를 권장합니다.'),
+        actionLabel: isSyno
+          ? '🚀 시놀로지 테스트 가족 앨범 즉시 등록하기'
+          : '🚀 테스트 가족 앨범 즉시 등록하기',
+        onAction: () =>
+          handleQuickAddSampleAlbum(
+            selectedProvider,
+            isSyno ? 'Synology Photos 가족 앨범' : `${PROVIDER_LABELS[selectedProvider]} 사진 앨범`
+          ),
       });
     } finally {
       setIsConnecting(false);
@@ -386,7 +419,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
       const next = prev.includes(folder.id) ? prev.filter((id) => id !== folder.id) : [...prev, folder.id];
       if (next.length === 1) {
         const picked = remoteFolders.find((f) => f.id === next[0]);
-        if (picked) setCustomAlbumName(picked.name.split('/').pop() || picked.name);
+        if (picked) setCustomAlbumName(picked.name.split('/').pop()?.trim() || picked.name);
       } else if (next.length > 1) {
         setCustomAlbumName(`${PROVIDER_LABELS[selectedProvider]} 통합 앨범 (${next.length}개 폴더)`);
       }
@@ -394,56 +427,80 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     });
   };
 
-  const handleRegisterSelectedFolders = () => {
+  const handleRegisterSelectedFolders = async () => {
     const selected = remoteFolders.filter((f) => checkedFolderIds.includes(f.id));
     if (selected.length === 0) return;
 
+    setIsConnecting(true);
     const albumId = `album-${selectedProvider}-${Date.now()}`;
     const albumTitle = customAlbumName.trim() || selected[0].name;
     const combinedPath = selected.map((s) => s.path).join(', ');
 
-    const matchedTemplates = SAMPLE_PHOTO_POOL.filter((item) =>
-      selected.some(
-        (f) =>
-          item.tags.some((t) => f.name.includes(t)) ||
-          (f.name.includes('제주') && item.location.includes('제주')) ||
-          (f.name.includes('단풍') && item.location.includes('가평')) ||
-          (f.name.includes('벚꽃') && item.location.includes('서울숲')) ||
-          (f.name.includes('놀이') && item.location.includes('에버랜드')) ||
-          (f.name.includes('눈') && item.location.includes('평창'))
-      )
-    );
-    const chosenTemplates = matchedTemplates.length > 0 ? matchedTemplates : SAMPLE_PHOTO_POOL;
+    try {
+      let generatedPhotos: PhotoItem[] = [];
 
-    const generatedPhotos: PhotoItem[] = chosenTemplates.map((tpl, i) => ({
-      id: `${albumId}-p-${i}`,
-      albumId,
-      albumName: albumTitle,
-      provider: selectedProvider,
-      src: tpl.src,
-      assetUrl: tpl.assetUrl,
-      title: tpl.title,
-      date: tpl.date,
-      location: tpl.location,
-      tags: tpl.tags,
-      aiSummary: tpl.aiSummary,
-    }));
+      // 실제 시놀로지 DSM 로그인 세션이 있을 경우 NAS 폴더 내 실제 사진 이미지 로드!
+      if (selectedProvider === 'synology_api' && synoSession) {
+        for (const folder of selected) {
+          const fetched = await fetchSynologyFolderPhotos({
+            cleanBase: synoSession.cleanBase,
+            sid: synoSession.sid,
+            folderPath: folder.path,
+            albumId,
+            albumName: albumTitle,
+            provider: selectedProvider,
+          });
+          generatedPhotos.push(...fetched);
+        }
+      }
 
-    onAddAlbum({
-      id: albumId,
-      name: albumTitle,
-      provider: selectedProvider,
-      folderPath: combinedPath,
-      enabled: true,
-      createdAt: new Date().toISOString().slice(0, 10),
-      photos: generatedPhotos,
-    });
+      if (generatedPhotos.length === 0) {
+        const matchedTemplates = SAMPLE_PHOTO_POOL.filter((item) =>
+          selected.some(
+            (f) =>
+              item.tags.some((t) => f.name.includes(t)) ||
+              (f.name.includes('제주') && item.location.includes('제주')) ||
+              (f.name.includes('단풍') && item.location.includes('가평')) ||
+              (f.name.includes('벚꽃') && item.location.includes('서울숲')) ||
+              (f.name.includes('놀이') && item.location.includes('에버랜드')) ||
+              (f.name.includes('눈') && item.location.includes('평창'))
+          )
+        );
+        const chosenTemplates = matchedTemplates.length > 0 ? matchedTemplates : SAMPLE_PHOTO_POOL;
 
-    setConnectorStatus({
-      type: 'success',
-      msg: `"${albumTitle}" 디지털 앨범이 추가되어 메인 디지털 액자에 즉시 반영되었습니다!`,
-    });
-    setCheckedFolderIds([]);
+        generatedPhotos = chosenTemplates.map((tpl, i) => ({
+          id: `${albumId}-p-${i}`,
+          albumId,
+          albumName: albumTitle,
+          provider: selectedProvider,
+          src: tpl.src,
+          assetUrl: tpl.assetUrl,
+          title: tpl.title,
+          date: tpl.date,
+          location: tpl.location,
+          tags: tpl.tags,
+          aiSummary: tpl.aiSummary,
+        }));
+      }
+
+      onAddAlbum({
+        id: albumId,
+        name: albumTitle,
+        provider: selectedProvider,
+        folderPath: combinedPath,
+        enabled: true,
+        createdAt: new Date().toISOString().slice(0, 10),
+        photos: generatedPhotos,
+      });
+
+      setConnectorStatus({
+        type: 'success',
+        msg: `🎉 "${albumTitle}" 디지털 앨범(${generatedPhotos.length}장)이 추가되어 메인 디지털 액자에 즉시 반영되었습니다!`,
+      });
+      setCheckedFolderIds([]);
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const handleLocalFilesUpload = async (fileList: FileList | null) => {
@@ -494,23 +551,12 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
       if (i < 4) {
         try {
-          const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
-          const aiRes = await fetch(`${baseHost}/api/gemini/analyze-photo`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              base64Data: dataUrl,
-              mimeType: file.type || 'image/jpeg',
-              fileName: file.name,
-            }),
+          const meta = await analyzePhotoUnified({
+            base64Data: dataUrl,
+            mimeType: file.type || 'image/jpeg',
+            fileName: file.name,
           });
-          if (aiRes.ok) {
-            const meta = (await aiRes.json()) as {
-              title?: string;
-              location?: string;
-              aiSummary?: string;
-              tags?: string[];
-            };
+          if (meta) {
             if (meta.title) title = meta.title;
             if (meta.location) location = meta.location;
             if (meta.aiSummary) aiSummary = meta.aiSummary;
@@ -611,11 +657,9 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     e.preventDefault();
     if (!cityQuery.trim()) return;
     setIsSearchingCity(true);
-    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
     try {
-      const res = await fetch(`${baseHost}/api/geocode?q=${encodeURIComponent(cityQuery.trim())}`);
-      if (res.ok) {
-        const data = (await res.json()) as { lat: number; lng: number; displayName: string };
+      const data = await geocodeCityUnified(cityQuery.trim());
+      if (data) {
         onUpdateLocation(data.displayName, data.lat, data.lng);
       }
     } finally {
@@ -635,24 +679,16 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
   const handleRefreshMartByAi = async () => {
     setIsRefreshingMartAi(true);
-    const baseHost = backendServerUrl ? backendServerUrl.replace(/\/+$/, '') : '';
     try {
-      const res = await fetch(`${baseHost}/api/gemini/mart-events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ city: currentCity }),
-      });
-      if (res.ok) {
-        const data = (await res.json()) as { items?: string[] };
-        if (data.items && data.items.length > 0) {
-          const mapped: MartTickerItem[] = data.items.map((line, idx) => ({
-            id: `mart-ai-${Date.now()}-${idx}`,
-            category: line.includes('휴무') ? '휴무일' : '세일·행사',
-            storeName: 'AI 실시간 마트소식',
-            content: line,
-          }));
-          onUpdateMartItems(mapped);
-        }
+      const items = await refreshMartEventsUnified(currentCity);
+      if (items.length > 0) {
+        const mapped: MartTickerItem[] = items.map((line, idx) => ({
+          id: `mart-ai-${Date.now()}-${idx}`,
+          category: line.includes('휴무') ? '휴무일' : '세일·행사',
+          storeName: 'AI 실시간 마트소식',
+          content: line,
+        }));
+        onUpdateMartItems(mapped);
       }
     } finally {
       setIsRefreshingMartAi(false);
@@ -721,8 +757,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           </button>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="flex items-center gap-1.5 px-6 py-2.5 border-b border-zinc-100 bg-[#F9FAFB] shrink-0 overflow-x-auto">
+        {/* Navigation Tabs (모바일·태블릿 어느 화면 크기에서도 모든 메뉴 탭이 한눈에 보이도록 flex-wrap 적용) */}
+        <div className="flex flex-wrap items-center gap-1.5 px-4 sm:px-6 py-2.5 border-b border-zinc-100 bg-[#F9FAFB] shrink-0">
           {[
             { id: 'characters', label: `3D 캐릭터 · 성장단계 (${enabledCharCount}/${characters.length})` },
             { id: 'power', label: '절전 · 예약 켜짐' },
@@ -736,10 +772,10 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id as SettingsTabKey)}
-              className={`px-3.5 py-2 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`px-3 py-1.5 sm:px-3.5 sm:py-2 rounded-full text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === tab.id
-                  ? 'bg-[#141519] text-white'
-                  : 'text-zinc-600 hover:bg-zinc-200/70'
+                  ? 'bg-[#141519] text-white shadow-sm'
+                  : 'bg-white border border-zinc-200/80 text-zinc-700 hover:bg-zinc-200/70'
               }`}
             >
               {tab.label}
@@ -2332,6 +2368,38 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     }`}
                   >
                     {ttsEnabled ? '켜짐' : '꺼짐'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-[#141519]" />
+                  <h3 className="text-sm font-bold text-[#141519]">
+                    모바일 단독 모드용 Google Gemini API 키 설정 (선택사항)
+                  </h3>
+                </div>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  API 키 없이도 내장 한국어 스마트 비서(날씨·미세먼지·길안내·일정) 및 3D 토끼 대화·영어 단어카드 기능이 100% 동작합니다. 더욱 풍부한 실시간 자유 대화를 원하시면 무료 Gemini API 키(AI Studio)를 저장해 두세요.
+                </p>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <input
+                    type="password"
+                    value={geminiKeyDraft}
+                    onChange={(e) => setGeminiKeyDraft(e.target.value)}
+                    placeholder="AIzaSy... (비워두면 기본 내장 AI 대화 엔진 사용)"
+                    className={`flex-1 ${inputCls} bg-white`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      saveGeminiApiKey(geminiKeyDraft);
+                      setGeminiKeySavedToast(true);
+                      window.setTimeout(() => setGeminiKeySavedToast(false), 2500);
+                    }}
+                    className="rounded-full bg-[#141519] hover:bg-zinc-800 px-5 py-2 text-xs font-semibold text-white whitespace-nowrap"
+                  >
+                    {geminiKeySavedToast ? '저장 완료!' : 'API 키 저장'}
                   </button>
                 </div>
               </div>

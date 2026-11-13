@@ -45,6 +45,13 @@ import {
   speakText,
   stopCurrentSpeech,
 } from './utils/speech';
+import {
+  askAssistantUnified,
+  askBunnyChatUnified,
+  fetchWeatherUnified,
+  FRAME_SETTINGS_STORAGE_KEY,
+  tryBackendJson,
+} from './utils/standaloneApi';
 
 type OutdoorPlayStatus =
   | 'PLAYING_BALL'
@@ -316,14 +323,6 @@ interface BrowserSpeechRecognitionInstance {
   stop: () => void;
 }
 
-const getApiBase = () => {
-  try {
-    return (localStorage.getItem('kids_photo_backend_url') || '').trim().replace(/\/+$/, '');
-  } catch {
-    return '';
-  }
-};
-
 export default function App() {
   // Core Smart Frame State (오프라인/앱 단독 모드를 위해 localStorage 영구 보존)
   const [albums, setAlbums] = useState<DigitalAlbum[]>(() => {
@@ -459,63 +458,83 @@ export default function App() {
     } catch {}
   }, [albums]);
 
-  // Hydrate persisted settings from backend on mount
+  // Hydrate persisted settings from localStorage (standalone APK) and backend (if available) on mount
   useEffect(() => {
     let cancelled = false;
+
+    interface PersistedFrameSettings {
+      saved?: boolean;
+      wakeWord?: string;
+      slideIntervalSec?: number;
+      transitionMode?: FrameTransitionMode;
+      ttsEnabled?: boolean;
+      menuPosition?: LayoutSide;
+      weatherPosition?: LayoutSide;
+      weatherEffectMode?: WeatherEffectMode;
+      childAgeStage?: ChildGrowthStage;
+      growthStars?: number;
+      powerSchedule?: PowerScheduleConfig;
+      characters?: BunnyCharacterConfig[];
+      locationInfo?: { city: string; lat: number; lng: number };
+      schedules?: ScheduleItem[];
+      martItems?: MartTickerItem[];
+    }
+
+    const applySavedSettings = (saved: PersistedFrameSettings) => {
+      if (saved.wakeWord) setWakeWord(saved.wakeWord);
+      if (typeof saved.slideIntervalSec === 'number') setSlideIntervalSec(saved.slideIntervalSec);
+      if (saved.transitionMode) setTransitionMode(saved.transitionMode);
+      if (typeof saved.ttsEnabled === 'boolean') setTtsEnabled(saved.ttsEnabled);
+      if (saved.menuPosition === 'left' || saved.menuPosition === 'right') {
+        setMenuPosition(saved.menuPosition);
+      }
+      if (saved.weatherPosition === 'left' || saved.weatherPosition === 'right') {
+        setWeatherPosition(saved.weatherPosition);
+      }
+      if (saved.weatherEffectMode) {
+        setWeatherEffectMode(saved.weatherEffectMode);
+      }
+      if (
+        saved.childAgeStage === 'age_3_4' ||
+        saved.childAgeStage === 'age_5' ||
+        saved.childAgeStage === 'age_6_7'
+      ) {
+        setChildAgeStage(saved.childAgeStage);
+      }
+      if (typeof saved.growthStars === 'number') {
+        setGrowthStars(saved.growthStars);
+      }
+      if (saved.powerSchedule && typeof saved.powerSchedule.wakeTime === 'string') {
+        setPowerSchedule(saved.powerSchedule);
+      }
+      if (Array.isArray(saved.characters) && saved.characters.length > 0) {
+        setCharacters(saved.characters);
+      }
+      if (saved.locationInfo?.city) setLocationInfo(saved.locationInfo);
+      if (Array.isArray(saved.schedules) && saved.schedules.length > 0) setSchedules(saved.schedules);
+      if (Array.isArray(saved.martItems) && saved.martItems.length > 0) setMartItems(saved.martItems);
+    };
+
     (async () => {
+      // 1) Immediately restore from localStorage for offline / standalone Android APK
       try {
-        const res = await fetch(`${getApiBase()}/api/state`);
-        if (!res.ok) return;
-        const saved = (await res.json()) as {
-          saved?: boolean;
-          wakeWord?: string;
-          slideIntervalSec?: number;
-          transitionMode?: FrameTransitionMode;
-          ttsEnabled?: boolean;
-          menuPosition?: LayoutSide;
-          weatherPosition?: LayoutSide;
-          weatherEffectMode?: WeatherEffectMode;
-          childAgeStage?: ChildGrowthStage;
-          growthStars?: number;
-          powerSchedule?: PowerScheduleConfig;
-          characters?: BunnyCharacterConfig[];
-          locationInfo?: { city: string; lat: number; lng: number };
-          schedules?: ScheduleItem[];
-          martItems?: MartTickerItem[];
-        };
-        if (cancelled || !saved.saved) return;
-        if (saved.wakeWord) setWakeWord(saved.wakeWord);
-        if (typeof saved.slideIntervalSec === 'number') setSlideIntervalSec(saved.slideIntervalSec);
-        if (saved.transitionMode) setTransitionMode(saved.transitionMode);
-        if (typeof saved.ttsEnabled === 'boolean') setTtsEnabled(saved.ttsEnabled);
-        if (saved.menuPosition === 'left' || saved.menuPosition === 'right') {
-          setMenuPosition(saved.menuPosition);
+        const localRaw = localStorage.getItem(FRAME_SETTINGS_STORAGE_KEY);
+        if (localRaw) {
+          const parsedLocal = JSON.parse(localRaw) as PersistedFrameSettings;
+          if (!cancelled && parsedLocal) {
+            applySavedSettings(parsedLocal);
+          }
         }
-        if (saved.weatherPosition === 'left' || saved.weatherPosition === 'right') {
-          setWeatherPosition(saved.weatherPosition);
+      } catch {
+        // ignore storage parse error
+      }
+
+      // 2) Optionally sync from remote backend if configured/running
+      try {
+        const res = await tryBackendJson<PersistedFrameSettings>('/api/state');
+        if (!cancelled && res.ok && res.data.saved) {
+          applySavedSettings(res.data);
         }
-        if (saved.weatherEffectMode) {
-          setWeatherEffectMode(saved.weatherEffectMode);
-        }
-        if (
-          saved.childAgeStage === 'age_3_4' ||
-          saved.childAgeStage === 'age_5' ||
-          saved.childAgeStage === 'age_6_7'
-        ) {
-          setChildAgeStage(saved.childAgeStage);
-        }
-        if (typeof saved.growthStars === 'number') {
-          setGrowthStars(saved.growthStars);
-        }
-        if (saved.powerSchedule && typeof saved.powerSchedule.wakeTime === 'string') {
-          setPowerSchedule(saved.powerSchedule);
-        }
-        if (Array.isArray(saved.characters) && saved.characters.length > 0) {
-          setCharacters(saved.characters);
-        }
-        if (saved.locationInfo?.city) setLocationInfo(saved.locationInfo);
-        if (Array.isArray(saved.schedules) && saved.schedules.length > 0) setSchedules(saved.schedules);
-        if (Array.isArray(saved.martItems) && saved.martItems.length > 0) setMartItems(saved.martItems);
       } catch {
         // Ignore initial load failure
       } finally {
@@ -527,29 +546,38 @@ export default function App() {
     };
   }, []);
 
-  // Persist user settings to backend whenever updated
+  // Persist user settings to localStorage (immediately) and backend (debounced) whenever updated
   useEffect(() => {
     if (!hasHydratedState) return;
+    const payload = {
+      saved: true,
+      wakeWord,
+      slideIntervalSec,
+      transitionMode,
+      ttsEnabled,
+      menuPosition,
+      weatherPosition,
+      weatherEffectMode,
+      childAgeStage,
+      growthStars,
+      powerSchedule,
+      characters,
+      locationInfo,
+      schedules,
+      martItems,
+    };
+
+    try {
+      localStorage.setItem(FRAME_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
+    } catch {
+      // ignore storage quota errors
+    }
+
     const timeout = window.setTimeout(() => {
-      fetch(`${getApiBase()}/api/state`, {
+      tryBackendJson('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wakeWord,
-          slideIntervalSec,
-          transitionMode,
-          ttsEnabled,
-          menuPosition,
-          weatherPosition,
-          weatherEffectMode,
-          childAgeStage,
-          growthStars,
-          powerSchedule,
-          characters,
-          locationInfo,
-          schedules,
-          martItems,
-        }),
+        body: JSON.stringify(payload),
       }).catch(() => {});
     }, 600);
     return () => window.clearTimeout(timeout);
@@ -646,18 +674,16 @@ export default function App() {
   const fetchWeather = useCallback(async () => {
     setIsWeatherLoading(true);
     try {
-      const params = new URLSearchParams({
-        lat: String(locationInfo.lat),
-        lng: String(locationInfo.lng),
-        city: locationInfo.city,
-      });
-      const res = await fetch(`${getApiBase()}/api/weather?${params.toString()}`);
-      if (res.ok) {
-        const data = (await res.json()) as WeatherPayload;
+      const data = await fetchWeatherUnified(
+        locationInfo.lat,
+        locationInfo.lng,
+        locationInfo.city
+      );
+      if (data) {
         setWeather(data);
       }
     } catch {
-      // Fallback handled by server
+      // Ignore weather network failure
     } finally {
       setIsWeatherLoading(false);
     }
@@ -885,23 +911,14 @@ export default function App() {
       showTemporaryToast(`AI 문의 확인 중: "${queryText}"`);
 
       try {
-        const res = await fetch(`${getApiBase()}/api/gemini/assistant`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: queryText,
-            currentCity: locationInfo.city,
-            currentLat: locationInfo.lat,
-            currentLng: locationInfo.lng,
-            weatherSummary: weather,
-            schedules,
-          }),
+        const data = await askAssistantUnified({
+          query: queryText,
+          currentCity: locationInfo.city,
+          currentLat: locationInfo.lat,
+          currentLng: locationInfo.lng,
+          weatherSummary: weather,
+          schedules,
         });
-
-        const data = (await res.json()) as AssistantInquiryResult & { error?: string };
-        if (!res.ok) {
-          throw new Error(data.error || 'AI 응답을 가져오지 못했습니다.');
-        }
 
         setActiveInquiry(data);
         setSplitRemainingSeconds(120);
@@ -1046,50 +1063,22 @@ export default function App() {
             ? '햇살 쨍쨍 맑음 (잔디밭에 앉아 쉬기 좋은 날)'
             : '산들바람 불고 쾌청함';
 
-        const res = await fetch(`${getApiBase()}/api/gemini/bunny-chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            bunnyId,
-            characterName: charCfg?.name,
-            characterPersona: charCfg?.personaPrompt,
-            userMessage: text,
-            weatherCondition: weatherConditionLabel,
-            childAgeStage,
-            growthStars,
-            userTurnCount,
-            isAutoFollowUpAfterSilence: isAutoSilence,
-            activeFlashcardContext: currentCard
-              ? { koreanWord: currentCard.koreanWord, englishWord: currentCard.englishWord }
-              : null,
-            history: updatedHistory.map((m) => ({ role: m.role, text: m.text })),
-            photos: allCatalogPhotos,
-          }),
+        const data = await askBunnyChatUnified({
+          bunnyId,
+          characterName: charCfg?.name,
+          characterPersona: charCfg?.personaPrompt,
+          userMessage: text,
+          weatherCondition: weatherConditionLabel,
+          childAgeStage,
+          growthStars,
+          userTurnCount,
+          isAutoFollowUpAfterSilence: isAutoSilence,
+          activeFlashcardContext: currentCard
+            ? { koreanWord: currentCard.koreanWord, englishWord: currentCard.englishWord }
+            : null,
+          history: updatedHistory.map((m) => ({ role: m.role, text: m.text })),
+          photos: allCatalogPhotos,
         });
-
-        const data = (await res.json()) as {
-          replyText?: string;
-          isPhotoMemoryQuery?: boolean;
-          matchedPhotoIds?: string[];
-          memoryHeadline?: string;
-          shouldSuggestEnglishReask?: boolean;
-          englishPhrase?: string;
-          koreanPhonetic?: string;
-          englishNudgeText?: string;
-          shouldShowFlashcard?: boolean;
-          flashcardKorean?: string;
-          flashcardEnglish?: string;
-          flashcardPhonetic?: string;
-          flashcardEmoji?: string;
-          flashcardHint?: string;
-          flashcardExampleEn?: string;
-          flashcardChoices?: string[];
-          error?: string;
-        };
-
-        if (!res.ok) {
-          throw new Error(data.error || '토끼 친구가 대답을 준비하지 못했어요.');
-        }
 
         let reply = data.replyText || '우와~ 정말 신난다! 또 이야기해 줘!';
 

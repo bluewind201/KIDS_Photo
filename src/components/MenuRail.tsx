@@ -46,7 +46,7 @@ export const MenuRail: React.FC<MenuRailProps> = ({
   return (
     <nav
       aria-label="빠른 메뉴창"
-      className="w-12 md:w-14 h-full rounded-[20px] bg-[#141519] text-zinc-400 flex flex-col items-center justify-between py-3.5 shrink-0"
+      className="w-12 md:w-14 h-full rounded-[20px] bg-[#141519] text-zinc-400 flex flex-col items-center justify-between gap-2 py-3 shrink-0 overflow-y-auto"
     >
       <div className="flex flex-col items-center gap-2 w-full">
         <button
