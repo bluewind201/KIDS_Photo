@@ -42,8 +42,8 @@ public final class EdgeNeuralTtsClient {
     private static final String CHROMIUM_MAJOR_VERSION = "143";
     private static final String SEC_MS_GEC_VERSION = "2-" + CHROMIUM_FULL_VERSION;
     private static final long WIN_EPOCH_SECONDS = 11644473600L;
-    private static final int SOCKET_TIMEOUT_MS = 7000;
-    private static final int MAX_CACHE_FILES = 100;
+    private static final int SOCKET_TIMEOUT_MS = 9500;
+    private static final int MAX_CACHE_FILES = 120;
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
@@ -135,27 +135,27 @@ public final class EdgeNeuralTtsClient {
             }
         }
 
-        // 100% Native Korean Neural Human Voices with natural unwarped human prosody (-2Hz ~ +4Hz max).
-        // Eliminates foreign English accents on Korean sentences and prevents vocoder pitch distortion!
+        // Next-Gen Conversational MultilingualNeural v2 Human Voices (replaces stiff navigation SunHiNeural)
+        // Each character has a distinct, warm, conversational human voice actor with zero vocoder pitch warp!
         switch (key) {
             case "tosuni":
-                // 다정하고 포근한 첫째 언니 토순이 (자연 한국어 여성 성우)
-                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+2Hz", "+1%", "ko-KR");
+                // 다정하고 포근한 첫째 언니 톤 (자연 대화형 여성 보이스 Ava Multilingual v2)
+                return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+1Hz", "+0%", "ko-KR");
             case "tosili":
-                // 밝고 생동감 있는 단짝 토실이 (자연 한국어 여성 성우 경쾌한 호흡)
-                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+4Hz", "+6%", "ko-KR");
+                // 밝고 생동감 있는 단짝 친구 톤 (생기 있는 대화형 여성 보이스 Emma Multilingual v2)
+                return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+2Hz", "+3%", "ko-KR");
             case "toddungi":
-                // 포근하고 다정한 막내 토뚱이 (자연 한국어 청년 성우 부드러운 톤)
-                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+3Hz", "-3%", "ko-KR");
+                // 포근하고 부드러운 단짝 친구 톤 (자연 한국어 대화형 보이스 Hyunsu Multilingual v2)
+                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+2Hz", "-1%", "ko-KR");
             case "tobyeori":
-                // 맑고 차분한 동화 구연 토별이 (자연 한국어 여성 성우 차분한 톤)
-                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+0Hz", "-5%", "ko-KR");
+                // 맑고 차분한 동화 구연 톤 (부드러운 한국어 성우 톤)
+                return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "-1Hz", "-4%", "ko-KR");
             case "togureum":
-                // 씩씩하고 명랑한 소년 대장 토구름 (자연 한국어 남성 성우 경쾌한 톤)
-                return new NeuralVoiceSpec("ko-KR-InJoonNeural", "+2Hz", "+4%", "ko-KR");
+                // 씩씩하고 명랑한 소년 대장 톤 (밝은 대화형 보이스 Brian Multilingual v2)
+                return new NeuralVoiceSpec("en-US-BrianMultilingualNeural", "+2Hz", "+2%", "ko-KR");
             default:
-                // 스마트 액자 AI 비서 (표준 자연 한국어 성우)
-                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+0Hz", "+0%", "ko-KR");
+                // 스마트 액자 AI 비서 (자연스러운 대화형 보이스)
+                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+0Hz", "+0%", "ko-KR");
         }
     }
 
@@ -311,7 +311,7 @@ public final class EdgeNeuralTtsClient {
                 "X-Timestamp:" + timestamp + "\r\n" +
                 "Content-Type:application/json; charset=utf-8\r\n" +
                 "Path:speech.config\r\n\r\n" +
-                "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"true\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}\r\n";
+                "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"true\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-96kbitrate-mono-mp3\"}}}}\r\n";
             writeMaskedWsTextFrame(out, configMsg);
 
             String reqId = randomUuidNoDashes();

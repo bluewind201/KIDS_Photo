@@ -56,7 +56,7 @@ import {
   testAndPreviewIcsCalendar,
 } from './utils/calendarSync';
 import { GeminiLiveVoiceController } from './utils/geminiLiveSession';
-import { deleteAlbumPhotosFromVault } from './utils/photoCacheDb';
+import { deleteAlbumPhotosFromVault, getAllVaultCachedPhotoIds } from './utils/photoCacheDb';
 import { runAlbumVaultAndAiPipeline } from './utils/photoSyncPipeline';
 import {
   getAndroidSpeechBridge,
@@ -74,7 +74,9 @@ import {
   fetchWeatherUnified,
   FRAME_SETTINGS_STORAGE_KEY,
   getSavedGeminiApiKey,
+  isPhotoSearchIntent,
   resolvePublicShareLinkUnified,
+  searchPhotosSmart,
   tryBackendJson,
 } from './utils/standaloneApi';
 
@@ -402,6 +404,10 @@ export default function App() {
     return INITIAL_ALBUMS;
   });
   const [currentPhotoIdx, setCurrentPhotoIdx] = useState(0);
+  const [matchedPlaylist, setMatchedPlaylist] = useState<{
+    label: string;
+    photos: PhotoItem[];
+  } | null>(null);
   const [isPlaying, setIsPlaying] = useState(true);
   const [slideIntervalSec, setSlideIntervalSec] = useState(12);
   const [transitionMode, setTransitionMode] = useState<FrameTransitionMode>('ken_burns');
@@ -625,6 +631,7 @@ export default function App() {
     });
 
     if (candidates.length === 0) return false;
+    const vaultIds = await getAllVaultCachedPhotoIds();
     let anyUpdated = false;
 
     for (const album of candidates) {
@@ -642,24 +649,34 @@ export default function App() {
           prev.map((curAlbum) => {
             if (curAlbum.id !== album.id) return curAlbum;
             const existingPhotos = curAlbum.photos;
+            const priorById = new Map<string, PhotoItem>(existingPhotos.map((p) => [p.id, p]));
             const mergedPhotos: PhotoItem[] = resolved.photos.map((fresh, idx) => {
-              const prior = existingPhotos[idx];
+              const prior =
+                priorById.get(fresh.id) ??
+                existingPhotos.find((ep) => ep.title === fresh.title) ??
+                existingPhotos[idx];
+              const stableId = prior?.id || fresh.id || `${curAlbum.id}-p-${idx}`;
+              const alreadyInVault = Boolean(prior?.vaultCached || vaultIds.has(stableId));
               if (!prior) {
                 return {
                   ...fresh,
-                  id: `${curAlbum.id}-p-${idx}`,
+                  id: stableId,
+                  src: alreadyInVault ? `idb:${stableId}` : fresh.src,
+                  vaultCached: alreadyInVault,
                   albumId: curAlbum.id,
                   albumName: curAlbum.name,
                 };
               }
               return {
                 ...prior,
-                src: prior.vaultCached && prior.src.startsWith('idb:') ? prior.src : fresh.src,
+                id: stableId,
+                src: alreadyInVault ? `idb:${stableId}` : fresh.src,
                 assetUrl: fresh.assetUrl,
                 fallbackUrls: fresh.fallbackUrls,
                 nativeHeaders: fresh.nativeHeaders ?? prior.nativeHeaders,
                 date: prior.date || fresh.date,
-                vaultCached: prior.vaultCached,
+                isNostalgiaPick: fresh.isNostalgiaPick ?? prior.isNostalgiaPick,
+                vaultCached: alreadyInVault,
                 optimizedBytes: prior.optimizedBytes,
                 // Preserve Gemini Vision structured index if already analyzed!
                 title: prior.aiAnalyzed ? prior.title : prior.title || fresh.title,
@@ -691,12 +708,47 @@ export default function App() {
     return anyUpdated;
   }, []);
 
-  // Automatically refresh enabled share-link albums once on app startup (fixes expired tokens & post-update sessions!)
+  // Reconcile IndexedDB Vault cache on startup — ONLY refresh network share links if an enabled album actually has uncached photos!
   const didInitialShareRefreshRef = useRef(false);
   useEffect(() => {
     if (!hasHydratedState || didInitialShareRefreshRef.current) return;
     didInitialShareRefreshRef.current = true;
-    void refreshShareLinkAlbumUrls();
+    void (async () => {
+      const vaultIds = await getAllVaultCachedPhotoIds();
+      if (vaultIds.size > 0) {
+        setAlbums((prev) => {
+          let changed = false;
+          const next = prev.map((album) => {
+            if (isBuiltInOrSampleAlbum(album)) return album;
+            let albumChanged = false;
+            const nextPhotos = album.photos.map((p) => {
+              if (vaultIds.has(p.id) && (!p.vaultCached || !p.src.startsWith('idb:'))) {
+                albumChanged = true;
+                return { ...p, vaultCached: true, src: `idb:${p.id}` };
+              }
+              return p;
+            });
+            if (albumChanged) {
+              changed = true;
+              return { ...album, photos: nextPhotos };
+            }
+            return album;
+          });
+          return changed ? next : prev;
+        });
+      }
+
+      const uncachedShareAlbums = albumsRef.current.filter(
+        (a) =>
+          a.enabled &&
+          !isBuiltInOrSampleAlbum(a) &&
+          /^https?:\/\//i.test(a.folderPath || '') &&
+          a.photos.some((p) => !p.vaultCached && !vaultIds.has(p.id))
+      );
+      for (const pendingAlbum of uncachedShareAlbums) {
+        await refreshShareLinkAlbumUrls(pendingAlbum.id);
+      }
+    })();
   }, [hasHydratedState, refreshShareLinkAlbumUrls]);
 
   // Monitor Gemini Vision availability (saved Gemini API key OR connected backend)
@@ -792,6 +844,7 @@ export default function App() {
           const res = await runAlbumVaultAndAiPipeline({
             photos: targetAlbum.photos,
             sharePassword: targetAlbum.sharePassword,
+            skipAiStage: !geminiVisionConnected,
             shouldAbort: () => !isMountedRef.current,
             onProgress: (info) => {
               if (!isMountedRef.current) return;
@@ -923,11 +976,18 @@ export default function App() {
     return albums.filter((a) => a.enabled).flatMap((a) => a.photos);
   }, [albums]);
 
+  const framePhotos = useMemo<PhotoItem[]>(() => {
+    if (matchedPlaylist && matchedPlaylist.photos.length > 0) {
+      return matchedPlaylist.photos;
+    }
+    return activePhotos;
+  }, [matchedPlaylist, activePhotos]);
+
   useEffect(() => {
-    if (currentPhotoIdx >= activePhotos.length && activePhotos.length > 0) {
+    if (currentPhotoIdx >= framePhotos.length && framePhotos.length > 0) {
       setCurrentPhotoIdx(0);
     }
-  }, [activePhotos.length, currentPhotoIdx]);
+  }, [framePhotos.length, currentPhotoIdx]);
 
   useEffect(() => {
     try {
@@ -1226,12 +1286,12 @@ export default function App() {
 
   // FrameSway Slideshow Auto-Advance Timer (paused during power-saving sleep!)
   useEffect(() => {
-    if (sleepState.sleeping || !isPlaying || activePhotos.length <= 1) return;
+    if (sleepState.sleeping || !isPlaying || framePhotos.length <= 1) return;
     const timer = window.setInterval(() => {
-      setCurrentPhotoIdx((prev) => (prev + 1) % activePhotos.length);
+      setCurrentPhotoIdx((prev) => (prev + 1) % framePhotos.length);
     }, slideIntervalSec * 1000);
     return () => window.clearInterval(timer);
-  }, [sleepState.sleeping, isPlaying, activePhotos.length, slideIntervalSec]);
+  }, [sleepState.sleeping, isPlaying, framePhotos.length, slideIntervalSec]);
 
   // 2-Minute (120s) Split-Screen Auto-Return Countdown Timer
   useEffect(() => {
@@ -1430,7 +1490,7 @@ export default function App() {
     });
   }, []);
 
-  // AI Smart Frame Assistant Query Handler (supports answering in a called character's voice!)
+  // AI Smart Frame Assistant Query Handler (supports answering in a called character's voice + multi-photo search!)
   const handleAssistantInquiry = useCallback(
     async (queryText: string, speakingCharacter?: BunnyCharacterConfig) => {
       if (!queryText.trim()) return;
@@ -1443,6 +1503,8 @@ export default function App() {
       );
 
       try {
+        const candidatePhotos =
+          activePhotos.length > 0 ? activePhotos : albums.flatMap((a) => a.photos);
         const data = await askAssistantUnified({
           query: queryText,
           currentCity: locationInfo.city,
@@ -1450,6 +1512,7 @@ export default function App() {
           currentLng: locationInfo.lng,
           weatherSummary: weather,
           schedules: mergedSchedules,
+          photos: candidatePhotos,
         });
 
         const enriched: AssistantInquiryResult = speakingCharacter
@@ -1459,6 +1522,15 @@ export default function App() {
               bunnySpeakerName: speakingCharacter.name,
             }
           : data;
+
+        if (enriched.category === 'photo_memories' && enriched.matchedPhotos?.length) {
+          setMatchedPlaylist({
+            label: queryText.trim(),
+            photos: enriched.matchedPhotos,
+          });
+          setCurrentPhotoIdx(0);
+          setIsPlaying(true);
+        }
 
         setActiveInquiry(enriched);
         setSplitRemainingSeconds(120);
@@ -1480,7 +1552,7 @@ export default function App() {
         setIsAssistantLoading(false);
       }
     },
-    [locationInfo, weather, mergedSchedules, ttsEnabled, showTemporaryToast]
+    [activePhotos, albums, locationInfo, weather, mergedSchedules, ttsEnabled, showTemporaryToast]
   );
 
   // Dismiss Giant Mid-Chat Flashcard smoothly back to conversation
@@ -1576,6 +1648,16 @@ export default function App() {
         lastActivityRef.current = Date.now();
         silenceAutoCountRef.current = 0;
         turnsSinceLastEnglishRef.current += 1;
+        if (
+          /^(잘\s*가|잘\s*놀아|대화\s*끝|그만\s*안녕|그만할래|그만하자|고마워\s*안녕|바이바이|빠이빠이|이제\s*가봐)[!~.\s]*$/.test(
+            text.trim()
+          )
+        ) {
+          const byeMsg = `응응~! 다음에 또 ${charCfg?.name || '나'} 불러줘! 안녕~!`;
+          handleFinishBunnyChat(bunnyId);
+          speakText(byeMsg, charCfg?.voiceSpeaker ?? 'tosuni', ttsEnabled);
+          return;
+        }
       }
       setChatWaitSeconds(englishWaitSeconds);
 
@@ -1641,22 +1723,22 @@ export default function App() {
       }));
 
       try {
-        const allCatalogPhotos = albums.flatMap((a) =>
-          a.photos.map((p) => ({
-            id: p.id,
-            title: p.title,
-            date: p.date,
-            location: p.location,
-            season: p.season,
-            mood: p.mood,
-            people: p.people,
-            objects: p.objects,
-            albumName: p.albumName,
-            tags: p.tags,
-            aiSummary: p.aiSummary,
-            assetUrl: p.assetUrl,
-          }))
-        );
+        const searchPoolPhotos =
+          activePhotos.length > 0 ? activePhotos : albums.flatMap((a) => a.photos);
+        const allCatalogPhotos = searchPoolPhotos.map((p) => ({
+          id: p.id,
+          title: p.title,
+          date: p.date,
+          location: p.location,
+          season: p.season,
+          mood: p.mood,
+          people: p.people,
+          objects: p.objects,
+          albumName: p.albumName,
+          tags: p.tags,
+          aiSummary: p.aiSummary,
+          assetUrl: p.assetUrl,
+        }));
 
         const weatherConditionLabel =
           effectiveWeather === 'snow'
@@ -1780,33 +1862,53 @@ export default function App() {
           },
         }));
 
-        if (!isAutoSilence && data.isPhotoMemoryQuery) {
+        let foundPhotoMemoriesCount = 0;
+        if (!isAutoSilence && (data.isPhotoMemoryQuery || isPhotoSearchIntent(text))) {
           const allPhotoObjects = albums.flatMap((a) => a.photos);
-          const matchedIds = new Set(data.matchedPhotoIds ?? []);
-          let matchedList = allPhotoObjects.filter((p) => matchedIds.has(p.id));
+          const primaryPool = activePhotos.length > 0 ? activePhotos : allPhotoObjects;
+          const byId = new Map<string, PhotoItem>(allPhotoObjects.map((p) => [p.id, p]));
+          const combined: PhotoItem[] = [];
+          const seen = new Set<string>();
 
-          if (matchedList.length === 0) {
-            matchedList = allPhotoObjects.filter(
-              (p) =>
-                p.tags.some((tag) => text.includes(tag)) ||
-                Boolean(p.season && text.includes(p.season)) ||
-                Boolean(p.people && text.includes(p.people)) ||
-                (p.objects ?? []).some((obj) => text.includes(obj)) ||
-                Boolean(p.location && p.location.length >= 2 && text.includes(p.location.slice(0, 2)))
-            );
+          for (const id of data.matchedPhotoIds ?? []) {
+            const p = byId.get(id);
+            if (p && !seen.has(p.id)) {
+              seen.add(p.id);
+              combined.push(p);
+            }
+          }
+          for (const p of searchPhotosSmart(primaryPool, text, 40)) {
+            if (!seen.has(p.id)) {
+              seen.add(p.id);
+              combined.push(p);
+            }
+          }
+          if (combined.length === 0 && primaryPool !== allPhotoObjects) {
+            for (const p of searchPhotosSmart(allPhotoObjects, text, 40)) {
+              if (!seen.has(p.id)) {
+                seen.add(p.id);
+                combined.push(p);
+              }
+            }
           }
 
-          if (matchedList[0]) {
-            const frameIdx = activePhotos.findIndex((ap) => ap.id === matchedList[0].id);
-            if (frameIdx >= 0) setCurrentPhotoIdx(frameIdx);
+          foundPhotoMemoriesCount = combined.length;
+          if (combined.length > 0) {
+            setMatchedPlaylist({
+              label: text.trim(),
+              photos: combined,
+            });
+            setCurrentPhotoIdx(0);
+            setIsPlaying(true);
           }
 
           setActiveInquiry({
             category: 'photo_memories',
             headline:
-              data.memoryHeadline || `${charCfg?.name || '토순이'}가 찾아준 우리 추억 사진`,
+              data.memoryHeadline ||
+              `${charCfg?.name || '토순이'}가 찾아준 추억 사진 ${combined.length}장`,
             spokenSummary: reply,
-            matchedPhotos: matchedList,
+            matchedPhotos: combined,
             bunnySpeaker: charCfg?.voiceSpeaker ?? 'tosuni',
             bunnySpeakerName: charCfg?.name,
           });
@@ -1815,6 +1917,11 @@ export default function App() {
 
         speakText(spokenReply, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
           setBunnySpeakingFlag(bunnyId, speaking);
+          if (!speaking && foundPhotoMemoriesCount > 0) {
+            // Auto-hide bunny chat card right after announcing found photos so photos stay completely unobstructed!
+            handleFinishBunnyChat(bunnyId);
+            return;
+          }
           if (!speaking && nextCard) {
             speakEnglishPhrase(
               nextCard.englishWord,
@@ -1852,7 +1959,9 @@ export default function App() {
       englishWaitSeconds,
       geminiVoiceMode,
       growthStars,
+      handleFinishBunnyChat,
       setBunnySpeakingFlag,
+      ttsEnabled,
     ]
   );
 
@@ -2324,35 +2433,27 @@ export default function App() {
                 }
               },
               onShowPhotoTool: (keyword: string) => {
-                const kw = keyword.trim().toLowerCase();
-                const pool = albumsRef.current.flatMap((a) => a.photos);
-                const matched = pool.filter((p) => {
-                  const hay = [
-                    p.title,
-                    p.location,
-                    p.season,
-                    p.people,
-                    p.albumName,
-                    p.aiSummary,
-                    ...(p.tags ?? []),
-                    ...(p.objects ?? []),
-                  ]
-                    .filter(Boolean)
-                    .join(' ')
-                    .toLowerCase();
-                  return kw ? hay.includes(kw) : true;
-                });
-                const finalPhotos = matched.length > 0 ? matched.slice(0, 8) : pool.slice(0, 4);
-                if (finalPhotos[0]) {
-                  const frameIdx = latestStateRef.current.activePhotos.findIndex(
-                    (ap) => ap.id === finalPhotos[0].id
-                  );
-                  if (frameIdx >= 0) setCurrentPhotoIdx(frameIdx);
+                const kw = keyword.trim();
+                const allPool = albumsRef.current.flatMap((a) => a.photos);
+                const enabledPool = latestStateRef.current.activePhotos;
+                const primaryPool = enabledPool.length > 0 ? enabledPool : allPool;
+                let matched = kw ? searchPhotosSmart(primaryPool, kw, 40) : primaryPool.slice(0, 20);
+                if (matched.length === 0 && primaryPool !== allPool && kw) {
+                  matched = searchPhotosSmart(allPool, kw, 40);
+                }
+                const finalPhotos = matched.length > 0 ? matched : primaryPool.slice(0, 10);
+                if (finalPhotos.length > 0) {
+                  setMatchedPlaylist({
+                    label: kw || '추억 사진',
+                    photos: finalPhotos,
+                  });
+                  setCurrentPhotoIdx(0);
+                  setIsPlaying(true);
                 }
                 setActiveInquiry({
                   category: 'photo_memories',
-                  headline: `${charCfg.name}가 찾아준 우리 가족 추억 사진`,
-                  spokenSummary: `${charCfg.name}가 추억 사진을 찾아왔어요!`,
+                  headline: `${charCfg.name}가 찾아준 추억 사진 ${finalPhotos.length}장`,
+                  spokenSummary: `${charCfg.name}가 관련 사진 ${finalPhotos.length}장을 모두 찾아왔어요! 액자에서 연속으로 보여줄게요!`,
                   matchedPhotos: finalPhotos,
                   bunnySpeaker: charCfg.voiceSpeaker,
                   bunnySpeakerName: charCfg.name,
@@ -2591,7 +2692,7 @@ export default function App() {
           .trim();
 
         if (remainder.length >= 2) {
-          if (isSmartFrameUtilityQuery(remainder)) {
+          if (isSmartFrameUtilityQuery(remainder) || isPhotoSearchIntent(remainder)) {
             void s.handleAssistantInquiry(remainder, char);
           } else {
             s.handleSummonBunny(char.id, true, remainder);
@@ -2605,7 +2706,7 @@ export default function App() {
 
     // 2. Active Child-Character Voice Conversation (including Voice-First English Flashcard & English Re-Ask!)
     if (s.activeChatBunny) {
-      if (/잘\s*놀아|대화\s*끝|그만\s*안녕|놀러\s*가/.test(transcript)) {
+      if (/잘\s*놀아|잘\s*가|대화\s*끝|그만\s*안녕|그만할래|놀러\s*가/.test(transcript)) {
         s.handleFinishBunnyChat(s.activeChatBunny);
         return;
       }
@@ -2640,8 +2741,8 @@ export default function App() {
       return;
     }
 
-    // 3. Direct Smart-Frame Utility Question while mic is listening (even without a wake-word!)
-    if (isSmartFrameUtilityQuery(transcript)) {
+    // 3. Direct Smart-Frame Utility OR Photo Search Question while mic is listening (even without a wake-word!)
+    if (isSmartFrameUtilityQuery(transcript) || isPhotoSearchIntent(transcript)) {
       const leadChar = s.enabledCharacters[0] ?? s.characters[0];
       void s.handleAssistantInquiry(transcript, leadChar);
     }
@@ -2902,10 +3003,17 @@ export default function App() {
   };
 
   const handleSelectPhotoOnFrame = (photo: PhotoItem) => {
-    const idx = activePhotos.findIndex((p) => p.id === photo.id);
-    if (idx >= 0) {
-      setCurrentPhotoIdx(idx);
+    const playlistIdx = framePhotos.findIndex((p) => p.id === photo.id);
+    if (playlistIdx >= 0) {
+      setCurrentPhotoIdx(playlistIdx);
+      return;
+    }
+    const activeIdx = activePhotos.findIndex((p) => p.id === photo.id);
+    if (activeIdx >= 0) {
+      setMatchedPlaylist(null);
+      setCurrentPhotoIdx(activeIdx);
     } else {
+      setMatchedPlaylist(null);
       setAlbums((prev) => prev.map((a) => (a.id === photo.albumId ? { ...a, enabled: true } : a)));
       setCurrentPhotoIdx(0);
     }
@@ -3058,7 +3166,7 @@ export default function App() {
           {/* Main Digital Frame Stage (Full OR 50/50 Split on Inquiry) */}
           <div className="relative flex-1 min-w-0 h-full flex gap-2.5 overflow-hidden">
             <DigitalFrameStage
-              photos={activePhotos}
+              photos={framePhotos}
               currentIndex={currentPhotoIdx}
               isPlaying={isPlaying && !sleepState.sleeping}
               transitionMode={transitionMode}
@@ -3069,15 +3177,24 @@ export default function App() {
               isAssistantLoading={isAssistantLoading}
               albumPasswords={albumPasswordsMap}
               photoAnalysisProgress={photoAnalysisProgress}
+              matchedPlaylistInfo={
+                matchedPlaylist
+                  ? { label: matchedPlaylist.label, count: matchedPlaylist.photos.length }
+                  : null
+              }
+              onExitMatchedPlaylist={() => {
+                setMatchedPlaylist(null);
+                setCurrentPhotoIdx(0);
+              }}
               onRequestRefreshAlbum={refreshShareLinkAlbumUrls}
               onPrev={() =>
                 setCurrentPhotoIdx((prev) =>
-                  activePhotos.length > 0 ? (prev - 1 + activePhotos.length) % activePhotos.length : 0
+                  framePhotos.length > 0 ? (prev - 1 + framePhotos.length) % framePhotos.length : 0
                 )
               }
               onNext={() =>
                 setCurrentPhotoIdx((prev) =>
-                  activePhotos.length > 0 ? (prev + 1) % activePhotos.length : 0
+                  framePhotos.length > 0 ? (prev + 1) % framePhotos.length : 0
                 )
               }
               onTogglePlay={() => setIsPlaying((v) => !v)}
@@ -3183,6 +3300,7 @@ export default function App() {
           onClose={() => setSettingsModalTab(null)}
           onAddAlbum={(newAlbum) => {
             const isSampleAlbum = newAlbum.id.startsWith('album-sample-');
+            setMatchedPlaylist(null);
             setAlbums((prev) => {
               const cleanedPrev = isSampleAlbum
                 ? prev
@@ -3197,12 +3315,14 @@ export default function App() {
             });
             setCurrentPhotoIdx(0);
           }}
-          onToggleAlbum={(albumId) =>
+          onToggleAlbum={(albumId) => {
+            setMatchedPlaylist(null);
             setAlbums((prev) =>
               prev.map((a) => (a.id === albumId ? { ...a, enabled: !a.enabled } : a))
-            )
-          }
+            );
+          }}
           onDeleteAlbum={(albumId) => {
+            setMatchedPlaylist(null);
             setAlbums((prev) => prev.filter((a) => a.id !== albumId));
             void deleteAlbumPhotosFromVault(albumId);
           }}

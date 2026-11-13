@@ -222,42 +222,57 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
         {inquiry.category === 'photo_memories' && inquiry.matchedPhotos && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs text-zinc-500">
-              <span>찾아낸 추억 사진 {inquiry.matchedPhotos.length}장 · 클릭하면 왼쪽 액자에 표시</span>
+              <span>
+                찾아낸 추억 사진 총 <strong className="text-[#141519]">{inquiry.matchedPhotos.length}장</strong> 연속 슬라이드 재생 중 · 클릭 시 즉시 보기
+              </span>
             </div>
 
             {inquiry.matchedPhotos.length === 0 ? (
               <div className="rounded-2xl border border-zinc-200 bg-[#F6F7F9] p-6 text-center text-xs text-zinc-500">
-                아직 해당 장소와 일치하는 사진을 앨범에서 찾지 못했어요.
+                아직 해당 조건과 일치하는 사진을 앨범에서 찾지 못했어요. 다른 장소나 계절·단어로 물어봐 주세요!
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                {inquiry.matchedPhotos.map((photo) => (
-                  <button
-                    key={photo.id}
-                    type="button"
-                    onClick={() => onSelectMemoryPhoto(photo)}
-                    className="group text-left rounded-2xl overflow-hidden bg-[#F7F8FA] border border-zinc-200/80 hover:border-[#141519] transition-colors"
-                  >
-                    <div className="aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
-                      <img
-                        src={vaultUrls[photo.id] || peekVaultObjectUrlSync(photo.id) || photo.src}
-                        alt={photo.title}
-                        referrerPolicy="no-referrer"
-                        decoding="async"
-                        className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
-                      />
-                    </div>
-                    <div className="p-3">
-                      <p className="text-xs font-bold text-[#141519] truncate">{photo.title}</p>
-                      <p className="mt-0.5 text-[11px] font-medium text-zinc-500">
-                        {photo.date} · {photo.location}
-                      </p>
-                      <p className="mt-1 text-[11px] text-zinc-600 line-clamp-2 leading-relaxed">
-                        {photo.aiSummary}
-                      </p>
-                    </div>
-                  </button>
-                ))}
+                {inquiry.matchedPhotos.map((photo, idx) => {
+                  const thumbSrc =
+                    vaultUrls[photo.id] ||
+                    peekVaultObjectUrlSync(photo.id) ||
+                    (photo.src.startsWith('idb:') ? photo.assetUrl || '' : photo.src);
+                  return (
+                    <button
+                      key={photo.id}
+                      type="button"
+                      onClick={() => onSelectMemoryPhoto(photo)}
+                      className="group text-left rounded-2xl overflow-hidden bg-[#F7F8FA] border border-zinc-200/80 hover:border-[#141519] transition-colors"
+                    >
+                      <div className="relative aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
+                        {thumbSrc ? (
+                          <img
+                            src={thumbSrc}
+                            alt={photo.title}
+                            referrerPolicy="no-referrer"
+                            decoding="async"
+                            className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
+                          />
+                        ) : (
+                          <span className="text-[11px] text-zinc-400">사진 불러오는 중...</span>
+                        )}
+                        <span className="absolute left-2 top-2 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-bold text-white">
+                          #{idx + 1}
+                        </span>
+                      </div>
+                      <div className="p-3">
+                        <p className="text-xs font-bold text-[#141519] truncate">{photo.title}</p>
+                        <p className="mt-0.5 text-[11px] font-medium text-zinc-500">
+                          {photo.date} · {photo.location}
+                        </p>
+                        <p className="mt-1 text-[11px] text-zinc-600 line-clamp-2 leading-relaxed">
+                          {photo.aiSummary}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>

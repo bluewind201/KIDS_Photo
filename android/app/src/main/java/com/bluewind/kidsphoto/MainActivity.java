@@ -20,6 +20,7 @@ import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
+import android.util.Base64;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
@@ -35,6 +36,7 @@ import com.getcapacitor.BridgeWebChromeClient;
 import com.getcapacitor.BridgeWebViewClient;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.net.CookieHandler;
 import java.net.CookiePolicy;
 import java.security.SecureRandom;
@@ -628,6 +630,161 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
+    private void releaseRecognizerForWebRtcOnMainThread() {
+        mainHandler.post(() -> {
+            isRecognizerListening = false;
+            if (speechRecognizer != null) {
+                try {
+                    speechRecognizer.stopListening();
+                } catch (Exception ignored) {}
+                try {
+                    speechRecognizer.cancel();
+                } catch (Exception ignored) {}
+                try {
+                    speechRecognizer.destroy();
+                } catch (Exception ignored) {}
+                speechRecognizer = null;
+            }
+            try {
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                if (am != null && am.getMode() != AudioManager.MODE_NORMAL) {
+                    am.setMode(AudioManager.MODE_NORMAL);
+                }
+            } catch (Exception ignored) {}
+            dispatchJsSttState(false, "stopped");
+        });
+    }
+
+    private void performNativePlayBase64Audio(
+        String base64Audio,
+        String fileExt,
+        String utteranceId
+    ) {
+        final long myGen = activeSpeechGeneration.incrementAndGet();
+        mainHandler.post(() -> {
+            stopNativeListeningInternal(false);
+            stopActiveNeuralPlayerOnMainThread();
+            if (nativeTts != null) {
+                try {
+                    nativeTts.stop();
+                } catch (Exception ignored) {}
+            }
+            try {
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                if (am != null && am.getMode() != AudioManager.MODE_NORMAL) {
+                    am.setMode(AudioManager.MODE_NORMAL);
+                }
+            } catch (Exception ignored) {}
+        });
+
+        neuralTtsExecutor.execute(() -> {
+            if (activeSpeechGeneration.get() != myGen) return;
+            try {
+                byte[] audioBytes = Base64.decode(base64Audio, Base64.DEFAULT);
+                if (audioBytes == null || audioBytes.length < 64) {
+                    dispatchJsTtsEvent(utteranceId, "error");
+                    return;
+                }
+                String safeExt = (fileExt == null || fileExt.trim().isEmpty())
+                    ? "wav"
+                    : fileExt.trim().replaceAll("[^a-zA-Z0-9]", "");
+                File cacheDir = new File(getCacheDir(), "gemini_audio");
+                if (!cacheDir.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    cacheDir.mkdirs();
+                }
+                final File audioFile = new File(
+                    cacheDir,
+                    "gem_" + myGen + "_" + System.currentTimeMillis() + "." + safeExt
+                );
+                try (FileOutputStream fos = new FileOutputStream(audioFile)) {
+                    fos.write(audioBytes);
+                    fos.flush();
+                }
+
+                mainHandler.post(() -> {
+                    if (activeSpeechGeneration.get() != myGen) {
+                        //noinspection ResultOfMethodCallIgnored
+                        audioFile.delete();
+                        return;
+                    }
+                    stopActiveNeuralPlayerOnMainThread();
+                    MediaPlayer mp = new MediaPlayer();
+                    activeNeuralPlayer = mp;
+                    FileInputStream fis = null;
+                    try {
+                        AudioAttributes attrs = new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build();
+                        mp.setAudioAttributes(attrs);
+                        fis = new FileInputStream(audioFile);
+                        mp.setDataSource(fis.getFD(), 0, audioFile.length());
+                        mp.setVolume(1.0f, 1.0f);
+
+                        mp.setOnCompletionListener(player -> {
+                            if (activeNeuralPlayer == player) {
+                                stopActiveNeuralPlayerOnMainThread();
+                            } else {
+                                try {
+                                    player.release();
+                                } catch (Exception ignored) {}
+                            }
+                            //noinspection ResultOfMethodCallIgnored
+                            audioFile.delete();
+                            if (activeSpeechGeneration.get() == myGen) {
+                                dispatchJsTtsEvent(utteranceId, "done");
+                            }
+                        });
+
+                        mp.setOnErrorListener((player, what, extra) -> {
+                            if (activeNeuralPlayer == player) {
+                                stopActiveNeuralPlayerOnMainThread();
+                            } else {
+                                try {
+                                    player.release();
+                                } catch (Exception ignored) {}
+                            }
+                            //noinspection ResultOfMethodCallIgnored
+                            audioFile.delete();
+                            if (activeSpeechGeneration.get() == myGen) {
+                                dispatchJsTtsEvent(utteranceId, "error");
+                            }
+                            return true;
+                        });
+
+                        mp.prepare();
+                        if (activeSpeechGeneration.get() != myGen) {
+                            stopActiveNeuralPlayerOnMainThread();
+                            //noinspection ResultOfMethodCallIgnored
+                            audioFile.delete();
+                            return;
+                        }
+                        dispatchJsTtsEvent(utteranceId, "start");
+                        mp.start();
+                    } catch (Exception playErr) {
+                        stopActiveNeuralPlayerOnMainThread();
+                        //noinspection ResultOfMethodCallIgnored
+                        audioFile.delete();
+                        if (activeSpeechGeneration.get() == myGen) {
+                            dispatchJsTtsEvent(utteranceId, "error");
+                        }
+                    } finally {
+                        if (fis != null) {
+                            try {
+                                fis.close();
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                });
+            } catch (Exception err) {
+                if (activeSpeechGeneration.get() == myGen) {
+                    dispatchJsTtsEvent(utteranceId, "error");
+                }
+            }
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(
         int requestCode,
@@ -792,6 +949,24 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void stopListening() {
             stopNativeListeningInternal(true);
+        }
+
+        @JavascriptInterface
+        public void releaseRecognizerForLiveWebRtc() {
+            releaseRecognizerForWebRtcOnMainThread();
+        }
+
+        @JavascriptInterface
+        public void playBase64Audio(String base64Audio, String fileExt, String utteranceId) {
+            if (base64Audio == null || base64Audio.trim().isEmpty()) {
+                dispatchJsTtsEvent(utteranceId, "error");
+                return;
+            }
+            performNativePlayBase64Audio(
+                base64Audio,
+                fileExt != null ? fileExt : "wav",
+                utteranceId != null ? utteranceId : ("gem-" + System.currentTimeMillis())
+            );
         }
 
         @JavascriptInterface

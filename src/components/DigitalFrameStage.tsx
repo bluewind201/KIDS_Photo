@@ -36,6 +36,8 @@ interface DigitalFrameStageProps {
   isAssistantLoading: boolean;
   albumPasswords?: Record<string, string>;
   photoAnalysisProgress?: PhotoAnalysisProgress | null;
+  matchedPlaylistInfo?: { label: string; count: number } | null;
+  onExitMatchedPlaylist?: () => void;
   onRequestRefreshAlbum?: (albumId: string) => Promise<boolean>;
   onPrev: () => void;
   onNext: () => void;
@@ -65,6 +67,8 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   isAssistantLoading,
   albumPasswords,
   photoAnalysisProgress,
+  matchedPlaylistInfo,
+  onExitMatchedPlaylist,
   onRequestRefreshAlbum,
   onPrev,
   onNext,
@@ -494,7 +498,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
               className="inline-flex items-center gap-1.5 rounded-full bg-white/95 hover:bg-white text-[#141519] px-3 py-1.5 text-xs font-medium shadow-sm transition-colors whitespace-nowrap"
             >
               <Search className="w-3.5 h-3.5 text-zinc-600" />
-              <span>{isAssistantLoading ? '확인 중...' : '길안내 · 날씨 질문'}</span>
+              <span>{isAssistantLoading ? '확인 중...' : '사진 찾기 · 날씨 · 길안내'}</span>
             </button>
           ) : (
             <form
@@ -506,7 +510,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
                 autoFocus
                 value={quickPrompt}
                 onChange={(e) => setQuickPrompt(e.target.value)}
-                placeholder="목적지 소요시간·날씨 입력..."
+                placeholder="예: 바다 사진 찾아줘, 내일 날씨, 강남역 거리..."
                 className="w-48 sm:w-64 bg-transparent px-2 py-0.5 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none"
               />
               <button
@@ -530,6 +534,20 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 pointer-events-auto">
+          {matchedPlaylistInfo && onExitMatchedPlaylist && (
+            <button
+              type="button"
+              onClick={onExitMatchedPlaylist}
+              className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600/95 hover:bg-indigo-700 px-3 py-1.5 text-xs font-bold text-white shadow-md transition-colors whitespace-nowrap"
+              title="찾은 사진 모드를 종료하고 전체 앨범으로 돌아갑니다"
+            >
+              <span>
+                🔍 찾은 사진 {matchedPlaylistInfo.count}장 재생중 ({currentIndex + 1}/
+                {photos.length})
+              </span>
+              <X className="w-3.5 h-3.5 text-indigo-100" />
+            </button>
+          )}
           <button
             type="button"
             onClick={onCycleTransition}
@@ -612,10 +630,17 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
       {/* Bottom Photo Caption & Minimal Playback Controls */}
       {transitionMode !== 'gallery_matte' && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/75 via-black/30 to-transparent px-5 pb-4 pt-12 flex items-end justify-between gap-4">
-          <div className="min-w-0 max-w-[65%]">
-            <h2 className="text-base md:text-lg font-semibold text-white tracking-tight truncate">
-              {currentPhoto.title}
-            </h2>
+          <div className="min-w-0 max-w-[68%]">
+            <div className="flex items-center gap-2">
+              <h2 className="text-base md:text-lg font-semibold text-white tracking-tight truncate">
+                {currentPhoto.title}
+              </h2>
+              {currentPhoto.isNostalgiaPick && (
+                <span className="inline-flex items-center rounded-full bg-amber-400/90 text-[#141519] px-2 py-0.5 text-[10px] font-bold shrink-0">
+                  🕰️ 추억 회상
+                </span>
+              )}
+            </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-zinc-200">
               <span>{currentPhoto.date}</span>
               <span aria-hidden="true">·</span>
@@ -631,8 +656,8 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
             </div>
           </div>
 
-          {/* Playback Controls (positioned cleanly away from bottom-right 3D cottage) */}
-          <div className="pointer-events-auto flex items-center gap-1 mr-36 md:mr-44 shrink-0">
+          {/* Playback Controls (positioned cleanly away from compact bottom-right Disney cottage) */}
+          <div className="pointer-events-auto flex items-center gap-1 mr-24 md:mr-32 shrink-0">
             <button
               type="button"
               onClick={onPrev}

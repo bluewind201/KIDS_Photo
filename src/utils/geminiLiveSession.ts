@@ -154,20 +154,40 @@ export class GeminiLiveVoiceController {
     this.currentCallbacks = params.callbacks;
     params.callbacks.onStatusChange('connecting');
 
-    // 1. Acquire microphone first so browser/WebView grants audio capture cleanly
-    try {
-      this.micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-    } catch {
-      this.stop();
-      params.callbacks.onStatusChange('error', 'mic-denied');
-      return false;
+    // 1. Release Android SpeechRecognizer hardware mic lock before WebRTC getUserMedia!
+    const hasNativeBridge = Boolean(window.AndroidSpeechBridge);
+    if (hasNativeBridge) {
+      try {
+        if (window.AndroidSpeechBridge?.releaseRecognizerForLiveWebRtc) {
+          window.AndroidSpeechBridge.releaseRecognizerForLiveWebRtc();
+        } else {
+          window.AndroidSpeechBridge?.stopListening?.();
+        }
+      } catch {
+        // Ignore bridge release error
+      }
+      await new Promise((r) => window.setTimeout(r, 380));
+    }
+
+    // Acquire microphone with 1 automatic retry if OS audio focus is still releasing
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (this.closed) return false;
+      try {
+        this.micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        break;
+      } catch {
+        this.micStream = null;
+        if (attempt === 0) {
+          await new Promise((r) => window.setTimeout(r, 450));
+        }
+      }
     }
 
     const speciesName = SPECIES_LABELS[params.character.species || 'bunny'] || '동물 인형';
@@ -184,8 +204,8 @@ export class GeminiLiveVoiceController {
       .join(' / ');
 
     const photoPreviewText = params.photos
-      .slice(0, 24)
-      .map((p) => `[${p.title} | ${p.date} | ${p.location} | 태그:${(p.tags || []).slice(0, 4).join(',')}]`)
+      .slice(0, 60)
+      .map((p) => `[${p.title} | ${p.date} | ${p.location} | 태그:${(p.tags || []).slice(0, 5).join(',')}]`)
       .join('\n');
 
     const systemInstruction = `너는 우리 집 스마트 디지털 액자 옆 작은 집에 사는 귀여운 3D ${speciesName} 캐릭터 "${params.character.name}"이야!
@@ -420,7 +440,13 @@ ${photoPreviewText || '(사진 없음)'}`;
             name: fc.name,
             response: {
               foundCount: matched.length,
-              photos: matched.slice(0, 3).map((p) => ({
+              note:
+                matched.length > 1
+                  ? `일치하는 사진 총 ${matched.length}장을 모두 찾아 메인 액자 슬라이드와 사진첩에 띄웠습니다!`
+                  : matched.length === 1
+                  ? '일치하는 사진 1장을 찾아 액자에 띄웠습니다.'
+                  : '일치하는 사진이 아직 없습니다.',
+              photos: matched.slice(0, 10).map((p) => ({
                 title: p.title,
                 date: p.date,
                 location: p.location,

@@ -16,6 +16,341 @@ import {
 export const BACKEND_URL_STORAGE_KEY = 'kids_photo_backend_url';
 export const GEMINI_KEY_STORAGE_KEY = 'kids_photo_gemini_api_key';
 export const FRAME_SETTINGS_STORAGE_KEY = 'kids_photo_frame_settings_v1';
+export const PHOTO_SYNC_CONFIG_STORAGE_KEY = 'kids_photo_sync_config_v1';
+
+export interface PhotoSyncConfig {
+  /** Maximum number of photos to import per album sync (default 100, range 20..500) */
+  maxPhotoFetchCount: number;
+  /** When true, curates 90% newest/recent photos + 10% older past photos for nostalgia */
+  nostalgiaMixEnabled: boolean;
+}
+
+export function getSavedPhotoSyncConfig(): PhotoSyncConfig {
+  try {
+    const raw = localStorage.getItem(PHOTO_SYNC_CONFIG_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<PhotoSyncConfig>;
+      const clampedCount = Math.max(
+        20,
+        Math.min(500, Math.round(Number(parsed.maxPhotoFetchCount) || 100))
+      );
+      return {
+        maxPhotoFetchCount: clampedCount,
+        nostalgiaMixEnabled: parsed.nostalgiaMixEnabled ?? true,
+      };
+    }
+  } catch {
+    // Ignore storage read error
+  }
+  return { maxPhotoFetchCount: 100, nostalgiaMixEnabled: true };
+}
+
+export function savePhotoSyncConfig(cfg: PhotoSyncConfig): void {
+  try {
+    const safe: PhotoSyncConfig = {
+      maxPhotoFetchCount: Math.max(20, Math.min(500, Math.round(cfg.maxPhotoFetchCount || 100))),
+      nostalgiaMixEnabled: Boolean(cfg.nostalgiaMixEnabled),
+    };
+    localStorage.setItem(PHOTO_SYNC_CONFIG_STORAGE_KEY, JSON.stringify(safe));
+  } catch {
+    // Ignore storage write error
+  }
+}
+
+/**
+ * Deterministic stable photo ID derived from albumId + unique cloud/file key.
+ * Ensures existing photos keep their exact ID even when new photos are added to a folder,
+ * eliminating redundant IndexedDB Vault re-optimization!
+ */
+export function buildStablePhotoId(albumId: string, stableSourceKey: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const s = stableSourceKey.trim();
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    h1 ^= code;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= code + (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const hex = `${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
+  return `${albumId}-k-${hex}`;
+}
+
+export function inferTimestampFromNameOrDate(nameOrTitle?: string, dateStr?: string): number {
+  if (nameOrTitle) {
+    const m = nameOrTitle.match(/(20\d{2})[-_.년\s]?(0[1-9]|1[0-2])[-_.월\s]?(0[1-9]|[12]\d|3[01])/);
+    if (m) {
+      const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      if (!Number.isNaN(t)) return t;
+    }
+  }
+  if (dateStr) {
+    const km = dateStr.match(/(20\d{2})년\s*(\d{1,2})월\s*(\d{1,2})일/);
+    if (km) {
+      const t = Date.UTC(Number(km[1]), Number(km[2]) - 1, Number(km[3]));
+      if (!Number.isNaN(t)) return t;
+    }
+    const parsed = Date.parse(dateStr);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+/**
+ * Curates photos so 90% are newest/recent photos and 10% are sampled across older historical photos
+ * to spark warm family nostalgia ("최신사진 위주 90% + 과거 회상 추억 사진 10%"), interleaved every ~10 slides!
+ */
+export function curateRecentAndNostalgiaItems<T>(
+  items: T[],
+  options: {
+    maxCount?: number;
+    nostalgiaMix?: boolean;
+    getTimestampMs?: (item: T, originalIndex: number) => number;
+    /** Set true when provider returns oldest->newest by default (e.g. Google Photos HTML) and timestamps are absent */
+    assumeReverseChronologicalWhenNoTimestamp?: boolean;
+  } = {}
+): Array<{ item: T; isNostalgiaPick: boolean }> {
+  if (items.length === 0) return [];
+  const savedCfg = getSavedPhotoSyncConfig();
+  const maxCount = Math.max(1, Math.min(500, options.maxCount ?? savedCfg.maxPhotoFetchCount));
+  const useNostalgia = options.nostalgiaMix ?? savedCfg.nostalgiaMixEnabled;
+
+  const decorated = items.map((item, idx) => ({
+    item,
+    idx,
+    ts: options.getTimestampMs ? options.getTimestampMs(item, idx) : 0,
+  }));
+
+  const hasValidTimestamps = decorated.some((d) => d.ts > 0);
+  if (hasValidTimestamps) {
+    // Newest first (descending timestamp); tie-break by provider index
+    decorated.sort((a, b) => {
+      if (b.ts !== a.ts) return b.ts - a.ts;
+      return a.idx - b.idx;
+    });
+  } else if (options.assumeReverseChronologicalWhenNoTimestamp === false) {
+    // Provider lists oldest first (e.g. chronological album) -> reverse so newest are first!
+    decorated.reverse();
+  }
+
+  // Case 1: Total items already fit within maxCount
+  if (decorated.length <= maxCount) {
+    const nostalgiaStart =
+      useNostalgia && decorated.length >= 10
+        ? Math.floor(decorated.length * 0.9)
+        : decorated.length;
+    const recentPart = decorated.slice(0, nostalgiaStart).map((d) => ({
+      item: d.item,
+      isNostalgiaPick: false,
+    }));
+    const pastPart = decorated.slice(nostalgiaStart).map((d) => ({
+      item: d.item,
+      isNostalgiaPick: true,
+    }));
+    return interleaveRecentAndPast(recentPart, pastPart);
+  }
+
+  // Case 2: Total items exceed maxCount -> 90% newest + 10% stratified past throwback picks!
+  if (!useNostalgia) {
+    return decorated.slice(0, maxCount).map((d) => ({
+      item: d.item,
+      isNostalgiaPick: false,
+    }));
+  }
+
+  const pastQuota = Math.max(1, Math.round(maxCount * 0.1));
+  const recentQuota = Math.max(1, maxCount - pastQuota);
+
+  const recentSelected = decorated.slice(0, recentQuota).map((d) => ({
+    item: d.item,
+    isNostalgiaPick: false,
+  }));
+
+  const olderPool = decorated.slice(recentQuota);
+  const pastSelected: Array<{ item: T; isNostalgiaPick: boolean }> = [];
+  if (olderPool.length <= pastQuota) {
+    for (const d of olderPool) {
+      pastSelected.push({ item: d.item, isNostalgiaPick: true });
+    }
+  } else {
+    // Evenly sample across the entire historical archive (months/years ago) so diverse past eras appear!
+    const step = olderPool.length / pastQuota;
+    for (let i = 0; i < pastQuota; i++) {
+      const pickIdx = Math.min(olderPool.length - 1, Math.floor((i + 0.5) * step));
+      pastSelected.push({ item: olderPool[pickIdx].item, isNostalgiaPick: true });
+    }
+  }
+
+  return interleaveRecentAndPast(recentSelected, pastSelected);
+}
+
+function interleaveRecentAndPast<T>(
+  recentList: Array<{ item: T; isNostalgiaPick: boolean }>,
+  pastList: Array<{ item: T; isNostalgiaPick: boolean }>
+): Array<{ item: T; isNostalgiaPick: boolean }> {
+  if (pastList.length === 0) return recentList;
+  if (recentList.length === 0) return pastList;
+
+  const merged: Array<{ item: T; isNostalgiaPick: boolean }> = [];
+  const interval = Math.max(4, Math.floor(recentList.length / pastList.length));
+  let pIdx = 0;
+
+  for (let rIdx = 0; rIdx < recentList.length; rIdx++) {
+    merged.push(recentList[rIdx]);
+    if ((rIdx + 1) % interval === 0 && pIdx < pastList.length) {
+      merged.push(pastList[pIdx++]);
+    }
+  }
+  while (pIdx < pastList.length) {
+    merged.push(pastList[pIdx++]);
+  }
+  return merged;
+}
+
+const PHOTO_SYNONYM_GROUPS: string[][] = [
+  ['바다', '해변', '바닷가', '해수욕장', '모래사장', '파도', '제주', '갯벌', '물놀이', '수영', '바다·하늘'],
+  ['산', '숲', '공원', '나무', '잔디', '산책', '소풍', '피크닉', '나들이', '자연', '숲·공원', '식물원'],
+  ['캠핑', '글램핑', '텐트', '바베큐', '모닥불'],
+  ['눈', '겨울', '눈사람', '눈썰매', '썰매', '스키', '설경', '눈밭', '눈·겨울'],
+  ['꽃', '봄', '벚꽃', '유채꽃', '튤립', '꽃밭', '꽃놀이', '봄날'],
+  ['단풍', '가을', '은행나무', '낙엽'],
+  ['여름', '휴가', '수영장', '계곡', '튜브'],
+  ['생일', '케이크', '촛불', '파티', '축하', '돌잔치'],
+  ['놀이공원', '에버랜드', '롯데월드', '회전목마', '풍선', '동물원', '아쿠아리움'],
+  ['웃는', '웃음', '미소', '행복', '신남', '신나는', '즐거운'],
+  ['아이', '아기', '어린이', '단독', '독사진'],
+  ['가족', '엄마', '아빠', '부모님', '할머니', '할아버지', '단체'],
+  ['강아지', '멍멍이', '고양이', '야옹이', '토끼', '동물'],
+  ['음식', '간식', '딸기', '아이스크림', '맛집', '카페'],
+];
+
+export function isPhotoSearchIntent(rawQuery: string): boolean {
+  const q = rawQuery.trim();
+  if (!q) return false;
+  if (/사진|앨범|추억\s*(보여|찾아)|옛날\s*사진|과거\s*사진|찍은\s*거/.test(q)) return true;
+  if (/(보여\s*줘|보여\s*줄래|찾아\s*줘|찾아\s*봐|틀어\s*줘|띄워\s*줘)/.test(q)) {
+    if (!/날씨|기온|미세먼지|일정|스케줄|가는\s*길|얼마나\s*걸/.test(q)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Multi-photo smart Korean semantic & synonym search engine.
+ * Finds ALL matching photos across title, location, tags, objects, season, mood, people, date, albumName, and AI summary!
+ */
+export function searchPhotosSmart<
+  T extends {
+    id: string;
+    title: string;
+    date: string;
+    location: string;
+    albumName: string;
+    tags: string[];
+    aiSummary: string;
+    season?: string;
+    mood?: string;
+    people?: string;
+    objects?: string[];
+    isNostalgiaPick?: boolean;
+  }
+>(photos: T[], rawQuery: string, maxResults = 40): T[] {
+  if (photos.length === 0) return [];
+  const cleanQ = rawQuery.trim();
+  if (!cleanQ) return photos.slice(0, maxResults);
+
+  // Special nostalgia / throwback query ("옛날 사진", "과거 사진", "어릴 때 사진")
+  if (/옛날|과거|어릴\s*때|예전|오래된|회상/.test(cleanQ)) {
+    const nostalgiaOnes = photos.filter((p) => p.isNostalgiaPick);
+    if (nostalgiaOnes.length >= 2) {
+      return nostalgiaOnes.slice(0, maxResults);
+    }
+    const tailCount = Math.max(2, Math.ceil(photos.length * 0.25));
+    return photos.slice(-tailCount).reverse().slice(0, maxResults);
+  }
+
+  // Strip conversational filler words & Korean particles
+  const stripped = cleanQ
+    .replace(/[?!.,~"']/g, ' ')
+    .replace(
+      /(사진들?|앨범|보여\s*줘요?|보여\s*줄래요?|찾아\s*줘요?|찾아\s*봐줘?|틀어\s*줘요?|띄워\s*줘요?|꺼내\s*줘|다\s*찾아|모두|전부|언제야?|어디야?|갔던|찍은|찍었던|있어|있나|볼래|보고\s*싶어)/g,
+      ' '
+    )
+    .trim();
+
+  const rawTokens = stripped
+    .split(/\s+/)
+    .map((tok) => tok.replace(/(에서|으로|이랑|하고|이랑|부터|까지|에|의|을|를|이|가|은|는|도|만)$/g, '').trim())
+    .filter((tok) => tok.length >= 1 && !/^(우리|내가|같이|제일|너무|진짜|좀|그거|저거)$/.test(tok));
+
+  // Expand synonyms for every matched token
+  const expandedTerms = new Map<string, number>(); // term -> weight
+  for (const tok of rawTokens) {
+    const low = tok.toLowerCase();
+    expandedTerms.set(low, 6);
+    for (const group of PHOTO_SYNONYM_GROUPS) {
+      if (group.some((g) => low.includes(g) || g.includes(low))) {
+        for (const syn of group) {
+          if (!expandedTerms.has(syn)) {
+            expandedTerms.set(syn, 3);
+          }
+        }
+      }
+    }
+  }
+
+  // Also check if full cleanQ directly hits any synonym group (e.g., attached words like "바다사진")
+  for (const group of PHOTO_SYNONYM_GROUPS) {
+    for (const kw of group) {
+      if (cleanQ.includes(kw)) {
+        expandedTerms.set(kw, Math.max(expandedTerms.get(kw) ?? 0, 6));
+        for (const syn of group) {
+          if (!expandedTerms.has(syn)) {
+            expandedTerms.set(syn, 3);
+          }
+        }
+      }
+    }
+  }
+
+  if (expandedTerms.size === 0) {
+    return photos.slice(0, Math.min(12, maxResults));
+  }
+
+  const scored = photos
+    .map((p) => {
+      const primaryFields = [
+        p.title,
+        p.location,
+        p.albumName,
+        ...(p.tags ?? []),
+        ...(p.objects ?? []),
+        p.season ?? '',
+        p.mood ?? '',
+        p.people ?? '',
+      ]
+        .join(' ')
+        .toLowerCase();
+      const secondaryFields = `${p.date} ${p.aiSummary}`.toLowerCase();
+
+      let score = 0;
+      for (const [term, weight] of expandedTerms.entries()) {
+        if (!term) continue;
+        if (primaryFields.includes(term)) {
+          score += weight * 2;
+        } else if (secondaryFields.includes(term)) {
+          score += weight;
+        }
+      }
+      return { photo: p, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, maxResults).map((s) => s.photo);
+}
 
 export function getBackendBaseUrl(): string {
   try {
@@ -334,7 +669,29 @@ export async function askAssistantUnified(params: {
   currentLng: number;
   weatherSummary: WeatherPayload | null;
   schedules: ScheduleItem[];
+  photos?: PhotoItem[];
 }): Promise<AssistantInquiryResult> {
+  // Fast Multi-Photo Memory Search when user asks to find/show specific photos!
+  if (params.photos && params.photos.length > 0 && isPhotoSearchIntent(params.query)) {
+    const matched = searchPhotosSmart(params.photos, params.query, 40);
+    if (matched.length > 0) {
+      const first = matched[0];
+      return {
+        category: 'photo_memories',
+        headline: `요청하신 추억 사진 ${matched.length}장을 모두 찾았습니다`,
+        spokenSummary:
+          matched.length === 1
+            ? `찾으시는 "${first.title}" 사진 1장을 찾아 액자에 띄워드렸어요!`
+            : `찾으시는 사진 총 ${matched.length}장을 모두 찾아 메인 액자에서 연속으로 재생해 드릴게요! 첫 번째 사진은 ${first.date} "${first.title}"입니다.`,
+        detailMarkdown: matched
+          .slice(0, 8)
+          .map((p, idx) => `${idx + 1}. **${p.title}** (${p.date} · ${p.location})`)
+          .join('\n'),
+        matchedPhotos: matched,
+      };
+    }
+  }
+
   const backend = await tryBackendJson<AssistantInquiryResult>('/api/gemini/assistant', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -569,6 +926,11 @@ export async function askBunnyChatUnified(params: {
       trimmedMsg
     );
 
+  // Pre-compute smart multi-photo matches across ALL user photos (never limited to first 25!)
+  const localPhotoMatches =
+    params.photos.length > 0 ? searchPhotosSmart(params.photos, trimmedMsg, 40) : [];
+  const explicitPhotoIntent = isPhotoSearchIntent(trimmedMsg);
+
   // Try direct client-side Gemini if API key is saved
   const ai = getClientGemini();
   if (ai) {
@@ -577,8 +939,24 @@ export async function askBunnyChatUnified(params: {
         ? ['gemini-2.5-pro', 'gemini-2.5-flash']
         : ['gemini-2.5-flash'];
 
-    const photoCatalogText = params.photos
-      .slice(0, 25)
+    // Prioritize all locally matched candidate photos first + fill up to 65 total so Gemini sees the entire relevant pool!
+    const seenCatIds = new Set<string>();
+    const candidatePool: typeof params.photos = [];
+    for (const m of localPhotoMatches) {
+      if (!seenCatIds.has(m.id)) {
+        seenCatIds.add(m.id);
+        candidatePool.push(m);
+      }
+    }
+    for (const p of params.photos) {
+      if (candidatePool.length >= 65) break;
+      if (!seenCatIds.has(p.id)) {
+        seenCatIds.add(p.id);
+        candidatePool.push(p);
+      }
+    }
+
+    const photoCatalogText = candidatePool
       .map(
         (p) =>
           `- ID: "${p.id}" | 제목: ${p.title} | 날짜: ${p.date} | 장소: ${p.location} | 태그: ${p.tags.join(', ')} | 설명: ${p.aiSummary}`
@@ -605,7 +983,10 @@ ${englishPromptRule}
 [등록된 가족 사진 목록]
 ${photoCatalogText}
 
-진짜 살아있는 다정한 친구처럼 감탄사와 자연스러운 호흡을 담아 1~2문장의 한국어 반말(replyText)로 대답해줘! 사진/추억 질문이면 isPhotoMemoryQuery=true와 matchedPhotoIds를 채워줘.`,
+진짜 살아있는 다정한 친구처럼 감탄사와 자연스러운 호흡을 담아 1~2문장의 한국어 반말(replyText)로 대답해줘!
+특히 사진/추억 찾아달라는 요청이면:
+- isPhotoMemoryQuery=true 로 설정하고,
+- **절대로 1개만 고르지 말고**, 목록에서 조건에 해당되는 **모든 사진의 ID를 빠짐없이 matchedPhotoIds 배열에 전부 담아줘!** (예: 관련 사진이 8장이면 8개 ID 모두 포함, replyText에도 몇 장 찾았는지 신나게 말해줘!)`,
           config: {
             responseMimeType: 'application/json',
             responseSchema: {
@@ -640,6 +1021,15 @@ ${photoCatalogText}
         });
         const parsed = JSON.parse((resp.text ?? '{}').trim()) as BunnyChatReplyPayload;
         if (parsed.replyText) {
+          // Merge Gemini's matchedPhotoIds with all local smart matches so NEVER just 1 photo is returned when multiple exist!
+          if (parsed.isPhotoMemoryQuery || explicitPhotoIntent) {
+            const mergedIdSet = new Set<string>(parsed.matchedPhotoIds ?? []);
+            for (const m of localPhotoMatches) {
+              mergedIdSet.add(m.id);
+            }
+            parsed.isPhotoMemoryQuery = mergedIdSet.size > 0 || Boolean(parsed.isPhotoMemoryQuery);
+            parsed.matchedPhotoIds = Array.from(mergedIdSet);
+          }
           if (!allowEnglish) {
             return {
               ...parsed,
@@ -666,64 +1056,24 @@ ${photoCatalogText}
     };
   }
 
-  // Check photo memory query (matches against AI structured index: tags, season, mood, people, objects, location, title, summary!)
+  // Check photo memory query (returns ALL matching photos via searchPhotosSmart!)
   const looksLikePhotoQuery =
-    /언제|어디|사진|갔|보여|찾아|바다|해변|제주|숲|공원|캠핑|단풍|가을|봄|여름|겨울|벚꽃|꽃|소풍|딸기|놀이공원|에버랜드|회전목마|눈|썰매|눈사람|웃|행복|생일|케이크|강아지|동물|여행|추억/i.test(
+    explicitPhotoIntent ||
+    /언제|어디|사진|갔|보여|찾아|바다|해변|제주|숲|공원|캠핑|단풍|가을|봄|여름|겨울|벚꽃|꽃|소풍|딸기|놀이공원|에버랜드|회전목마|눈|썰매|눈사람|웃|행복|생일|케이크|강아지|동물|여행|추억|옛날|과거/i.test(
       trimmedMsg
     );
 
   if (looksLikePhotoQuery && params.photos.length > 0) {
-    const queryTokens = trimmedMsg
-      .replace(/[?!.,~]/g, ' ')
-      .split(/\s+/)
-      .map((w) => w.replace(/(사진|보여줘|찾아줘|갔던|어디야|언제야|에|에서|이|가|을|를)$/g, '').trim())
-      .filter((w) => w.length >= 2);
-
-    const scored = params.photos
-      .map((p) => {
-        const pExt = p as typeof p & {
-          season?: string;
-          mood?: string;
-          people?: string;
-          objects?: string[];
-        };
-        const haystack = [
-          p.title,
-          p.location,
-          p.albumName,
-          p.date,
-          p.aiSummary,
-          ...(p.tags ?? []),
-          pExt.season ?? '',
-          pExt.mood ?? '',
-          pExt.people ?? '',
-          ...(pExt.objects ?? []),
-        ]
-          .join(' ')
-          .toLowerCase();
-
-        let score = 0;
-        for (const t of p.tags ?? []) {
-          if (t && trimmedMsg.includes(t)) score += 5;
-        }
-        for (const tok of queryTokens) {
-          if (haystack.includes(tok.toLowerCase())) score += 3;
-        }
-        if (p.location && p.location.length >= 2 && trimmedMsg.includes(p.location.slice(0, 2))) {
-          score += 4;
-        }
-        return { photo: p, score };
-      })
-      .sort((a, b) => b.score - a.score);
-
-    const positiveMatches = scored.filter((s) => s.score > 0).map((s) => s.photo);
-    const picked = positiveMatches.length > 0 ? positiveMatches.slice(0, 4) : params.photos.slice(0, 2);
+    const picked =
+      localPhotoMatches.length > 0 ? localPhotoMatches : params.photos.slice(0, 6);
     const first = picked[0];
+    const countLabel =
+      picked.length > 1 ? `총 ${picked.length}장의 사진을 다 찾았어! 액자에 차례대로 보여줄게! ` : '';
     return {
-      replyText: `우와~ 찾았다!! ${first.date}에 "${first.location}" 추억 사진이야! ${first.aiSummary || `${first.title} 순간이 정말 행복해 보여~!`} `,
+      replyText: `우와~ 찾았다!! ${countLabel}${first.date} "${first.location}" 추억 사진이야! ${first.aiSummary || `${first.title} 순간이 정말 행복해 보여~!`} `,
       isPhotoMemoryQuery: true,
       matchedPhotoIds: picked.map((p) => p.id),
-      memoryHeadline: `${name}가 AI 데이터에서 찾아준 우리 가족 사진`,
+      memoryHeadline: `${name}가 찾아준 우리 가족 사진 (${picked.length}장)`,
       shouldSuggestEnglishReask: false,
       shouldShowFlashcard: false,
     };
@@ -980,15 +1330,23 @@ export async function fetchSynologyFolderPhotos(params: {
   albumId: string;
   albumName: string;
   provider: StorageProvider;
+  maxCount?: number;
+  nostalgiaMix?: boolean;
 }): Promise<PhotoItem[]> {
   try {
+    const syncCfg = getSavedPhotoSyncConfig();
+    const targetMax = Math.max(10, Math.min(500, params.maxCount ?? syncCfg.maxPhotoFetchCount));
+    const useNostalgia = params.nostalgiaMix ?? syncCfg.nostalgiaMixEnabled;
+
     const fileParams = new URLSearchParams({
       api: 'SYNO.FileStation.List',
       version: '2',
       method: 'list',
       folder_path: params.folderPath,
       additional: '["time"]',
-      limit: '50',
+      sort_by: 'mtime',
+      sort_direction: 'desc',
+      limit: String(Math.max(400, targetMax * 3)),
       _sid: params.sid,
     });
     const url = `${params.cleanBase}/webapi/entry.cgi?${fileParams.toString()}`;
@@ -1011,7 +1369,16 @@ export async function fetchSynologyFolderPhotos(params: {
       (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(f.name)
     );
 
-    return imageFiles.slice(0, 60).map((file, i) => {
+    const curated = curateRecentAndNostalgiaItems(imageFiles, {
+      maxCount: targetMax,
+      nostalgiaMix: useNostalgia,
+      getTimestampMs: (f) =>
+        f.additional?.time?.mtime
+          ? f.additional.time.mtime * 1000
+          : inferTimestampFromNameOrDate(f.name),
+    });
+
+    return curated.map(({ item: file, isNostalgiaPick }) => {
       // Prioritize rotated, lightweight Synology DSM thumbnails (`large` ~1280px ~180KB) before raw 25MB `Download`!
       const thumbLargeParams = new URLSearchParams({
         api: 'SYNO.FileStation.Thumb',
@@ -1048,7 +1415,7 @@ export async function fetchSynologyFolderPhotos(params: {
         : '시놀로지 NAS 추억';
 
       return {
-        id: `${params.albumId}-syno-${i}`,
+        id: buildStablePhotoId(params.albumId, file.path || file.name),
         albumId: params.albumId,
         albumName: params.albumName,
         provider: params.provider,
@@ -1058,8 +1425,13 @@ export async function fetchSynologyFolderPhotos(params: {
         title: file.name.replace(/\.[^.]+$/, ''),
         date: dateStr,
         location: params.albumName,
-        tags: ['시놀로지', params.albumName],
+        tags: [
+          '시놀로지',
+          params.albumName,
+          ...(isNostalgiaPick ? ['추억회상', '예전사진'] : []),
+        ],
         aiSummary: `시놀로지 NAS "${params.albumName}" 폴더에서 불러온 가족 사진입니다.`,
+        isNostalgiaPick,
       };
     });
   } catch {
@@ -1081,7 +1453,12 @@ export async function fetchCloudProviderFolderPhotos(params: {
   webdavUrl?: string;
   webdavUser?: string;
   webdavPass?: string;
+  maxCount?: number;
+  nostalgiaMix?: boolean;
 }): Promise<PhotoItem[]> {
+  const syncCfg = getSavedPhotoSyncConfig();
+  const targetMax = Math.max(10, Math.min(500, params.maxCount ?? syncCfg.maxPhotoFetchCount));
+  const useNostalgia = params.nostalgiaMix ?? syncCfg.nostalgiaMixEnabled;
   const todayLabel = new Date().toLocaleDateString('ko-KR', {
     year: 'numeric',
     month: 'long',
@@ -1092,16 +1469,23 @@ export async function fetchCloudProviderFolderPhotos(params: {
     const q = encodeURIComponent(
       `'${params.folderId}' in parents and mimeType contains 'image/' and trashed = false`
     );
+    const pageSize = Math.min(1000, Math.max(300, targetMax * 3));
     const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,thumbnailLink)&pageSize=100`,
+      `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime%20desc&fields=files(id,name,createdTime,thumbnailLink)&pageSize=${pageSize}`,
       { headers: { Authorization: `Bearer ${params.gdriveToken.trim()}` } }
     );
     if (res.ok) {
       const data = (await res.json()) as {
         files?: Array<{ id: string; name: string; createdTime?: string; thumbnailLink?: string }>;
       };
-      return (data.files ?? []).map((f, idx) => ({
-        id: `${params.albumId}-gdrive-oauth-${idx}`,
+      const curated = curateRecentAndNostalgiaItems(data.files ?? [], {
+        maxCount: targetMax,
+        nostalgiaMix: useNostalgia,
+        getTimestampMs: (f) =>
+          f.createdTime ? Date.parse(f.createdTime) : inferTimestampFromNameOrDate(f.name),
+      });
+      return curated.map(({ item: f, isNostalgiaPick }) => ({
+        id: buildStablePhotoId(params.albumId, f.id),
         albumId: params.albumId,
         albumName: params.albumName,
         provider: 'google_drive',
@@ -1118,15 +1502,21 @@ export async function fetchCloudProviderFolderPhotos(params: {
             })
           : todayLabel,
         location: params.albumName,
-        tags: ['구글드라이브', params.albumName],
+        tags: [
+          '구글드라이브',
+          params.albumName,
+          ...(isNostalgiaPick ? ['추억회상', '예전사진'] : []),
+        ],
         aiSummary: `Google Drive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+        isNostalgiaPick,
       }));
     }
   }
 
   if (params.provider === 'onedrive' && params.onedriveToken?.trim()) {
+    const topSize = Math.min(999, Math.max(300, targetMax * 3));
     const res = await fetch(
-      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(params.folderId)}/children?$top=100`,
+      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(params.folderId)}/children?$top=${topSize}`,
       { headers: { Authorization: `Bearer ${params.onedriveToken.trim()}` } }
     );
     if (res.ok) {
@@ -1134,31 +1524,51 @@ export async function fetchCloudProviderFolderPhotos(params: {
         value?: Array<{
           id: string;
           name: string;
+          createdDateTime?: string;
+          photo?: { takenDateTime?: string };
           image?: Record<string, unknown>;
           file?: { mimeType?: string };
           '@microsoft.graph.downloadUrl'?: string;
         }>;
       };
-      return (data.value ?? [])
-        .filter(
-          (item) =>
-            Boolean(item['@microsoft.graph.downloadUrl']) &&
-            (Boolean(item.image) ||
-              Boolean(item.file?.mimeType?.startsWith('image/')) ||
-              /\.(jpe?g|png|webp|gif|bmp)$/i.test(item.name))
-        )
-        .map((item, idx) => ({
-          id: `${params.albumId}-onedrive-oauth-${idx}`,
-          albumId: params.albumId,
-          albumName: params.albumName,
-          provider: 'onedrive',
-          src: item['@microsoft.graph.downloadUrl'] || '',
-          title: item.name.replace(/\.[^.]+$/, ''),
-          date: todayLabel,
-          location: params.albumName,
-          tags: ['원드라이브', params.albumName],
-          aiSummary: `OneDrive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
-        }));
+      const imgs = (data.value ?? []).filter(
+        (item) =>
+          Boolean(item['@microsoft.graph.downloadUrl']) &&
+          (Boolean(item.image) ||
+            Boolean(item.file?.mimeType?.startsWith('image/')) ||
+            /\.(jpe?g|png|webp|gif|bmp)$/i.test(item.name))
+      );
+      const curated = curateRecentAndNostalgiaItems(imgs, {
+        maxCount: targetMax,
+        nostalgiaMix: useNostalgia,
+        getTimestampMs: (it) => {
+          const dt = it.photo?.takenDateTime || it.createdDateTime;
+          return dt ? Date.parse(dt) : inferTimestampFromNameOrDate(it.name);
+        },
+      });
+      return curated.map(({ item, isNostalgiaPick }) => ({
+        id: buildStablePhotoId(params.albumId, item.id || item.name),
+        albumId: params.albumId,
+        albumName: params.albumName,
+        provider: 'onedrive',
+        src: item['@microsoft.graph.downloadUrl'] || '',
+        title: item.name.replace(/\.[^.]+$/, ''),
+        date: item.photo?.takenDateTime
+          ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })
+          : todayLabel,
+        location: params.albumName,
+        tags: [
+          '원드라이브',
+          params.albumName,
+          ...(isNostalgiaPick ? ['추억회상', '예전사진'] : []),
+        ],
+        aiSummary: `OneDrive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+        isNostalgiaPick,
+      }));
     }
   }
 
@@ -1185,10 +1595,15 @@ export async function fetchCloudProviderFolderPhotos(params: {
           m[1].trim()
         );
         const imageHrefs = hrefs.filter((h) => /\.(jpe?g|png|webp|gif|bmp)$/i.test(decodeURIComponent(h)));
+        const curatedHrefs = curateRecentAndNostalgiaItems(imageHrefs, {
+          maxCount: Math.min(targetMax, 120),
+          nostalgiaMix: useNostalgia,
+          getTimestampMs: (h) => inferTimestampFromNameOrDate(decodeURIComponent(h)),
+          assumeReverseChronologicalWhenNoTimestamp: false,
+        });
         const out: PhotoItem[] = [];
-        // Fetch up to 30 WebDAV images as base64 data URLs since <img> cannot pass Basic Auth headers in modern WebViews
-        for (let i = 0; i < Math.min(imageHrefs.length, 30); i++) {
-          const href = imageHrefs[i];
+        for (let i = 0; i < curatedHrefs.length; i++) {
+          const { item: href, isNostalgiaPick } = curatedHrefs[i];
           const fullImgUrl = href.startsWith('http') ? href : `${origin}${href.startsWith('/') ? '' : '/'}${href}`;
           const imgRes = await CapacitorHttp.get({
             url: fullImgUrl,
@@ -1201,7 +1616,7 @@ export async function fetchCloudProviderFolderPhotos(params: {
             const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
             const dataUri = imgRes.data.startsWith('data:') ? imgRes.data : `data:${mime};base64,${imgRes.data}`;
             out.push({
-              id: `${params.albumId}-webdav-${i}`,
+              id: buildStablePhotoId(params.albumId, href),
               albumId: params.albumId,
               albumName: params.albumName,
               provider: 'synology_webdav',
@@ -1209,8 +1624,9 @@ export async function fetchCloudProviderFolderPhotos(params: {
               title: decodedName.replace(/\.[^.]+$/, ''),
               date: todayLabel,
               location: params.albumName,
-              tags: ['WebDAV', params.albumName],
+              tags: ['WebDAV', params.albumName, ...(isNostalgiaPick ? ['추억회상'] : [])],
               aiSummary: `시놀로지 WebDAV "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+              isNostalgiaPick,
             });
           }
         }
@@ -2272,7 +2688,13 @@ export async function resolvePublicShareLinkUnified(params: {
   customTitle?: string;
   password?: string;
   albumId: string;
+  maxCount?: number;
+  nostalgiaMix?: boolean;
 }): Promise<ResolvedShareAlbumResult> {
+  const syncCfg = getSavedPhotoSyncConfig();
+  const targetMax = Math.max(1, Math.min(500, params.maxCount ?? syncCfg.maxPhotoFetchCount));
+  const useNostalgia = params.nostalgiaMix ?? syncCfg.nostalgiaMixEnabled;
+
   let rawUrl = params.url.trim();
   if (!rawUrl) {
     throw new Error('공유 링크 URL을 입력해 주세요.');
@@ -2298,17 +2720,29 @@ export async function resolvePublicShareLinkUnified(params: {
         albumName: params.customTitle,
         password: params.password,
         albumId: params.albumId,
+        maxCount: targetMax,
+        nostalgiaMix: useNostalgia,
       }),
     },
     14000
   );
 
   if (backend.ok && Array.isArray(backend.data.photos) && backend.data.photos.length > 0) {
+    const curatedBackend = curateRecentAndNostalgiaItems(backend.data.photos, {
+      maxCount: targetMax,
+      nostalgiaMix: useNostalgia,
+      getTimestampMs: (p) => inferTimestampFromNameOrDate(p.title, p.date),
+    }).map(({ item, isNostalgiaPick }) => ({
+      ...item,
+      id: buildStablePhotoId(params.albumId, item.id || item.src),
+      albumId: params.albumId,
+      isNostalgiaPick,
+    }));
     return {
       provider: backend.data.provider || 'share_link',
       albumTitle: backend.data.title || params.customTitle?.trim() || '공유 사진 앨범',
       resolvedUrl: backend.data.url || rawUrl,
-      photos: backend.data.photos,
+      photos: curatedBackend,
     };
   }
   if (!Capacitor.isNativePlatform() && !backend.ok && backend.errorMsg) {
@@ -2332,7 +2766,7 @@ export async function resolvePublicShareLinkUnified(params: {
       resolvedUrl: rawUrl,
       photos: [
         {
-          id: `${params.albumId}-img-0`,
+          id: buildStablePhotoId(params.albumId, rawUrl),
           albumId: params.albumId,
           albumName: title,
           provider: 'share_link',
@@ -2378,15 +2812,22 @@ export async function resolvePublicShareLinkUnified(params: {
       }
     }
 
-    const baseUrls = Array.from(urlSet).slice(0, 120);
-    if (baseUrls.length === 0) {
+    const allBaseUrls = Array.from(urlSet);
+    if (allBaseUrls.length === 0) {
       throw new Error(
         '구글 포토 공유 링크에서 사진을 찾지 못했습니다. 구글 포토 앱에서 [앨범 공유 → 링크 생성(링크가 있는 모든 사용자 보기 허용)] 상태인지 확인해 주세요.'
       );
     }
 
-    const photos: PhotoItem[] = baseUrls.map((baseUrl, idx) => ({
-      id: `${params.albumId}-gphotos-${idx}`,
+    // Google Photos shared albums typically list oldest -> newest; reverse when no timestamp so newest 90% + oldest 10% are curated!
+    const curatedUrls = curateRecentAndNostalgiaItems(allBaseUrls, {
+      maxCount: targetMax,
+      nostalgiaMix: useNostalgia,
+      assumeReverseChronologicalWhenNoTimestamp: false,
+    });
+
+    const photos: PhotoItem[] = curatedUrls.map(({ item: baseUrl, isNostalgiaPick }, idx) => ({
+      id: buildStablePhotoId(params.albumId, baseUrl),
       albumId: params.albumId,
       albumName: albumTitle,
       provider: 'google_drive',
@@ -2396,8 +2837,9 @@ export async function resolvePublicShareLinkUnified(params: {
       title: `${albumTitle} #${idx + 1}`,
       date: todayLabel,
       location: albumTitle,
-      tags: ['구글포토', albumTitle],
+      tags: ['구글포토', albumTitle, ...(isNostalgiaPick ? ['추억회상', '예전사진'] : [])],
       aiSummary: `Google 포토 공유 앨범 "${albumTitle}"에서 불러온 실제 사진입니다.`,
+      isNostalgiaPick,
     }));
 
     return {
@@ -2430,7 +2872,7 @@ export async function resolvePublicShareLinkUnified(params: {
           resolvedUrl: rawUrl,
           photos: [
             {
-              id: `${params.albumId}-gdrive-0`,
+              id: buildStablePhotoId(params.albumId, fileId),
               albumId: params.albumId,
               albumName: albumTitle,
               provider: 'google_drive',
@@ -2474,7 +2916,6 @@ export async function resolvePublicShareLinkUnified(params: {
           const innerHtml = m[2] || '';
           const fileName = decodeHtmlEntities(m[3].trim());
           const isSubfolder = /\/drive\/folders\/|folderview\?id=/i.test(innerHtml);
-          // Exclude subfolders and obvious non-image documents/videos
           if (
             id !== folderId &&
             !isSubfolder &&
@@ -2509,7 +2950,6 @@ export async function resolvePublicShareLinkUnified(params: {
             }
           }
 
-          // Prefer explicit image MIME entries inside `_DRIVE_ivd` first!
           const ivdImgRegex =
             /\["([a-zA-Z0-9_-]{25,45})"\s*,\s*\["[a-zA-Z0-9_-]+"\]\s*,\s*"([^"]+)"\s*,\s*"image\/[a-zA-Z0-9.+-]+"/g;
           for (const m of unescaped.matchAll(ivdImgRegex)) {
@@ -2534,15 +2974,22 @@ export async function resolvePublicShareLinkUnified(params: {
 
       if (!albumTitle) albumTitle = 'Google Drive 공유 폴더';
 
-      const entries = Array.from(foundFiles.entries()).slice(0, 120);
-      if (entries.length === 0) {
+      const allEntries = Array.from(foundFiles.entries());
+      if (allEntries.length === 0) {
         throw new Error(
           '구글 드라이브 폴더에서 이미지 파일을 찾지 못했습니다. 폴더 바로 안에 사진(JPG/PNG/WEBP)이 들어 있는지(하위 폴더가 아닌 해당 폴더 직접 공유), 공유 권한이 [링크가 있는 모든 사용자]인지 확인해 주세요.'
         );
       }
 
-      const photos: PhotoItem[] = entries.map(([fileId, fileName], idx) => ({
-        id: `${params.albumId}-gdrive-${idx}`,
+      const curatedEntries = curateRecentAndNostalgiaItems(allEntries, {
+        maxCount: targetMax,
+        nostalgiaMix: useNostalgia,
+        getTimestampMs: ([, fileName]) => inferTimestampFromNameOrDate(fileName),
+        assumeReverseChronologicalWhenNoTimestamp: false,
+      });
+
+      const photos: PhotoItem[] = curatedEntries.map(({ item: [fileId, fileName], isNostalgiaPick }) => ({
+        id: buildStablePhotoId(params.albumId, fileId),
         albumId: params.albumId,
         albumName: albumTitle,
         provider: 'google_drive',
@@ -2555,8 +3002,9 @@ export async function resolvePublicShareLinkUnified(params: {
         title: fileName.replace(/\.[^.]+$/, ''),
         date: todayLabel,
         location: albumTitle,
-        tags: ['구글드라이브', albumTitle],
+        tags: ['구글드라이브', albumTitle, ...(isNostalgiaPick ? ['추억회상', '예전사진'] : [])],
         aiSummary: `Google Drive "${albumTitle}" 폴더에서 불러온 실제 사진입니다.`,
+        isNostalgiaPick,
       }));
 
       return {
@@ -2580,7 +3028,6 @@ export async function resolvePublicShareLinkUnified(params: {
       // Keep original URL
     }
 
-    // Obtain anonymous Microsoft Badger token for public OneDrive shares
     let badgerToken = '';
     try {
       const tokenRes = await rawPost(
@@ -2599,6 +3046,7 @@ export async function resolvePublicShareLinkUnified(params: {
     interface OneDriveItem {
       id?: string;
       name?: string;
+      createdDateTime?: string;
       file?: { mimeType?: string };
       image?: Record<string, unknown>;
       photo?: { takenDateTime?: string };
@@ -2613,8 +3061,8 @@ export async function resolvePublicShareLinkUnified(params: {
     for (const candidate of candidateUrls) {
       const shareId = encodeOneDriveShareToken(candidate);
       const endpoints = [
-        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children($expand=thumbnails)`,
-        `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($expand=thumbnails)`,
+        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children($top=999;$expand=thumbnails)`,
+        `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($top=999;$expand=thumbnails)`,
       ];
 
       for (const ep of endpoints) {
@@ -2649,10 +3097,18 @@ export async function resolvePublicShareLinkUnified(params: {
       });
 
       if (imageItems.length > 0) {
-        const photos: PhotoItem[] = imageItems.slice(0, 120).map((item, idx) => {
+        const curatedItems = curateRecentAndNostalgiaItems(imageItems, {
+          maxCount: targetMax,
+          nostalgiaMix: useNostalgia,
+          getTimestampMs: (item) => {
+            const dt = item.photo?.takenDateTime || item.createdDateTime;
+            return dt ? Date.parse(dt) : inferTimestampFromNameOrDate(item.name);
+          },
+        });
+
+        const photos: PhotoItem[] = curatedItems.map(({ item, isNostalgiaPick }, idx) => {
           const thumbLarge = item.thumbnails?.[0]?.large?.url || '';
           const directDl = item['@content.downloadUrl'] || '';
-          // Prefer `thumbLarge` for `.heic` so Android WebView renders JPEG cleanly; otherwise use `directDl` with `thumbLarge` backup!
           const isHeic = /\.heic$/i.test(item.name || '');
           const primarySrc = isHeic && thumbLarge ? thumbLarge : directDl || thumbLarge;
           const backupSrc = isHeic ? directDl : thumbLarge || undefined;
@@ -2665,7 +3121,7 @@ export async function resolvePublicShareLinkUnified(params: {
               })
             : todayLabel;
           return {
-            id: `${params.albumId}-onedrive-${idx}`,
+            id: buildStablePhotoId(params.albumId, item.id || item.name || String(idx)),
             albumId: params.albumId,
             albumName: albumTitle,
             provider: 'onedrive',
@@ -2674,8 +3130,9 @@ export async function resolvePublicShareLinkUnified(params: {
             title: (item.name || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
             date: dateStr,
             location: albumTitle,
-            tags: ['원드라이브', albumTitle],
+            tags: ['원드라이브', albumTitle, ...(isNostalgiaPick ? ['추억회상', '예전사진'] : [])],
             aiSummary: `OneDrive "${albumTitle}" 공유 링크에서 불러온 실제 사진입니다.`,
+            isNostalgiaPick,
           };
         });
 
@@ -2695,11 +3152,6 @@ export async function resolvePublicShareLinkUnified(params: {
 
   // ==========================================================================
   // CASE E: Synology Photos & Synology File Station Share Links
-  //   Examples:
-  //   - https://nas.synology.me:5001/mo/sharing/AbCdEf123
-  //   - https://nas.synology.me:9999/photo/mo/sharing/AbCdEf123
-  //   - https://nas.synology.me:5001/sharing/XyZ987
-  //   - https://gofile.me/6A2B3/AbCdEf123
   // ==========================================================================
   let resolvedSynoUrl = rawUrl;
   let initialLandingHtml = '';
@@ -2723,13 +3175,12 @@ export async function resolvePublicShareLinkUnified(params: {
     }
 
     const origin = synoShareMatch[1];
-    const prefixPath = synoShareMatch[2] || ''; // e.g. "" or "/photo"
+    const prefixPath = synoShareMatch[2] || '';
     const passphrase = synoShareMatch[3];
     const shareHeaders: Record<string, string> = {
       'X-SYNO-SHARING': passphrase,
     };
 
-    // Candidate Synology Photos & DSM WebAPI entry points
     const entryEndpoints = Array.from(
       new Set([
         ...(prefixPath ? [`${origin}${prefixPath}/webapi/entry.cgi`] : []),
@@ -2739,11 +3190,11 @@ export async function resolvePublicShareLinkUnified(params: {
     );
 
     let detectedAlbumTitle = params.customTitle?.trim() || '';
+    const listFetchLimit = String(Math.min(2000, Math.max(500, targetMax * 4)));
 
     // E-1: Try Synology Photos Public Share API (`SYNO.Foto.Sharing.*` + `SYNO.Foto.Browse.Item`)
     for (const entryUrl of entryEndpoints) {
       try {
-        // Step 1: Login / unlock share session cookie (works both with and without password)
         const loginBody = new URLSearchParams({
           api: 'SYNO.Foto.Sharing.Passphrase',
           version: '1',
@@ -2757,7 +3208,6 @@ export async function resolvePublicShareLinkUnified(params: {
           () => null
         );
 
-        // Optional album metadata query (`SYNO.Foto.Sharing.Misc` -> `get_info`)
         if (!detectedAlbumTitle) {
           const infoBody = new URLSearchParams({
             api: 'SYNO.Foto.Sharing.Misc',
@@ -2776,13 +3226,12 @@ export async function resolvePublicShareLinkUnified(params: {
           if (fetchedName) detectedAlbumTitle = fetchedName;
         }
 
-        // Step 2: List shared photos via `SYNO.Foto.Browse.Item`
         const listBody = new URLSearchParams({
           api: 'SYNO.Foto.Browse.Item',
           version: '1',
           method: 'list',
           offset: '0',
-          limit: '200',
+          limit: listFetchLimit,
           additional: '["thumbnail"]',
           passphrase,
         });
@@ -2803,7 +3252,6 @@ export async function resolvePublicShareLinkUnified(params: {
         } | undefined;
 
         if (!listJson?.success) {
-          // Retry with version=2 in case DSM 7.2+ requires v2
           listBody.set('version', '2');
           listRes = await rawPost(entryUrl, listBody.toString(), 'application/x-www-form-urlencoded', shareHeaders);
           listJson = listRes.json as typeof listJson;
@@ -2813,7 +3261,14 @@ export async function resolvePublicShareLinkUnified(params: {
           const albumTitle = detectedAlbumTitle || 'Synology Photos 공유 앨범';
           const photoItems = listJson.data.list.filter((it) => it.type !== 'video');
           if (photoItems.length > 0) {
-            const photos: PhotoItem[] = photoItems.slice(0, 150).map((item, idx) => {
+            const curatedSyno = curateRecentAndNostalgiaItems(photoItems, {
+              maxCount: targetMax,
+              nostalgiaMix: useNostalgia,
+              getTimestampMs: (it) =>
+                it.time ? it.time * 1000 : inferTimestampFromNameOrDate(it.filename),
+            });
+
+            const photos: PhotoItem[] = curatedSyno.map(({ item, isNostalgiaPick }, idx) => {
               const thumbInfo = item.additional?.thumbnail;
               const cacheKey = thumbInfo?.cache_key || `${item.id}_0`;
               const xlReady = !thumbInfo?.xl || thumbInfo.xl === 'ready';
@@ -2865,7 +3320,7 @@ export async function resolvePublicShareLinkUnified(params: {
                 : todayLabel;
 
               return {
-                id: `${params.albumId}-synofoto-${item.id}-${idx}`,
+                id: buildStablePhotoId(params.albumId, `synofoto-${item.id}`),
                 albumId: params.albumId,
                 albumName: albumTitle,
                 provider: 'synology_api',
@@ -2878,8 +3333,13 @@ export async function resolvePublicShareLinkUnified(params: {
                 title: (item.filename || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
                 date: dateStr,
                 location: albumTitle,
-                tags: ['시놀로지포토', albumTitle],
+                tags: [
+                  '시놀로지포토',
+                  albumTitle,
+                  ...(isNostalgiaPick ? ['추억회상', '예전사진'] : []),
+                ],
                 aiSummary: `Synology Photos "${albumTitle}" 공유 앨범에서 불러온 실제 사진입니다.`,
+                isNostalgiaPick,
               };
             });
 
@@ -2921,7 +3381,9 @@ export async function resolvePublicShareLinkUnified(params: {
         method: 'list',
         sharing_id: passphrase,
         offset: '0',
-        limit: '200',
+        limit: listFetchLimit,
+        sort_by: 'mtime',
+        sort_direction: 'desc',
         additional: '["time"]',
       });
       if (sharingSid) fsListParams.set('_sharing_sid', sharingSid);
@@ -2950,7 +3412,16 @@ export async function resolvePublicShareLinkUnified(params: {
 
       if (imageFiles.length > 0) {
         const albumTitle = detectedAlbumTitle || 'Synology 공유 폴더 앨범';
-        const photos: PhotoItem[] = imageFiles.slice(0, 150).map((file, idx) => {
+        const curatedFs = curateRecentAndNostalgiaItems(imageFiles, {
+          maxCount: targetMax,
+          nostalgiaMix: useNostalgia,
+          getTimestampMs: (f) =>
+            f.additional?.time?.mtime
+              ? f.additional.time.mtime * 1000
+              : inferTimestampFromNameOrDate(f.name),
+        });
+
+        const photos: PhotoItem[] = curatedFs.map(({ item: file, isNostalgiaPick }) => {
           const dlParams = new URLSearchParams({
             api: 'SYNO.FolderSharing.Download',
             version: '2',
@@ -2970,7 +3441,7 @@ export async function resolvePublicShareLinkUnified(params: {
             : todayLabel;
 
           return {
-            id: `${params.albumId}-synofs-${idx}`,
+            id: buildStablePhotoId(params.albumId, file.path || file.name),
             albumId: params.albumId,
             albumName: albumTitle,
             provider: 'synology_api',
@@ -2981,8 +3452,9 @@ export async function resolvePublicShareLinkUnified(params: {
             title: file.name.replace(/\.[^.]+$/, ''),
             date: dateStr,
             location: albumTitle,
-            tags: ['시놀로지NAS', albumTitle],
+            tags: ['시놀로지NAS', albumTitle, ...(isNostalgiaPick ? ['추억회상', '예전사진'] : [])],
             aiSummary: `Synology NAS "${albumTitle}" 공유 폴더에서 불러온 실제 사진입니다.`,
+            isNostalgiaPick,
           };
         });
 

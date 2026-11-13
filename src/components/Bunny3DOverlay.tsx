@@ -191,7 +191,13 @@ function disposeObjectTree(root: THREE.Object3D) {
 }
 
 /**
- * 30% Smaller (0.70x scale) & Fairytale Storybook 3D Bunny Cottage!
+ * Authentic Disney Fairy-Tale Storybook Cottage (30% smaller than 0.70x -> 0.49x scale)
+ * Inspired by Snow White's Seven Dwarfs Cottage & Tangled / Fantasyland Tudor Storybook Architecture:
+ * - Lush mossy garden mound + curved river-cobblestone stepping path & masonry plinth
+ * - Honey-cream lime plaster walls with warm walnut Tudor half-timber cross-bracing
+ * - Steeply pitched multi-tier flared storybook shingle roof + side fairy turret with golden star spire
+ * - Curved stone hearth chimney, arched oak cottage door, glowing diamond-mullioned windows,
+ *   pastel rose flower boxes, climbing ivy vines, and warm golden hanging porch lantern.
  */
 function build3DCottage(shadowTex: THREE.Texture): {
   houseGroup: THREE.Group;
@@ -202,286 +208,434 @@ function build3DCottage(shadowTex: THREE.Texture): {
   const houseGroup = new THREE.Group();
 
   const groundShadow = new THREE.Mesh(
-    new THREE.PlaneGeometry(2.5, 1.48),
+    new THREE.PlaneGeometry(2.75, 1.65),
     new THREE.MeshBasicMaterial({ map: shadowTex, transparent: true, depthWrite: false })
   );
-  groundShadow.position.set(0, -0.58, -0.08);
+  groundShadow.position.set(0, -0.58, -0.06);
   houseGroup.add(groundShadow);
 
+  // 1. Enchanted Clover Meadow Mound & Curved Cobblestone Garden Path
   const lowerMeadow = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.16, 1.24, 0.12, 32),
-    new THREE.MeshStandardMaterial({ color: 0x34d399, roughness: 0.86, metalness: 0.02 })
+    new THREE.CylinderGeometry(1.26, 1.36, 0.13, 36),
+    new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.86, metalness: 0.02 })
   );
-  lowerMeadow.scale.set(1.12, 1, 0.76);
-  lowerMeadow.position.set(0, -0.52, 0.02);
+  lowerMeadow.scale.set(1.14, 1, 0.78);
+  lowerMeadow.position.set(0, -0.52, 0.03);
   houseGroup.add(lowerMeadow);
 
   const upperMoss = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.02, 1.08, 0.08, 30),
-    new THREE.MeshStandardMaterial({ color: 0x6ee7b7, roughness: 0.82, metalness: 0.01 })
+    new THREE.CylinderGeometry(1.1, 1.18, 0.085, 32),
+    new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.82, metalness: 0.01 })
   );
-  upperMoss.scale.set(1.08, 1, 0.72);
-  upperMoss.position.set(0, -0.45, 0.02);
+  upperMoss.scale.set(1.1, 1, 0.74);
+  upperMoss.position.set(0, -0.45, 0.03);
   houseGroup.add(upperMoss);
 
-  const stoneMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.75 });
+  const cobbleLightMat = new THREE.MeshStandardMaterial({ color: 0xe7e5e4, roughness: 0.78 });
+  const cobbleWarmMat = new THREE.MeshStandardMaterial({ color: 0xd6d3d1, roughness: 0.82 });
   [
-    [-0.3, -0.405, 0.56, 0.13],
-    [-0.42, -0.415, 0.7, 0.105],
-    [-0.26, -0.42, 0.8, 0.09],
-  ].forEach(([sx, sy, sz, sr]) => {
-    const stone = new THREE.Mesh(new THREE.CylinderGeometry(sr, sr * 1.08, 0.035, 14), stoneMat);
-    stone.scale.set(1.25, 1, 0.88);
+    [-0.24, -0.402, 0.58, 0.135],
+    [-0.36, -0.408, 0.72, 0.115],
+    [-0.22, -0.414, 0.84, 0.098],
+    [-0.33, -0.418, 0.94, 0.082],
+  ].forEach(([sx, sy, sz, sr], idx) => {
+    const stone = new THREE.Mesh(
+      new THREE.CylinderGeometry(sr, sr * 1.1, 0.04, 14),
+      idx % 2 === 0 ? cobbleLightMat : cobbleWarmMat
+    );
+    stone.scale.set(1.28, 1, 0.86);
     stone.position.set(sx, sy, sz);
     houseGroup.add(stone);
   });
 
-  const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xfffaf2,
-    roughness: 0.78,
+  // 2. Materials: Honey-Butter Plaster, Walnut Tudor Timber, Rosewood Shingles & Warm Gold
+  const plasterMat = new THREE.MeshStandardMaterial({
+    color: 0xfff8eb,
+    roughness: 0.74,
     metalness: 0.01,
   });
   const timberMat = new THREE.MeshStandardMaterial({
-    color: 0x92400e,
-    roughness: 0.68,
+    color: 0x6b3410,
+    roughness: 0.66,
     metalness: 0.04,
   });
-  const creamTrimMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
+  const carvedTrimMat = new THREE.MeshStandardMaterial({
+    color: 0xfef3c7,
     roughness: 0.52,
-    metalness: 0.02,
+    metalness: 0.03,
+  });
+  const roofLowerMat = new THREE.MeshStandardMaterial({
+    color: 0xbe4b62,
+    roughness: 0.52,
+    metalness: 0.05,
+  });
+  const roofMidMat = new THREE.MeshStandardMaterial({
+    color: 0x9f324c,
+    roughness: 0.48,
+    metalness: 0.06,
+  });
+  const roofCrestMat = new THREE.MeshStandardMaterial({
+    color: 0xd97757,
+    roughness: 0.46,
+    metalness: 0.06,
+  });
+  const goldMat = new THREE.MeshStandardMaterial({
+    color: 0xfacc15,
+    emissive: 0xd97706,
+    emissiveIntensity: 0.22,
+    roughness: 0.24,
+    metalness: 0.78,
+  });
+  const windowMat = new THREE.MeshStandardMaterial({
+    color: 0xfef08a,
+    emissive: 0xf59e0b,
+    emissiveIntensity: 0.72,
+    roughness: 0.18,
   });
 
-  const walls = new THREE.Mesh(new THREE.BoxGeometry(1.38, 0.94, 0.94), wallMat);
-  walls.position.set(0, 0.02, 0);
-  houseGroup.add(walls);
-
-  const plinth = new THREE.Mesh(
-    new THREE.BoxGeometry(1.43, 0.14, 0.99),
-    new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.82 })
-  );
-  plinth.position.set(0, -0.39, 0);
+  // 3. Main Tudor Cottage Body + Rounded River-Stone Plinth
+  const plinth = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.17, 0.98), cobbleWarmMat);
+  plinth.position.set(-0.08, -0.37, 0);
   houseGroup.add(plinth);
 
+  for (let c = -4; c <= 3; c++) {
+    const frontCobble = new THREE.Mesh(
+      new THREE.SphereGeometry(0.068, 10, 10),
+      c % 2 === 0 ? cobbleLightMat : cobbleWarmMat
+    );
+    frontCobble.scale.set(1.2, 0.85, 0.65);
+    frontCobble.position.set(c * 0.16 - 0.04, -0.38, 0.49);
+    houseGroup.add(frontCobble);
+  }
+
+  const mainWalls = new THREE.Mesh(new THREE.BoxGeometry(1.34, 0.92, 0.92), plasterMat);
+  mainWalls.position.set(-0.08, 0.05, 0);
+  houseGroup.add(mainWalls);
+
+  // Tudor Half-Timber Corner Posts, Belt Course & Diagonal Braces
   [
-    [-0.69, -0.47],
-    [0.69, -0.47],
-    [-0.69, 0.47],
-    [0.69, 0.47],
+    [-0.75, -0.46],
+    [0.59, -0.46],
+    [-0.75, 0.46],
+    [0.59, 0.46],
   ].forEach(([tx, tz]) => {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.96, 0.065), timberMat);
-    post.position.set(tx, 0.03, tz);
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.95, 0.065), timberMat);
+    post.position.set(tx, 0.05, tz);
     houseGroup.add(post);
   });
 
-  const headerBeam = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.06, 1.0), timberMat);
-  headerBeam.position.set(0, 0.48, 0);
-  houseGroup.add(headerBeam);
+  const beltBeam = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.055, 0.97), timberMat);
+  beltBeam.position.set(-0.08, 0.49, 0);
+  houseGroup.add(beltBeam);
 
-  const roofMat = new THREE.MeshStandardMaterial({
-    color: 0xfb7185,
-    roughness: 0.48,
-    metalness: 0.05,
+  const midFrontStud = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.92, 0.045), timberMat);
+  midFrontStud.position.set(0.02, 0.05, 0.462);
+  houseGroup.add(midFrontStud);
+
+  // Diagonal Tudor timber braces on facade
+  [
+    [-0.63, 0.34, 0.42],
+    [0.46, 0.34, -0.42],
+  ].forEach(([bx, by, rotZ]) => {
+    const brace = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.28, 0.038), timberMat);
+    brace.position.set(bx, by, 0.462);
+    brace.rotation.z = rotZ;
+    houseGroup.add(brace);
   });
-  const roofUpperMat = new THREE.MeshStandardMaterial({
-    color: 0xf43f5e,
-    roughness: 0.44,
-    metalness: 0.06,
-  });
 
-  const mainRoof = new THREE.Mesh(new THREE.ConeGeometry(1.26, 0.78, 4), roofMat);
-  mainRoof.rotation.y = Math.PI / 4;
-  mainRoof.scale.set(1.1, 1, 0.84);
-  mainRoof.position.set(0, 0.86, 0);
-  houseGroup.add(mainRoof);
+  // 4. Enchanted Disney Side Turret Tower (Right Corner) + Conical Witch-Hat Spire & Golden Star Finial
+  const turretBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.35, 0.38, 0.22, 22),
+    cobbleWarmMat
+  );
+  turretBase.position.set(0.62, -0.35, 0.16);
+  houseGroup.add(turretBase);
 
-  const eaveRim = new THREE.Mesh(new THREE.BoxGeometry(1.72, 0.055, 1.3), creamTrimMat);
-  eaveRim.position.set(0, 0.5, 0);
-  houseGroup.add(eaveRim);
+  const turretTower = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.33, 0.35, 1.06, 24),
+    plasterMat
+  );
+  turretTower.position.set(0.62, 0.18, 0.16);
+  houseGroup.add(turretTower);
 
-  for (let i = -5; i <= 5; i++) {
-    const scallop = new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 10), creamTrimMat);
-    scallop.position.set(i * 0.145, 0.47, 0.64);
+  const turretRingBeam = new THREE.Mesh(
+    new THREE.TorusGeometry(0.342, 0.026, 10, 24),
+    timberMat
+  );
+  turretRingBeam.rotation.x = Math.PI / 2;
+  turretRingBeam.position.set(0.62, 0.68, 0.16);
+  houseGroup.add(turretRingBeam);
+
+  // Flared multi-tier conical turret roof
+  const turretRoofSkirt = new THREE.Mesh(
+    new THREE.ConeGeometry(0.48, 0.34, 24),
+    roofLowerMat
+  );
+  turretRoofSkirt.position.set(0.62, 0.84, 0.16);
+  houseGroup.add(turretRoofSkirt);
+
+  const turretRoofSpire = new THREE.Mesh(
+    new THREE.ConeGeometry(0.36, 0.66, 24),
+    roofMidMat
+  );
+  turretRoofSpire.position.set(0.62, 1.15, 0.16);
+  turretRoofSpire.rotation.z = -0.04;
+  houseGroup.add(turretRoofSpire);
+
+  // Golden Disney Spire Finial & Starburst Orb
+  const spireRod = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.02, 0.2, 10), goldMat);
+  spireRod.position.set(0.605, 1.54, 0.16);
+  const spireOrb = new THREE.Mesh(new THREE.OctahedronGeometry(0.068, 0), goldMat);
+  spireOrb.position.set(0.605, 1.66, 0.16);
+  spireOrb.rotation.y = Math.PI / 4;
+  houseGroup.add(spireRod, spireOrb);
+
+  // Turret Arched Lancet Window
+  const turretWinFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(0.18, 0.28, 0.05),
+    timberMat
+  );
+  turretWinFrame.position.set(0.66, 0.32, 0.48);
+  turretWinFrame.rotation.y = 0.12;
+  const turretWinGlass = new THREE.Mesh(
+    new THREE.BoxGeometry(0.12, 0.22, 0.06),
+    windowMat
+  );
+  turretWinGlass.position.set(0.66, 0.32, 0.485);
+  turretWinGlass.rotation.y = 0.12;
+  houseGroup.add(turretWinFrame, turretWinGlass);
+
+  // 5. Steeply Pitched Flared Disney Storybook Main Roof (Softly Curved Swoop Tiers + Carved Scallop Eaves)
+  const roofSkirt = new THREE.Mesh(new THREE.ConeGeometry(1.26, 0.44, 4), roofLowerMat);
+  roofSkirt.rotation.y = Math.PI / 4;
+  roofSkirt.scale.set(1.12, 1, 0.86);
+  roofSkirt.position.set(-0.08, 0.69, 0);
+  houseGroup.add(roofSkirt);
+
+  const roofUpper = new THREE.Mesh(new THREE.ConeGeometry(0.98, 0.66, 4), roofMidMat);
+  roofUpper.rotation.y = Math.PI / 4;
+  roofUpper.scale.set(1.08, 1, 0.82);
+  roofUpper.position.set(-0.08, 0.99, 0);
+  houseGroup.add(roofUpper);
+
+  const ridgeBeam = new THREE.Mesh(new THREE.BoxGeometry(0.92, 0.065, 0.08), roofCrestMat);
+  ridgeBeam.position.set(-0.08, 1.28, 0);
+  houseGroup.add(ridgeBeam);
+
+  const ridgeFinialL = new THREE.Mesh(new THREE.SphereGeometry(0.048, 12, 12), goldMat);
+  ridgeFinialL.position.set(-0.52, 1.33, 0);
+  houseGroup.add(ridgeFinialL);
+
+  // Carved Storybook Eave Scallops
+  for (let i = -5; i <= 4; i++) {
+    const scallop = new THREE.Mesh(new THREE.SphereGeometry(0.042, 10, 10), carvedTrimMat);
+    scallop.scale.set(1.15, 0.85, 0.65);
+    scallop.position.set(i * 0.145 - 0.05, 0.48, 0.66);
     houseGroup.add(scallop);
   }
 
-  const dormerBody = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.28, 0.34), wallMat);
-  dormerBody.position.set(0, 0.78, 0.34);
+  // Front Fairytale Gable Dormer with Carved Vergeboards & Glowing Rose Window
+  const dormerBody = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.36, 0.38), plasterMat);
+  dormerBody.position.set(-0.14, 0.82, 0.34);
   houseGroup.add(dormerBody);
 
-  const dormerRoof = new THREE.Mesh(new THREE.ConeGeometry(0.34, 0.22, 4), roofUpperMat);
+  const dormerRoof = new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.34, 4), roofCrestMat);
   dormerRoof.rotation.y = Math.PI / 4;
-  dormerRoof.position.set(0, 0.99, 0.35);
+  dormerRoof.scale.set(1.06, 1, 0.92);
+  dormerRoof.position.set(-0.14, 1.1, 0.36);
   houseGroup.add(dormerRoof);
 
-  const windowMat = new THREE.MeshStandardMaterial({
-    color: 0xfef08a,
-    emissive: 0xfacc15,
-    emissiveIntensity: 0.62,
-    roughness: 0.22,
+  [
+    [-0.3, 1.03, 0.64],
+    [0.02, 1.03, -0.64],
+  ].forEach(([vx, vy, rotZ]) => {
+    const verge = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.38, 0.045), carvedTrimMat);
+    verge.position.set(vx, vy, 0.55);
+    verge.rotation.z = rotZ;
+    houseGroup.add(verge);
   });
 
-  const atticGlass = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.095, 0.04, 18), windowMat);
+  const atticFrame = new THREE.Mesh(
+    new THREE.TorusGeometry(0.115, 0.022, 10, 20),
+    timberMat
+  );
+  atticFrame.position.set(-0.14, 0.82, 0.535);
+  const atticGlass = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.105, 0.105, 0.035, 20),
+    windowMat
+  );
   atticGlass.rotation.x = Math.PI / 2;
-  atticGlass.position.set(0, 0.78, 0.505);
-  houseGroup.add(atticGlass);
+  atticGlass.position.set(-0.14, 0.82, 0.525);
+  houseGroup.add(atticFrame, atticGlass);
 
-  const carrotBody = new THREE.Mesh(
-    new THREE.ConeGeometry(0.055, 0.16, 12),
-    new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.42 })
+  // 6. Sculpted Curved River-Stone Fairytale Chimney (Left Side) + Terracotta Pot & Smoke Puffs
+  const chimneyBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.14, 0.18, 0.68, 14),
+    cobbleWarmMat
   );
-  carrotBody.rotation.z = Math.PI * 0.75;
-  carrotBody.position.set(-0.28, 0.36, 0.5);
-  houseGroup.add(carrotBody);
-
-  const chimney = new THREE.Mesh(
-    new THREE.BoxGeometry(0.21, 0.44, 0.21),
-    new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.72 })
+  chimneyBase.position.set(-0.78, 0.66, -0.08);
+  chimneyBase.rotation.z = 0.06;
+  const chimneyTop = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.13, 0.38, 14),
+    cobbleLightMat
   );
-  chimney.position.set(0.45, 0.98, -0.1);
-  houseGroup.add(chimney);
-
-  const chimneyCap = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.06, 0.26), creamTrimMat);
-  chimneyCap.position.set(0.45, 1.21, -0.1);
-  houseGroup.add(chimneyCap);
+  chimneyTop.position.set(-0.81, 1.12, -0.08);
+  chimneyTop.rotation.z = 0.1;
+  const chimneyPot = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.085, 0.1, 0.16, 14),
+    roofCrestMat
+  );
+  chimneyPot.position.set(-0.83, 1.36, -0.08);
+  houseGroup.add(chimneyBase, chimneyTop, chimneyPot);
 
   const smokeMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.9,
     transparent: true,
-    opacity: 0.78,
+    opacity: 0.74,
   });
   const smokePuffs: THREE.Mesh[] = [];
   for (let i = 0; i < 2; i++) {
-    const puff = new THREE.Mesh(new THREE.SphereGeometry(0.085 - i * 0.015, 12, 12), smokeMat);
-    puff.position.set(0.46 + i * 0.06, 1.34 + i * 0.18, -0.1);
+    const puff = new THREE.Mesh(new THREE.SphereGeometry(0.082 - i * 0.015, 12, 12), smokeMat);
+    puff.userData.baseX = -0.84;
+    puff.userData.baseY = 1.48;
+    puff.position.set(-0.84 - i * 0.05, 1.48 + i * 0.18, -0.08);
     smokePuffs.push(puff);
     houseGroup.add(puff);
   }
 
+  // 7. Recessed Arched Honey-Oak Cottage Door + Golden Scrollwork Hinges + Porch Canopy
+  const porchAwning = new THREE.Mesh(new THREE.ConeGeometry(0.38, 0.2, 4), roofCrestMat);
+  porchAwning.rotation.y = Math.PI / 4;
+  porchAwning.scale.set(1.15, 1, 0.62);
+  porchAwning.position.set(-0.34, 0.31, 0.56);
+  houseGroup.add(porchAwning);
+
   const interiorMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(0.4, 0.62, 0.08),
-    new THREE.MeshStandardMaterial({ color: 0x27201c, roughness: 0.92 })
+    new THREE.BoxGeometry(0.4, 0.6, 0.08),
+    new THREE.MeshStandardMaterial({ color: 0x241c18, roughness: 0.92 })
   );
-  interiorMesh.position.set(-0.28, -0.13, 0.45);
+  interiorMesh.position.set(-0.34, -0.11, 0.44);
   houseGroup.add(interiorMesh);
 
-  const doorFrameArch = new THREE.Mesh(new THREE.BoxGeometry(0.47, 0.68, 0.06), creamTrimMat);
-  doorFrameArch.position.set(-0.28, -0.11, 0.465);
-  houseGroup.add(doorFrameArch);
+  const doorSurround = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.64, 0.06), cobbleLightMat);
+  doorSurround.position.set(-0.34, -0.1, 0.455);
+  const doorArchCap = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.24, 0.24, 0.065, 18, 1, false, 0, Math.PI),
+    cobbleLightMat
+  );
+  doorArchCap.rotation.x = Math.PI / 2;
+  doorArchCap.rotation.z = -Math.PI / 2;
+  doorArchCap.position.set(-0.34, 0.16, 0.455);
+  houseGroup.add(doorSurround, doorArchCap);
 
   const doorPivot = new THREE.Group();
-  doorPivot.position.set(-0.48, -0.13, 0.495);
-  const doorMat = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.58 });
-  const doorMesh = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.6, 0.05), doorMat);
+  doorPivot.position.set(-0.54, -0.11, 0.485);
+  const doorMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.54 });
+  const doorMesh = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.58, 0.048), doorMat);
   doorMesh.position.set(0.2, 0, 0);
   doorPivot.add(doorMesh);
 
-  const knobMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.032, 12, 12),
-    new THREE.MeshStandardMaterial({ color: 0xfde047, roughness: 0.2, metalness: 0.68 })
+  // Golden fairytale strap hinges & brass ring knocker
+  [0.14, -0.14].forEach((hy) => {
+    const hinge = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.026, 0.056), goldMat);
+    hinge.position.set(0.12, hy, 0.004);
+    doorPivot.add(hinge);
+  });
+  const doorHeartWindow = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.055, 0.055, 0.056, 16),
+    windowMat
   );
-  knobMesh.position.set(0.33, -0.03, 0.038);
+  doorHeartWindow.rotation.x = Math.PI / 2;
+  doorHeartWindow.position.set(0.2, 0.13, 0.004);
+  doorPivot.add(doorHeartWindow);
+
+  const knobMesh = new THREE.Mesh(new THREE.TorusGeometry(0.032, 0.009, 8, 16), goldMat);
+  knobMesh.position.set(0.33, -0.02, 0.034);
   doorPivot.add(knobMesh);
-
-  const wreathRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.085, 0.024, 10, 20),
-    new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 0.65 })
-  );
-  wreathRing.position.set(0.2, 0.11, 0.035);
-  doorPivot.add(wreathRing);
-
-  const wreathBow = new THREE.Mesh(
-    new THREE.SphereGeometry(0.032, 10, 10),
-    new THREE.MeshStandardMaterial({ color: 0xf43f5e, roughness: 0.42 })
-  );
-  wreathBow.scale.set(1.4, 0.85, 0.6);
-  wreathBow.position.set(0.2, 0.19, 0.048);
-  doorPivot.add(wreathBow);
 
   houseGroup.add(doorPivot);
 
+  // Hanging Golden Fairy Porch Lantern
+  const lanternBracket = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.16), timberMat);
+  lanternBracket.position.set(-0.64, 0.2, 0.52);
   const lanternGlobe = new THREE.Mesh(
-    new THREE.SphereGeometry(0.058, 14, 14),
+    new THREE.SphereGeometry(0.062, 14, 14),
     new THREE.MeshStandardMaterial({
       color: 0xfef9c3,
       emissive: 0xfbbf24,
-      emissiveIntensity: 0.85,
-      roughness: 0.2,
+      emissiveIntensity: 0.95,
+      roughness: 0.16,
     })
   );
-  lanternGlobe.position.set(-0.58, 0.12, 0.53);
-  houseGroup.add(lanternGlobe);
+  lanternGlobe.position.set(-0.64, 0.12, 0.58);
+  const lanternCap = new THREE.Mesh(new THREE.ConeGeometry(0.075, 0.06, 12), timberMat);
+  lanternCap.position.set(-0.64, 0.18, 0.58);
+  houseGroup.add(lanternBracket, lanternGlobe, lanternCap);
 
-  const windowGlass = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.33, 0.055), windowMat);
-  windowGlass.position.set(0.31, 0.08, 0.48);
-  houseGroup.add(windowGlass);
+  // 8. Warm Glowing Mullioned Bay Window + Sage Shutters + Overflowing Rose Flower Box
+  const bayWindowGlass = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.34, 0.075), windowMat);
+  bayWindowGlass.position.set(0.24, 0.08, 0.48);
+  const bayRoof = new THREE.Mesh(new THREE.ConeGeometry(0.32, 0.14, 4), roofLowerMat);
+  bayRoof.rotation.y = Math.PI / 4;
+  bayRoof.scale.set(1.15, 1, 0.55);
+  bayRoof.position.set(0.24, 0.31, 0.5);
+  const vBar = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.35, 0.088), carvedTrimMat);
+  vBar.position.set(0.24, 0.08, 0.485);
+  const hBar = new THREE.Mesh(new THREE.BoxGeometry(0.39, 0.028, 0.088), carvedTrimMat);
+  hBar.position.set(0.24, 0.08, 0.485);
+  houseGroup.add(bayWindowGlass, bayRoof, vBar, hBar);
 
-  const vBar = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.35, 0.072), creamTrimMat);
-  vBar.position.set(0.31, 0.08, 0.49);
-  const hBar = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.032, 0.072), creamTrimMat);
-  hBar.position.set(0.31, 0.08, 0.49);
-  houseGroup.add(vBar, hBar);
-
-  const shutterMat = new THREE.MeshStandardMaterial({ color: 0x6ee7b7, roughness: 0.56 });
+  const shutterMat = new THREE.MeshStandardMaterial({ color: 0x34d399, roughness: 0.54 });
   [-0.24, 0.24].forEach((offsetX) => {
-    const shutter = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.35, 0.04), shutterMat);
-    shutter.position.set(0.31 + offsetX, 0.08, 0.485);
+    const shutter = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.35, 0.036), shutterMat);
+    shutter.position.set(0.24 + offsetX, 0.08, 0.48);
     houseGroup.add(shutter);
   });
 
-  const flowerBox = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.095, 0.12), timberMat);
-  flowerBox.position.set(0.31, -0.14, 0.53);
+  const flowerBox = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.095, 0.13), timberMat);
+  flowerBox.position.set(0.24, -0.14, 0.53);
   houseGroup.add(flowerBox);
 
-  [0xfb7185, 0xfacc15, 0x38bdf8, 0xc084fc].forEach((hex, idx) => {
+  const foliageMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.72 });
+  [0xfb7185, 0xf472b6, 0xfef08a, 0xc084fc, 0x60a5fa].forEach((hex, idx) => {
+    const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.048, 10, 10), foliageMat);
+    leaf.position.set(0.06 + idx * 0.09, -0.09, 0.54);
     const bloom = new THREE.Mesh(
-      new THREE.SphereGeometry(0.052, 12, 12),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: 0.45 })
+      new THREE.SphereGeometry(0.046, 12, 12),
+      new THREE.MeshStandardMaterial({ color: hex, roughness: 0.42 })
     );
-    bloom.position.set(0.14 + idx * 0.112, -0.07, 0.54);
-    houseGroup.add(bloom);
+    bloom.position.set(0.06 + idx * 0.09, -0.065 + (idx % 2) * 0.015, 0.56);
+    houseGroup.add(leaf, bloom);
   });
 
-  for (let p = 0; p < 4; p++) {
-    const picketL = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.24, 0.03), creamTrimMat);
-    picketL.position.set(-1.02 + p * 0.12, -0.32, 0.36);
-    const picketR = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.24, 0.03), creamTrimMat);
-    picketR.position.set(0.72 + p * 0.11, -0.32, 0.36);
-    houseGroup.add(picketL, picketR);
-  }
-  const railL = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.035, 0.025), creamTrimMat);
-  railL.position.set(-0.84, -0.3, 0.36);
-  const railR = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.035, 0.025), creamTrimMat);
-  railR.position.set(0.88, -0.3, 0.36);
-  houseGroup.add(railL, railR);
-
-  const buildMiniMushroom = (mx: number, mz: number, s: number) => {
-    const mGroup = new THREE.Group();
-    const stem = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.032 * s, 0.042 * s, 0.09 * s, 10),
-      creamTrimMat
-    );
-    stem.position.y = 0.045 * s;
-    const cap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.082 * s, 14, 12, 0, Math.PI * 2, 0, Math.PI * 0.58),
-      new THREE.MeshStandardMaterial({ color: 0xf43f5e, roughness: 0.42 })
-    );
-    cap.position.y = 0.075 * s;
-    const dot = new THREE.Mesh(new THREE.SphereGeometry(0.018 * s, 8, 8), creamTrimMat);
-    dot.position.set(0.025 * s, 0.135 * s, 0.04 * s);
-    mGroup.add(stem, cap, dot);
-    mGroup.position.set(mx, -0.42, mz);
-    houseGroup.add(mGroup);
-  };
-  buildMiniMushroom(0.82, 0.48, 1.05);
-  buildMiniMushroom(-0.88, 0.48, 0.85);
+  // Climbing Fairytale Ivy & Rose Blossoms along the left cottage corner
+  [
+    [-0.72, -0.22, 0.48],
+    [-0.74, -0.06, 0.48],
+    [-0.71, 0.1, 0.48],
+    [-0.73, 0.26, 0.48],
+  ].forEach(([ix, iy, iz], idx) => {
+    const ivyLeaf = new THREE.Mesh(new THREE.SphereGeometry(0.052, 10, 10), foliageMat);
+    ivyLeaf.scale.set(1.1, 0.85, 0.6);
+    ivyLeaf.position.set(ix, iy, iz);
+    houseGroup.add(ivyLeaf);
+    if (idx % 2 === 1) {
+      const rose = new THREE.Mesh(
+        new THREE.SphereGeometry(0.032, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfb7185, roughness: 0.4 })
+      );
+      rose.position.set(ix + 0.03, iy + 0.02, iz + 0.03);
+      houseGroup.add(rose);
+    }
+  });
 
   houseGroup.traverse((obj) => {
     obj.userData.hitType = 'house';
   });
   houseGroup.rotation.y = -0.22;
-  houseGroup.scale.setScalar(0.7);
+  // Shrunk by 30% from previous 0.70 -> 0.49!
+  houseGroup.scale.setScalar(0.49);
 
   return { houseGroup, doorPivot, windowMat, smokePuffs };
 }
@@ -1718,7 +1872,6 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const bubbleDomRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const chatScrollRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const houseTagDomRef = useRef<HTMLDivElement | null>(null);
   const snowballTagDomRef = useRef<HTMLDivElement | null>(null);
   const snowballPctSpanRef = useRef<HTMLSpanElement | null>(null);
   const [replyText, setReplyText] = useState('');
@@ -2106,8 +2259,8 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
 
     let halfH = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.z;
     let halfW = halfH * camera.aspect;
-    let houseX = halfW - 1.06;
-    let houseY = -halfH + 0.72;
+    let houseX = halfW - 0.76;
+    let houseY = -halfH + 0.5;
     let treeX = -halfW + 1.5;
     let treeY = -halfH + 1.18;
     let snowmanX = 0;
@@ -2129,8 +2282,8 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
       const rightWorldInset = latestPropsRef.current.rightInsetPx * worldPerPx;
       const leftWorldInset = latestPropsRef.current.leftInsetPx * worldPerPx;
 
-      houseX = halfW - rightWorldInset - 1.02;
-      houseY = -halfH + 0.68;
+      houseX = halfW - rightWorldInset - 0.74;
+      houseY = -halfH + 0.48;
       houseGroup.position.set(houseX, houseY, 0);
 
       treeX = Math.min(houseX - 2.6, -halfW + leftWorldInset + 1.32);
@@ -2365,7 +2518,6 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
     window.addEventListener('pointerup', handleWindowPointerUp);
 
     const projVec = new THREE.Vector3();
-    const houseProjVec = new THREE.Vector3();
     const snowballProjVec = new THREE.Vector3();
 
     const pickRandomScreenPoint = (bunnyIdx: number, preferLowerLawn = false) => {
@@ -2531,8 +2683,10 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
       for (let si = 0; si < smokePuffs.length; si++) {
         const sp = smokePuffs[si];
         const sProg = (elapsed * 0.45 + si * 0.5) % 1.0;
-        sp.position.y = 1.28 + sProg * 0.42;
-        sp.position.x = 0.45 + Math.sin(elapsed * 1.5 + si) * 0.04 + sProg * 0.08;
+        const baseX = typeof sp.userData.baseX === 'number' ? sp.userData.baseX : -0.84;
+        const baseY = typeof sp.userData.baseY === 'number' ? sp.userData.baseY : 1.48;
+        sp.position.y = baseY + sProg * 0.42;
+        sp.position.x = baseX + Math.sin(elapsed * 1.5 + si) * 0.04 - sProg * 0.06;
         sp.scale.setScalar(0.65 + Math.sin(sProg * Math.PI) * 0.55);
       }
 
@@ -3088,38 +3242,32 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
           bState.status !== 'SPINNING_PINWHEEL';
 
         if (bubbleEl) {
-          projVec.set(rig.posX, rig.posY + hopY + 0.76 - rig.sitAmount * 0.1, rig.root.position.z);
-          projVec.project(camera);
-          const cw = container.clientWidth || window.innerWidth;
-          const ch = container.clientHeight || window.innerHeight;
-          const rawX = (projVec.x * 0.5 + 0.5) * cw;
-          const rawY = (-projVec.y * 0.5 + 0.5) * ch;
+          const isActivelyChatting =
+            bState.status === 'CHATTING' && latestPropsRef.current.activeChatBunny === cfg.id;
+          if (!isActivelyChatting) {
+            bubbleEl.style.opacity = '0';
+          } else {
+            projVec.set(rig.posX, rig.posY + hopY + 0.72 - rig.sitAmount * 0.1, rig.root.position.z);
+            projVec.project(camera);
+            const cw = container.clientWidth || window.innerWidth;
+            const ch = container.clientHeight || window.innerHeight;
+            const rawX = (projVec.x * 0.5 + 0.5) * cw;
+            const rawY = (-projVec.y * 0.5 + 0.5) * ch;
 
-          const isExpandedCard = bState.status === 'CHATTING';
-          const padX = isExpandedCard ? 168 : 98;
-          const minTop = isExpandedCard ? 265 : 56;
-          const clampedX = Math.max(padX, Math.min(cw - padX, rawX));
-          const clampedY = Math.max(minTop, Math.min(ch - 76, rawY));
+            const padX = 148;
+            const minTop = 225;
+            const clampedX = Math.max(padX, Math.min(cw - padX, rawX));
+            const clampedY = Math.max(minTop, Math.min(ch - 68, rawY));
 
-          bubbleEl.style.opacity = '1';
-          bubbleEl.style.transform = `translate3d(${Math.round(clampedX)}px, ${Math.round(clampedY)}px, 0) translate(-50%, -100%)`;
+            bubbleEl.style.opacity = '1';
+            bubbleEl.style.transform = `translate3d(${Math.round(clampedX)}px, ${Math.round(clampedY)}px, 0) translate(-50%, -100%)`;
+          }
         }
       });
 
       const targetDoorAngle = anyDoorActivity || insideCount < enabledTotal ? -1.12 : 0;
       doorPivot.rotation.y = THREE.MathUtils.damp(doorPivot.rotation.y, targetDoorAngle, 6, dt);
-      windowMat.emissiveIntensity = insideCount > 0 ? 0.72 : 0.24;
-
-      if (houseTagDomRef.current) {
-        houseProjVec.set(houseX, houseY + 0.96, 0);
-        houseProjVec.project(camera);
-        const cw = container.clientWidth || window.innerWidth;
-        const ch = container.clientHeight || window.innerHeight;
-        const maxRight = cw - latestPropsRef.current.rightInsetPx - 96;
-        const hx = Math.max(100, Math.min(maxRight, (houseProjVec.x * 0.5 + 0.5) * cw));
-        const hy = (-houseProjVec.y * 0.5 + 0.5) * ch;
-        houseTagDomRef.current.style.transform = `translate3d(${Math.round(hx)}px, ${Math.round(hy)}px, 0) translate(-50%, -100%)`;
-      }
+      windowMat.emissiveIntensity = insideCount > 0 ? 0.82 : 0.34;
 
       renderer.render(scene, camera);
       scheduleNextFrame(tick);
@@ -3349,7 +3497,7 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
         </div>
       )}
 
-      {/* Direct Overhead Speech Bubbles Tracked Above Each Active 3D Bunny */}
+      {/* Compact Speech Bubble ONLY During Active Conversation — Auto-Hides Immediately When Chat Ends so Photos Never Get Covered! */}
       {enabledCharacters.map((cfg) => {
         const b = bunnies[cfg.id] ?? {
           status: 'IN_HOUSE',
@@ -3359,7 +3507,6 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
           photoIndex: 0,
         };
         const isChatting = b.status === 'CHATTING' && activeChatBunny === cfg.id;
-        const heldPhoto = photos[b.photoIndex] ?? null;
         const threadMessages = bunnyHistories[cfg.id] ?? [];
 
         return (
@@ -3371,310 +3518,178 @@ export const Bunny3DOverlay: React.FC<Bunny3DOverlayProps> = ({
             style={{ left: 0, top: 0, opacity: 0 }}
             className="pointer-events-none absolute z-40 will-change-transform transition-opacity duration-150"
           >
-            {b.status !== 'IN_HOUSE' && (
+            {isChatting && (
               <div
                 data-bunny-ui="true"
-                className={`pointer-events-auto relative rounded-2xl bg-white text-[#141519] border border-black/10 shadow-[0_12px_30px_rgba(20,21,25,0.16)] ${
-                  isChatting ? 'w-[298px] sm:w-[330px] p-3' : 'max-w-[238px] px-3 py-1.5'
-                }`}
+                className="pointer-events-auto relative w-[262px] sm:w-[288px] rounded-2xl bg-white/92 backdrop-blur-md text-[#141519] border border-black/10 shadow-[0_12px_30px_rgba(20,21,25,0.16)] p-2.5"
               >
-                {isChatting ? (
-                  <>
-                    {/* Header: Character Name + Live/Voice Replay + Wait Counter + Finish */}
-                    <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-100">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="text-xs shrink-0" aria-hidden="true">
-                          {SPECIES_EMOJIS[cfg.species || 'bunny']}
-                        </span>
-                        <span className="text-xs font-bold text-[#141519] truncate">
-                          {cfg.name} 대화
-                        </span>
-                        {isGeminiLiveActive ? (
-                          <span
-                            className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 ${
-                              b.isSpeaking
-                                ? 'bg-emerald-500 text-white'
-                                : 'bg-indigo-600 text-white'
-                            }`}
-                            title="Gemini Live 실시간 네이티브 음성대화 연결됨"
-                          >
-                            ⚡ {b.isSpeaking ? '말하는 중' : 'Live 실시간'}
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => onReplayBunnyVoice(cfg.id)}
-                            title={`${cfg.name} 목소리 다시 듣기`}
-                            className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
-                              b.isSpeaking
-                                ? 'bg-emerald-500 text-white'
-                                : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
-                            }`}
-                          >
-                            <Volume2 className="w-3 h-3" />
-                            {b.isSpeaking ? `${cfg.name} 말하는 중` : '다시 듣기'}
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {!b.isThinking && !b.isSpeaking && (isVoiceListening || isGeminiLiveActive) && (
-                          <span className="inline-flex items-center gap-0.5 rounded-full bg-rose-50 border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 whitespace-nowrap">
-                            <Mic className="w-2.5 h-2.5" />
-                            듣는 중 · {chatWaitSeconds}초
-                          </span>
-                        )}
-                        {!b.isThinking && !b.isSpeaking && !isVoiceListening && !isGeminiLiveActive && (
-                          <span className="text-[10px] font-medium text-zinc-400 tabular-nums whitespace-nowrap">
-                            대기 {chatWaitSeconds}초
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => onFinishBunnyChat(cfg.id)}
-                          className="rounded-full bg-zinc-100 hover:bg-zinc-200 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 whitespace-nowrap"
-                          title="대화 마치고 화면에서 놀게 하기"
-                        >
-                          잘 놀아!
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Quick Animal Character Switcher inside Chat Bubble */}
-                    {characters.length > 1 && (
-                      <div className="mt-1.5 flex items-center gap-1 overflow-x-auto pb-1 border-b border-zinc-100">
-                        <span className="text-[9px] font-semibold text-zinc-400 shrink-0 mr-0.5">
-                          대화 상대:
-                        </span>
-                        {(enabledCharacters.length > 0 ? enabledCharacters : characters).map((otherCfg) => {
-                          const selected = otherCfg.id === cfg.id;
-                          return (
-                            <button
-                              key={otherCfg.id}
-                              type="button"
-                              onClick={() => {
-                                if (!selected) onSummonBunny(otherCfg.id);
-                              }}
-                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 transition-colors ${
-                                selected
-                                  ? 'bg-[#141519] text-white'
-                                  : 'bg-[#F4F5F7] hover:bg-zinc-200 text-zinc-600'
-                              }`}
-                              title={`${otherCfg.name} 부르고 대화하기`}
-                            >
-                              <span>{SPECIES_EMOJIS[otherCfg.species || 'bunny']}</span>
-                              {otherCfg.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {/* Multi-Turn Gemini Chat Scrollable Message Thread */}
-                    <div
-                      ref={(el) => {
-                        chatScrollRefs.current[cfg.id] = el;
-                      }}
-                      className="mt-2 max-h-28 overflow-y-auto space-y-1.5 pr-1"
-                    >
-                      {threadMessages.length === 0 ? (
-                        <p className="text-xs font-medium leading-relaxed text-[#141519]">
-                          {b.bubbleText}
-                        </p>
-                      ) : (
-                        threadMessages.slice(-8).map((msg) => (
-                          <div
-                            key={msg.id}
-                            className={`flex ${
-                              msg.role === 'user' ? 'justify-end' : 'justify-start'
-                            }`}
-                          >
-                            <div
-                              className={`max-w-[86%] rounded-xl px-2.5 py-1.5 text-[11px] leading-relaxed ${
-                                msg.role === 'user'
-                                  ? 'bg-[#141519] text-white font-medium'
-                                  : 'bg-[#F4F5F7] text-[#141519] font-medium'
-                              }`}
-                            >
-                              {msg.text}
-                            </div>
-                          </div>
-                        ))
-                      )}
-                      {b.isThinking && (
-                        <div className="flex justify-start">
-                          <div className="rounded-xl bg-[#F4F5F7] px-2.5 py-1 text-[11px] text-zinc-500 font-medium">
-                            귀를 쫑긋~ 제미나이가 대답 생각 중...
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Voice-First Kid English Re-Ask Coach (Buttons only as last resort!) */}
-                    {b.englishCoach && !b.isThinking && (
-                      <div className="mt-2 rounded-xl bg-amber-50/90 border border-amber-200 p-2.5 text-left">
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-[10px] font-bold text-amber-900 flex items-center gap-1">
-                            <Sparkles className="w-3 h-3" />
-                            목소리로 영어로 다시 말해볼래?
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => onSpeakEnglish(cfg.id, b.englishCoach!.englishPhrase)}
-                            className="inline-flex items-center gap-0.5 rounded-lg bg-white hover:bg-amber-100 border border-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900 whitespace-nowrap"
-                          >
-                            <Volume2 className="w-2.5 h-2.5" />
-                            발음 듣기
-                          </button>
-                        </div>
-                        <p className="mt-1 text-xs font-extrabold text-[#141519]">
-                          "{b.englishCoach.englishPhrase}"
-                        </p>
-                        <div className="mt-0.5 text-[11px] font-semibold text-amber-900/85">
-                          발음: {b.englishCoach.koreanPhonetic}
-                        </div>
-                        <div className="mt-1.5 pt-1.5 border-t border-amber-200/60 flex items-center justify-between gap-2 text-[10px]">
-                          <span className="text-amber-900/75 font-medium tabular-nums">
-                            {isVoiceListening
-                              ? `마이크로 듣는 중 · ${chatWaitSeconds}초 후 다음 대화`
-                              : `대답 대기 중 (${chatWaitSeconds}초)`}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => onSendBunnyMessage(cfg.id, b.englishCoach!.englishPhrase)}
-                            className="text-zinc-400 hover:text-zinc-700 underline underline-offset-2 whitespace-nowrap shrink-0"
-                            title="음성 인식이 어려울 때만 사용하는 버튼"
-                          >
-                            버튼 전송(최후수단)
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Chat Input Form */}
-                    <form
-                      onSubmit={(e) => handleChatSubmit(e, cfg.id)}
-                      className="mt-2 flex items-center gap-1.5"
-                    >
+                {/* Header: Character Name + Live/Voice Replay + Wait Counter + Finish */}
+                <div className="flex items-center justify-between gap-1.5 pb-1.5 border-b border-zinc-100">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-xs shrink-0" aria-hidden="true">
+                      {SPECIES_EMOJIS[cfg.species || 'bunny']}
+                    </span>
+                    <span className="text-xs font-bold text-[#141519] truncate">
+                      {cfg.name}
+                    </span>
+                    {isGeminiLiveActive ? (
+                      <span
+                        className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold whitespace-nowrap shrink-0 ${
+                          b.isSpeaking
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-indigo-600 text-white'
+                        }`}
+                        title="Gemini Live 실시간 네이티브 음성대화 연결됨"
+                      >
+                        ⚡ {b.isSpeaking ? '말하는 중' : 'Live'}
+                      </span>
+                    ) : (
                       <button
                         type="button"
-                        onClick={onToggleVoiceMic}
-                        title="마이크로 말하기"
-                        className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-colors ${
-                          isVoiceListening
-                            ? 'bg-rose-500 text-white'
-                            : 'bg-[#141519] text-white hover:bg-zinc-800'
+                        onClick={() => onReplayBunnyVoice(cfg.id)}
+                        title={`${cfg.name} 목소리 다시 듣기`}
+                        className={`inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                          b.isSpeaking
+                            ? 'bg-emerald-500 text-white'
+                            : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700'
                         }`}
                       >
-                        <Mic className="w-3.5 h-3.5" />
+                        <Volume2 className="w-3 h-3" />
+                        {b.isSpeaking ? '말하는 중' : '다시 듣기'}
                       </button>
-                      <input
-                        type="text"
-                        value={replyText}
-                        onChange={(e) => setReplyText(e.target.value)}
-                        placeholder={
-                          isVoiceListening
-                            ? '마이크로 말하거나 입력하기...'
-                            : `${cfg.name}에게 말 걸기...`
-                        }
-                        className="flex-1 min-w-0 rounded-full bg-[#F4F5F7] border border-zinc-200 px-2.5 py-1 text-[11px] text-[#141519] placeholder:text-zinc-400 focus:outline-none focus:border-[#141519]"
-                      />
-                      <button
-                        type="submit"
-                        disabled={b.isThinking}
-                        aria-label="보내기"
-                        className="w-7 h-7 rounded-full bg-[#141519] hover:bg-zinc-800 text-white flex items-center justify-center shrink-0"
-                      >
-                        <Send className="w-3 h-3" />
-                      </button>
-                    </form>
-                  </>
-                ) : (
-                  <div className="flex flex-col gap-1">
-                    {b.status === 'ADMIRING_PHOTO' && heldPhoto && (
-                      <button
-                        type="button"
-                        onClick={() => onSelectPhotoFromBunny(heldPhoto)}
-                        className="w-36 rounded-lg overflow-hidden border border-zinc-200 bg-zinc-100 text-left"
-                        title="클릭하면 액자에 크게 띄워요"
-                      >
-                        <img
-                          src={heldPhoto.src}
-                          alt={heldPhoto.title}
-                          referrerPolicy="no-referrer"
-                          decoding="async"
-                          className="w-full h-16 object-contain bg-[#181A20]"
-                        />
-                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    {!b.isThinking && !b.isSpeaking && (isVoiceListening || isGeminiLiveActive) && (
+                      <span className="inline-flex items-center gap-0.5 rounded-full bg-rose-50 border border-rose-200 px-1.5 py-0.5 text-[10px] font-bold text-rose-600 whitespace-nowrap">
+                        <Mic className="w-2.5 h-2.5" />
+                        {chatWaitSeconds}초
+                      </span>
+                    )}
+                    {!b.isThinking && !b.isSpeaking && !isVoiceListening && !isGeminiLiveActive && (
+                      <span className="text-[10px] font-medium text-zinc-400 tabular-nums whitespace-nowrap">
+                        {chatWaitSeconds}초
+                      </span>
                     )}
                     <button
                       type="button"
-                      onClick={() => onSummonBunny(cfg.id)}
-                      className="text-left text-[11px] font-medium leading-snug text-[#141519]"
+                      onClick={() => onFinishBunnyChat(cfg.id)}
+                      className="rounded-full bg-[#141519] hover:bg-zinc-800 px-2 py-0.5 text-[10px] font-semibold text-white whitespace-nowrap"
+                      title="대화 종료하고 대화창 숨기기"
                     >
-                      <span className="font-bold mr-1">{cfg.name}</span>
-                      <span>{b.bubbleText}</span>
+                      대화 끝
                     </button>
+                  </div>
+                </div>
+
+                {/* Multi-Turn Gemini Chat Scrollable Message Thread (Compact so Photo Remains Clear!) */}
+                <div
+                  ref={(el) => {
+                    chatScrollRefs.current[cfg.id] = el;
+                  }}
+                  className="mt-1.5 max-h-20 overflow-y-auto space-y-1 pr-1"
+                >
+                  {threadMessages.length === 0 ? (
+                    <p className="text-xs font-medium leading-relaxed text-[#141519]">
+                      {b.bubbleText}
+                    </p>
+                  ) : (
+                    threadMessages.slice(-4).map((msg) => (
+                      <div
+                        key={msg.id}
+                        className={`flex ${
+                          msg.role === 'user' ? 'justify-end' : 'justify-start'
+                        }`}
+                      >
+                        <div
+                          className={`max-w-[88%] rounded-xl px-2 py-1 text-[11px] leading-snug ${
+                            msg.role === 'user'
+                              ? 'bg-[#141519] text-white font-medium'
+                              : 'bg-[#F4F5F7] text-[#141519] font-medium'
+                          }`}
+                        >
+                          {msg.text}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  {b.isThinking && (
+                    <div className="flex justify-start">
+                      <div className="rounded-xl bg-[#F4F5F7] px-2.5 py-1 text-[11px] text-zinc-500 font-medium">
+                        귀를 쫑긋~ 대답 생각 중...
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Voice-First Kid English Re-Ask Coach */}
+                {b.englishCoach && !b.isThinking && (
+                  <div className="mt-1.5 rounded-xl bg-amber-50/95 border border-amber-200 p-2 text-left">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] font-bold text-amber-900 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" />
+                        영어로 말해볼래?
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onSpeakEnglish(cfg.id, b.englishCoach!.englishPhrase)}
+                        className="inline-flex items-center gap-0.5 rounded-lg bg-white hover:bg-amber-100 border border-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900 whitespace-nowrap"
+                      >
+                        <Volume2 className="w-2.5 h-2.5" />
+                        듣기
+                      </button>
+                    </div>
+                    <p className="mt-0.5 text-xs font-extrabold text-[#141519]">
+                      "{b.englishCoach.englishPhrase}" ({b.englishCoach.koreanPhonetic})
+                    </p>
                   </div>
                 )}
 
-                <div className="pointer-events-none absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 rotate-45 bg-white border-r border-b border-black/10" />
+                {/* Chat Input Form */}
+                <form
+                  onSubmit={(e) => handleChatSubmit(e, cfg.id)}
+                  className="mt-1.5 flex items-center gap-1.5"
+                >
+                  <button
+                    type="button"
+                    onClick={onToggleVoiceMic}
+                    title="마이크로 말하기"
+                    className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+                      isVoiceListening
+                        ? 'bg-rose-500 text-white'
+                        : 'bg-[#141519] text-white hover:bg-zinc-800'
+                    }`}
+                  >
+                    <Mic className="w-3 h-3" />
+                  </button>
+                  <input
+                    type="text"
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    placeholder={
+                      isVoiceListening
+                        ? '말하거나 입력하기...'
+                        : `${cfg.name}에게 말 걸기...`
+                    }
+                    className="flex-1 min-w-0 rounded-full bg-[#F4F5F7] border border-zinc-200 px-2.5 py-1 text-[11px] text-[#141519] placeholder:text-zinc-400 focus:outline-none focus:border-[#141519]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={b.isThinking}
+                    aria-label="보내기"
+                    className="w-6 h-6 rounded-full bg-[#141519] hover:bg-zinc-800 text-white flex items-center justify-center shrink-0"
+                  >
+                    <Send className="w-3 h-3" />
+                  </button>
+                </form>
+
+                <div className="pointer-events-none absolute left-1/2 -bottom-1.5 -translate-x-1/2 w-3 h-3 rotate-45 bg-white/92 border-r border-b border-black/10" />
               </div>
             )}
           </div>
         );
       })}
-
-      {/* Animal Character Designation & Name-Call Conversation Bar Above the Fairytale 3D Cottage Roof */}
-      {characters.length > 0 && (
-        <div
-          ref={houseTagDomRef}
-          data-bunny-ui="true"
-          style={{ left: 0, top: 0 }}
-          className="pointer-events-auto absolute z-30 will-change-transform"
-        >
-          <div className="flex flex-col items-center gap-1">
-            <div className="flex flex-wrap items-center justify-center gap-1 rounded-2xl bg-[#141519]/95 backdrop-blur-md text-white px-2.5 py-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.32)] border border-white/15 max-w-[340px]">
-              <span className="text-[10px] font-bold text-amber-300 px-1 whitespace-nowrap">
-                🐾 이름 불러 대화
-              </span>
-              {(enabledCharacters.length > 0 ? enabledCharacters : characters.slice(0, 4)).map(
-                (cfg) => {
-                  const st = bunnies[cfg.id]?.status ?? 'IN_HOUSE';
-                  const isInside = st === 'IN_HOUSE';
-                  const isTalking = st === 'CHATTING' && activeChatBunny === cfg.id;
-                  const isSpeakingNow = Boolean(bunnies[cfg.id]?.isSpeaking);
-                  return (
-                    <button
-                      key={cfg.id}
-                      type="button"
-                      onClick={() => onSummonBunny(cfg.id)}
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold transition-all whitespace-nowrap ${
-                        isTalking
-                          ? 'bg-white text-[#141519] shadow-sm scale-105'
-                          : isInside
-                          ? 'bg-white/10 text-zinc-100 hover:bg-white/25'
-                          : 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 hover:bg-emerald-500/35'
-                      }`}
-                      title={`"${cfg.name}" 이름을 부르거나 클릭해서 대화하기`}
-                    >
-                      <span>{SPECIES_EMOJIS[cfg.species || 'bunny']}</span>
-                      <span>{cfg.name}</span>
-                      {isTalking && (
-                        <Volume2
-                          className={`w-3 h-3 shrink-0 ${
-                            isSpeakingNow ? 'text-emerald-600 animate-pulse' : 'text-rose-500'
-                          }`}
-                        />
-                      )}
-                    </button>
-                  );
-                }
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

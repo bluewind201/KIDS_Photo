@@ -65,16 +65,22 @@ import {
 } from '../utils/supertonicTts';
 import {
   browseCloudDemoOrRemoteUnified,
+  buildStablePhotoId,
   checkGeminiVisionAvailable,
   connectSynologyDsmUnified,
+  curateRecentAndNostalgiaItems,
   fetchCloudProviderFolderPhotos,
   fetchImageViaNativeHttp,
   fetchSynologyFolderPhotos,
   geocodeCityUnified,
   getSavedGeminiApiKey,
+  getSavedPhotoSyncConfig,
+  inferTimestampFromNameOrDate,
+  PhotoSyncConfig,
   refreshMartEventsUnified,
   resolvePublicShareLinkUnified,
   saveGeminiApiKey,
+  savePhotoSyncConfig,
 } from '../utils/standaloneApi';
 import {
   AnimalSpecies,
@@ -222,6 +228,22 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
   // Cloud & NAS Connector State
   const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('share_link');
+  const [photoSyncCfg, setPhotoSyncCfg] = useState<PhotoSyncConfig>(() =>
+    getSavedPhotoSyncConfig()
+  );
+  const updatePhotoSyncCfg = (patch: Partial<PhotoSyncConfig>) => {
+    setPhotoSyncCfg((prev) => {
+      const next: PhotoSyncConfig = {
+        maxPhotoFetchCount: Math.max(
+          20,
+          Math.min(500, Math.round(patch.maxPhotoFetchCount ?? prev.maxPhotoFetchCount))
+        ),
+        nostalgiaMixEnabled: patch.nostalgiaMixEnabled ?? prev.nostalgiaMixEnabled,
+      };
+      savePhotoSyncConfig(next);
+      return next;
+    });
+  };
   const [shareLinkUrl, setShareLinkUrl] = useState('');
   const [shareLinkAlbumTitle, setShareLinkAlbumTitle] = useState('');
   const [shareLinkPassword, setShareLinkPassword] = useState('');
@@ -455,6 +477,7 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     const result = await runAlbumVaultAndAiPipeline({
       photos: immediateSlice,
       sharePassword: draftAlbum.sharePassword,
+      skipAiStage: !geminiAvail,
       onProgress: (info) => {
         setSyncPipelineProgress({
           phase: info.phase,
@@ -506,18 +529,18 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     });
 
     try {
-      const tempId = `album-share-${Date.now()}`;
+      const finalAlbumId = `album-share-${Date.now()}`;
       const resolved = await resolvePublicShareLinkUnified({
         url: targetUrl,
         customTitle: customTitle?.trim() || shareLinkAlbumTitle.trim() || undefined,
         password: shareLinkPassword.trim() || undefined,
-        albumId: tempId,
+        albumId: finalAlbumId,
+        maxCount: photoSyncCfg.maxPhotoFetchCount,
+        nostalgiaMix: photoSyncCfg.nostalgiaMixEnabled,
       });
 
-      const finalAlbumId = `album-${resolved.provider}-${Date.now()}`;
-      const realPhotos: PhotoItem[] = resolved.photos.map((p, idx) => ({
+      const realPhotos: PhotoItem[] = resolved.photos.map((p) => ({
         ...p,
-        id: `${finalAlbumId}-p-${idx}`,
         albumId: finalAlbumId,
         albumName: resolved.albumTitle,
       }));
@@ -709,6 +732,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               albumId,
               albumName: albumTitle,
               provider: selectedProvider,
+              maxCount: photoSyncCfg.maxPhotoFetchCount,
+              nostalgiaMix: photoSyncCfg.nostalgiaMixEnabled,
             });
             generatedPhotos.push(...fetched);
           }
@@ -725,6 +750,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               webdavUrl: webdavUrl.trim(),
               webdavUser: webdavUser.trim(),
               webdavPass: webdavPass,
+              maxCount: photoSyncCfg.maxPhotoFetchCount,
+              nostalgiaMix: photoSyncCfg.nostalgiaMixEnabled,
             });
             generatedPhotos.push(...fetched);
           }
@@ -814,25 +841,31 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
 
   const handleLocalFilesUpload = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
-    const imageFiles = Array.from(fileList)
-      .filter((f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic)$/i.test(f.name))
-      .slice(0, 80);
+    const rawImageFiles = Array.from(fileList).filter(
+      (f) => f.type.startsWith('image/') || /\.(jpe?g|png|webp|gif|heic)$/i.test(f.name)
+    );
 
-    if (imageFiles.length === 0) {
+    if (rawImageFiles.length === 0) {
       setConnectorStatus({ type: 'error', msg: '선택한 항목에 이미지 파일(JPG, PNG, WEBP, HEIC)이 없습니다.' });
       return;
     }
 
+    const curatedFiles = curateRecentAndNostalgiaItems(rawImageFiles, {
+      maxCount: photoSyncCfg.maxPhotoFetchCount,
+      nostalgiaMix: photoSyncCfg.nostalgiaMixEnabled,
+      getTimestampMs: (f) => f.lastModified || inferTimestampFromNameOrDate(f.name),
+    });
+
     setIsAnalyzingLocal(true);
     setConnectorStatus({
       type: 'info',
-      msg: `${imageFiles.length}장의 고화질 사진을 최소 용량 WebP(~135KB)로 최적 저장하고 AI 검색 데이터를 생성하고 있습니다...`,
+      msg: `${curatedFiles.length}장의 사진을 최소 용량 WebP(~135KB)로 최초 1회 최적 저장하고 AI 검색 데이터를 생성하고 있습니다...`,
     });
 
     try {
       const albumId = `album-local-${Date.now()}`;
       const firstRelPath =
-        (imageFiles[0] as File & { webkitRelativePath?: string }).webkitRelativePath || '';
+        (curatedFiles[0].item as File & { webkitRelativePath?: string }).webkitRelativePath || '';
       const folderTitle =
         customAlbumName.trim() ||
         (firstRelPath.includes('/')
@@ -842,15 +875,18 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
       const newPhotos: PhotoItem[] = [];
       let totalSavedBytes = 0;
 
-      for (let i = 0; i < imageFiles.length; i++) {
-        const file = imageFiles[i];
-        const photoId = `${albumId}-local-${i}`;
+      for (let i = 0; i < curatedFiles.length; i++) {
+        const { item: file, isNostalgiaPick } = curatedFiles[i];
+        const photoId = buildStablePhotoId(
+          albumId,
+          `${file.name}-${file.lastModified}-${file.size}`
+        );
         const title = file.name.replace(/\.[^.]+$/, '');
 
         setSyncPipelineProgress({
           phase: 'optimizing',
           done: i,
-          total: imageFiles.length,
+          total: curatedFiles.length,
           savedBytesTotal: totalSavedBytes,
           currentPhotoTitle: title,
         });
@@ -876,11 +912,18 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           title,
           date: fileDate,
           location: '가족 추억 장소',
-          tags: ['가족사진', '추억', folderTitle, ...(vaultRec?.visualHintTags ?? [])],
+          tags: [
+            '가족사진',
+            '추억',
+            folderTitle,
+            ...(isNostalgiaPick ? ['추억회상', '예전사진'] : []),
+            ...(vaultRec?.visualHintTags ?? []),
+          ],
           aiSummary: `${fileDate}에 촬영된 소중한 가족 사진입니다.`,
           aiAnalyzed: false,
           vaultCached: Boolean(vaultRec),
           optimizedBytes: vaultRec?.byteSize,
+          isNostalgiaPick,
         });
       }
 
@@ -2578,6 +2621,102 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           {activeTab === 'cloud' && (
             <div className="space-y-5">
               {renderGeminiAnalysisCard()}
+
+              {/* Photo Fetch Quantity & 90% Recent + 10% Past Nostalgia Curation Card */}
+              <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-4 space-y-3.5">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-[#141519] flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-indigo-600 shrink-0" />
+                      가져올 사진 수량 설정 &amp; 최신 90% + 과거 추억 10% 자동 큐레이션
+                    </h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      최신 사진 위주로 90%를 가져오면서, 가족이 예전 추억을 회상할 수 있도록 과거 사진 10%를 골고루 섞어 가져옵니다.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-[#141519] text-white px-3 py-1 text-xs font-bold tabular-nums shrink-0">
+                    최대 {photoSyncCfg.maxPhotoFetchCount}장 연동
+                    {photoSyncCfg.nostalgiaMixEnabled
+                      ? ` (최신 ${Math.max(1, photoSyncCfg.maxPhotoFetchCount - Math.max(1, Math.round(photoSyncCfg.maxPhotoFetchCount * 0.1)))}장 + 과거 ${Math.max(1, Math.round(photoSyncCfg.maxPhotoFetchCount * 0.1))}장)`
+                      : ' (최신순 100%)'}
+                  </span>
+                </div>
+
+                {/* Preset Buttons + Slider */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[30, 50, 100, 150, 200, 300, 500].map((cnt) => {
+                    const active = photoSyncCfg.maxPhotoFetchCount === cnt;
+                    return (
+                      <button
+                        key={cnt}
+                        type="button"
+                        onClick={() => updatePhotoSyncCfg({ maxPhotoFetchCount: cnt })}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                          active
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'bg-white border border-zinc-200 hover:bg-zinc-100 text-zinc-700'
+                        }`}
+                      >
+                        {cnt}장{cnt === 100 ? ' (권장)' : ''}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] font-semibold text-zinc-400">20장</span>
+                  <input
+                    type="range"
+                    min={20}
+                    max={500}
+                    step={10}
+                    value={photoSyncCfg.maxPhotoFetchCount}
+                    onChange={(e) =>
+                      updatePhotoSyncCfg({ maxPhotoFetchCount: Number(e.target.value) })
+                    }
+                    className="flex-1 accent-indigo-600"
+                  />
+                  <span className="text-[10px] font-semibold text-zinc-400">500장</span>
+                </div>
+
+                {/* 90% Recent + 10% Past Nostalgia Toggle */}
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-zinc-200 px-3.5 py-2.5">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-bold text-[#141519]">
+                      🕰️ 최신 사진 90% + 과거 추억 사진 10% 함께 가져오기
+                    </div>
+                    <div className="text-[11px] text-zinc-500">
+                      최근 찍은 사진을 중심으로 보여주되, 예전 시절 사진 10%를 자연스럽게 섞어 과거를 회상하게 해줍니다.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updatePhotoSyncCfg({
+                        nostalgiaMixEnabled: !photoSyncCfg.nostalgiaMixEnabled,
+                      })
+                    }
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-bold transition-colors shrink-0 ${
+                      photoSyncCfg.nostalgiaMixEnabled
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-zinc-200 text-zinc-700'
+                    }`}
+                  >
+                    {photoSyncCfg.nostalgiaMixEnabled ? '켜짐 (최신 90% + 과거 10%)' : '꺼짐 (최신 사진만)'}
+                  </button>
+                </div>
+
+                {/* Explicit Duration Warning Banner */}
+                <div className="rounded-xl bg-amber-50 border border-amber-200/90 px-3.5 py-2.5 flex items-start gap-2 text-[11px] text-amber-950 leading-relaxed">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>⏱️ 소요 시간 안내:</strong> 가져올 사진 수량을 많이 설정할수록(예: 200~500장){' '}
+                    <strong>최초 연동 시 사진을 불러와 경량 최적화(~135KB)하고 AI 분석·데이터화하는 시간이 오래 걸립니다.</strong>{' '}
+                    단, <strong>최초 1회 저장이 완료된 사진은 기기 내장 금고(IndexedDB)에 영구 보관</strong>되어 이후 앱 실행 시 다시 최적화하지 않고 즉시 표시됩니다!
+                  </div>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
                 {(
                   [

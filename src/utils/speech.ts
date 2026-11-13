@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { BunnyVoiceSpeaker } from '../types';
 import { getSavedGeminiApiKey, tryBackendJson } from './standaloneApi';
 import { trySynthesizeSupertonicWavUrl } from './supertonicTts';
@@ -16,10 +16,12 @@ export interface AndroidSpeechBridgeInterface {
     speakerKey: string,
     utteranceId: string
   ) => void;
+  playBase64Audio?: (base64Audio: string, fileExt: string, utteranceId: string) => void;
   stopSpeak: () => void;
   isSttAvailable: () => boolean;
   startListening: (lang: string) => void;
   stopListening: () => void;
+  releaseRecognizerForLiveWebRtc?: () => void;
   hasMicPermission?: () => boolean;
   ensureMicPermission?: () => void;
   isPhoneGeminiInstalled?: () => boolean;
@@ -111,6 +113,7 @@ const SPEAKER_PROFILES: Record<SpeechSpeakerKey, SpeakerVoiceProfile> = {
 };
 
 let activeAudio: HTMLAudioElement | null = null;
+let activeBufferSource: AudioBufferSourceNode | null = null;
 let sharedAudioCtx: AudioContext | null = null;
 let audioUnlocked = false;
 let currentSpeechToken = 0;
@@ -228,6 +231,15 @@ export function playBunnyChime(speaker: SpeechSpeakerKey, enabled = true) {
 
 export function stopCurrentSpeech() {
   currentSpeechToken += 1;
+  if (activeBufferSource) {
+    try {
+      activeBufferSource.stop();
+      activeBufferSource.disconnect();
+    } catch {
+      // Ignore WebAudio stop errors
+    }
+    activeBufferSource = null;
+  }
   if (activeAudio) {
     try {
       activeAudio.pause();
@@ -258,7 +270,16 @@ export function stopCurrentSpeech() {
   }
 }
 
-function wrapPcmBase64AsWavUrl(base64Data: string, sampleRate = 24000): string {
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return window.btoa(binary);
+}
+
+function buildWavBytesFromPcmBase64(base64Data: string, sampleRate = 24000): Uint8Array {
   const binaryStr = window.atob(base64Data);
   const pcmLen = binaryStr.length;
   if (
@@ -268,7 +289,9 @@ function wrapPcmBase64AsWavUrl(base64Data: string, sampleRate = 24000): string {
     binaryStr.charCodeAt(2) === 0x46 && // 'F'
     binaryStr.charCodeAt(3) === 0x46 // 'F'
   ) {
-    return `data:audio/wav;base64,${base64Data}`;
+    const raw = new Uint8Array(pcmLen);
+    for (let i = 0; i < pcmLen; i++) raw[i] = binaryStr.charCodeAt(i);
+    return raw;
   }
 
   const buffer = new ArrayBuffer(44 + pcmLen);
@@ -295,9 +318,93 @@ function wrapPcmBase64AsWavUrl(base64Data: string, sampleRate = 24000): string {
   for (let i = 0; i < pcmLen; i++) {
     bytes[i] = binaryStr.charCodeAt(i);
   }
+  return new Uint8Array(buffer);
+}
 
-  const blob = new Blob([buffer], { type: 'audio/wav' });
-  return URL.createObjectURL(blob);
+async function playWavBytesReliably(
+  wavBytes: Uint8Array,
+  speechToken: number
+): Promise<boolean> {
+  if (speechToken !== currentSpeechToken) return true;
+
+  // 1) Android APK Native MediaPlayer Bridge (100% immune to WebView user-gesture autoplay block!)
+  const bridge = getAndroidSpeechBridge();
+  if (bridge && typeof bridge.playBase64Audio === 'function') {
+    const wavB64 = uint8ToBase64(wavBytes);
+    const uttId = `gemwav-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const nativeOk = await new Promise<boolean>((resolve) => {
+      if (speechToken !== currentSpeechToken) {
+        resolve(true);
+        return;
+      }
+      let settled = false;
+      const done = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('nativeTtsEvent', onEv as EventListener);
+        window.clearTimeout(timer);
+        resolve(ok);
+      };
+      const onEv = (ev: Event) => {
+        const d = (ev as CustomEvent<{ id?: string; type?: string }>).detail;
+        if (!d || d.id !== uttId) return;
+        if (d.type === 'done') done(true);
+        else if (d.type === 'error') done(false);
+      };
+      const approxDurationMs = Math.max(6000, Math.round((wavBytes.length / 48000) * 1000) + 3000);
+      const timer = window.setTimeout(() => done(true), approxDurationMs);
+      window.addEventListener('nativeTtsEvent', onEv as EventListener);
+      try {
+        bridge.playBase64Audio!(wavB64, 'wav', uttId);
+      } catch {
+        done(false);
+      }
+    });
+    if (nativeOk) return true;
+  }
+
+  // 2) Unlocked WebAudio AudioContext Buffer Playback (never blocked after async await once unlocked)
+  const ctx = getAudioContext();
+  if (ctx) {
+    try {
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+      const copyBuf = wavBytes.buffer.slice(
+        wavBytes.byteOffset,
+        wavBytes.byteOffset + wavBytes.byteLength
+      ) as ArrayBuffer;
+      const decoded = await ctx.decodeAudioData(copyBuf);
+      if (speechToken !== currentSpeechToken) return true;
+
+      return await new Promise<boolean>((resolve) => {
+        const src = ctx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(ctx.destination);
+        activeBufferSource = src;
+        src.onended = () => {
+          if (activeBufferSource === src) activeBufferSource = null;
+          resolve(true);
+        };
+        try {
+          src.start(0);
+        } catch {
+          if (activeBufferSource === src) activeBufferSource = null;
+          resolve(false);
+        }
+      });
+    } catch {
+      // Fallback to HTMLAudioElement below
+    }
+  }
+
+  // 3) Standard HTMLAudioElement fallback
+  const blobUrl = URL.createObjectURL(
+    new Blob([wavBytes.buffer.slice(wavBytes.byteOffset, wavBytes.byteOffset + wavBytes.byteLength) as ArrayBuffer], {
+      type: 'audio/wav',
+    })
+  );
+  return await playAudioDataUrl(blobUrl, speechToken);
 }
 
 async function playAudioDataUrl(url: string, speechToken: number): Promise<boolean> {
@@ -323,12 +430,135 @@ async function playAudioDataUrl(url: string, speechToken: number): Promise<boole
   });
 }
 
-const GEMINI_AUDIO_LRU = new Map<string, string>();
+const GEMINI_AUDIO_LRU = new Map<string, Uint8Array>();
 const MAX_GEMINI_AUDIO_LRU = 40;
+let previewTtsCooldownUntil = 0;
 
 /**
- * Tier 1: Client-Side Gemini 2.5 Native Audio TTS when user saved a Gemini API Key in Settings.
- * Uses natural Korean human acting direction + studio prebuilt voices (`Leda`, `Zephyr`, `Puck`, `Aoede`, `Fenrir`).
+ * Synthesizes 24kHz PCM via Gemini 2.5 Native Audio Live model (`gemini-2.5-flash-native-audio-preview-12-2025`),
+ * which has generous quota and produces genuine conversational human breathing, warmth, and Korean intonation.
+ */
+async function synthesizeViaGeminiNativeLiveOnce(
+  apiKey: string,
+  text: string,
+  voiceName: string,
+  styleInstruction: string,
+  lang: 'ko-KR' | 'en-US',
+  speechToken: number
+): Promise<Uint8Array | null> {
+  const ai = new GoogleGenAI({ apiKey });
+  const liveModels = [
+    'gemini-2.5-flash-native-audio-preview-12-2025',
+    'gemini-2.5-flash-native-audio-preview-09-2025',
+  ];
+
+  for (const modelName of liveModels) {
+    if (speechToken !== currentSpeechToken) return null;
+    try {
+      const pcmChunks: Uint8Array[] = [];
+      let resolveTurn!: (ok: boolean) => void;
+      const turnDone = new Promise<boolean>((r) => {
+        resolveTurn = r;
+      });
+
+      const sysPrompt =
+        lang === 'en-US'
+          ? 'You are a warm, real human voice actor speaking to a young child. Read ONLY the exact sentence provided by the user naturally and warmly, without adding any extra words.'
+          : `${styleInstruction}. 절대로 다른 인사말이나 부연 설명을 덧붙이지 말고, 사용자가 전달한 대사 문장만 실제 사람처럼 아주 자연스럽고 다정한 호흡으로 그대로 말하세요.`;
+
+      const session = await ai.live.connect({
+        model: modelName,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName,
+              },
+            },
+          },
+          systemInstruction: {
+            parts: [{ text: sysPrompt }],
+          },
+        },
+        callbacks: {
+          onopen: () => {},
+          onmessage: (msg: LiveServerMessage) => {
+            const parts = msg.serverContent?.modelTurn?.parts;
+            if (parts) {
+              for (const part of parts) {
+                const b64 = part.inlineData?.data;
+                if (b64) {
+                  const bin = window.atob(b64);
+                  const arr = new Uint8Array(bin.length);
+                  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+                  pcmChunks.push(arr);
+                }
+              }
+            }
+            if (msg.serverContent?.turnComplete) {
+              resolveTurn(true);
+            }
+          },
+          onerror: () => resolveTurn(false),
+          onclose: () => resolveTurn(pcmChunks.length > 0),
+        },
+      });
+
+      const safetyTimer = window.setTimeout(() => resolveTurn(pcmChunks.length > 0), 7500);
+      session.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text: text.slice(0, 420) }] }],
+        turnComplete: true,
+      });
+
+      await turnDone;
+      window.clearTimeout(safetyTimer);
+      try {
+        session.close();
+      } catch {
+        // Ignore close errors
+      }
+
+      const totalPcmLen = pcmChunks.reduce((s, c) => s + c.length, 0);
+      if (totalPcmLen > 400) {
+        const wavBuf = new ArrayBuffer(44 + totalPcmLen);
+        const view = new DataView(wavBuf);
+        const writeAscii = (offset: number, s: string) => {
+          for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+        };
+        writeAscii(0, 'RIFF');
+        view.setUint32(4, 36 + totalPcmLen, true);
+        writeAscii(8, 'WAVE');
+        writeAscii(12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, 24000, true);
+        view.setUint32(28, 48000, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeAscii(36, 'data');
+        view.setUint32(40, totalPcmLen, true);
+
+        const out = new Uint8Array(wavBuf);
+        let offset = 44;
+        for (const chunk of pcmChunks) {
+          out.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return out;
+      }
+    } catch {
+      // Try next Live native audio model
+    }
+  }
+  return null;
+}
+
+/**
+ * Tier 1: Client-Side Gemini 2.5 Native Audio when user saved a Gemini API Key in Settings.
+ * Uses studio prebuilt human voices (`Leda`, `Zephyr`, `Puck`, `Aoede`, `Fenrir`) + Native MediaPlayer/WebAudio
+ * and automatically falls over from `gemini-2.5-flash-preview-tts` (3 RPM cap) to `gemini-2.5-flash-native-audio`!
  */
 async function trySpeakWithClientGeminiKey(
   text: string,
@@ -341,49 +571,80 @@ async function trySpeakWithClientGeminiKey(
 
   const profile = SPEAKER_PROFILES[speaker] ?? SPEAKER_PROFILES.assistant;
   const cacheKey = `${profile.geminiVoice}|${lang}|${text.slice(0, 420)}`;
-  const cachedBase64 = GEMINI_AUDIO_LRU.get(cacheKey);
-  if (cachedBase64) {
-    const wavUrl = wrapPcmBase64AsWavUrl(cachedBase64, 24000);
-    return await playAudioDataUrl(wavUrl, speechToken);
+  const cachedWav = GEMINI_AUDIO_LRU.get(cacheKey);
+  if (cachedWav) {
+    return await playWavBytesReliably(cachedWav, speechToken);
   }
 
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-    const promptText =
-      lang === 'en-US'
-        ? `Speak naturally and warmly like a friendly real human teacher talking to a young child: "${text.slice(0, 420)}"`
-        : `${profile.geminiStyleKo} (기계적인 낭독 투 없이 실제 사람이 대화하듯 아래 대사만 자연스럽게 발화하세요): "${text.slice(0, 420)}"`;
+  // 1A) Fast single-call Gemini 2.5 Preview TTS (when not in 429 cooldown)
+  if (Date.now() >= previewTtsCooldownUntil) {
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const promptText =
+        lang === 'en-US'
+          ? `Say warmly and naturally to a child: ${text.slice(0, 420)}`
+          : `${profile.geminiStyleKo}: ${text.slice(0, 420)}`;
 
-    const res = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-preview-tts',
-      contents: [{ parts: [{ text: promptText }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: profile.geminiVoice,
+      const res = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-preview-tts',
+        contents: [{ parts: [{ text: promptText }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: profile.geminiVoice,
+              },
             },
           },
         },
-      },
-    });
+      });
 
+      if (speechToken !== currentSpeechToken) return true;
+
+      const inline = res.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (inline?.data) {
+        const wavBytes = buildWavBytesFromPcmBase64(inline.data, 24000);
+        if (GEMINI_AUDIO_LRU.size >= MAX_GEMINI_AUDIO_LRU) {
+          const firstKey = GEMINI_AUDIO_LRU.keys().next().value;
+          if (firstKey) GEMINI_AUDIO_LRU.delete(firstKey);
+        }
+        GEMINI_AUDIO_LRU.set(cacheKey, wavBytes);
+        return await playWavBytesReliably(wavBytes, speechToken);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/429|RESOURCE_EXHAUSTED|quota/i.test(msg)) {
+        previewTtsCooldownUntil = Date.now() + 65_000;
+      }
+    }
+  }
+
+  if (speechToken !== currentSpeechToken) return true;
+
+  // 1B) Genuine Gemini 2.5 Native Audio Live synthesis (zero 3-RPM TTS cap, true human conversational voice!)
+  try {
+    const liveWavBytes = await synthesizeViaGeminiNativeLiveOnce(
+      apiKey,
+      text,
+      profile.geminiVoice,
+      profile.geminiStyleKo,
+      lang,
+      speechToken
+    );
     if (speechToken !== currentSpeechToken) return true;
-
-    const inline = res.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-    if (inline?.data) {
+    if (liveWavBytes) {
       if (GEMINI_AUDIO_LRU.size >= MAX_GEMINI_AUDIO_LRU) {
         const firstKey = GEMINI_AUDIO_LRU.keys().next().value;
         if (firstKey) GEMINI_AUDIO_LRU.delete(firstKey);
       }
-      GEMINI_AUDIO_LRU.set(cacheKey, inline.data);
-      const wavUrl = wrapPcmBase64AsWavUrl(inline.data, 24000);
-      return await playAudioDataUrl(wavUrl, speechToken);
+      GEMINI_AUDIO_LRU.set(cacheKey, liveWavBytes);
+      return await playWavBytesReliably(liveWavBytes, speechToken);
     }
   } catch {
-    // Fall back immediately to Supertonic / Native Android Neural TTS
+    // Fall back to Neural TTS bridge below
   }
+
   return false;
 }
 
@@ -602,19 +863,10 @@ async function runUnifiedSpeechPipeline(
   onSpeakingChange?.(true);
 
   try {
-    // 1) GitHub Open-Source Supertone Supertonic-2 On-Device Korean Human Voice Engine (when enabled & loaded)
-    try {
-      const supertonicUrl = await trySynthesizeSupertonicWavUrl(cleanedText, speaker, lang);
-      if (myToken !== currentSpeechToken) return;
-      if (supertonicUrl) {
-        const played = await playAudioDataUrl(supertonicUrl, myToken);
-        if (played) return;
-      }
-    } catch {
-      // Continue to Gemini / Native Neural engines
-    }
-
-    if (myToken !== currentSpeechToken) return;
+    // 1) Primary Studio Human Acting Engine: Client-side Gemini 2.5 Native Audio (`Leda`/`Zephyr`/`Puck`/`Aoede`/`Fenrir`)
+    // Runs FIRST whenever user configured a Gemini API key so Supertonic/Offline TTS never overrides human Gemini voices!
+    const geminiPlayed = await trySpeakWithClientGeminiKey(cleanedText, speaker, lang, myToken);
+    if (geminiPlayed || myToken !== currentSpeechToken) return;
 
     // 2) Optional remote backend server `/api/gemini/tts` (fast no-op when standalone)
     try {
@@ -637,23 +889,33 @@ async function runUnifiedSpeechPipeline(
       );
 
       if (res.ok && res.data.audioBase64 && !res.data.fallback) {
-        const dataUrl = `data:${res.data.mimeType || 'audio/wav'};base64,${res.data.audioBase64}`;
-        const played = await playAudioDataUrl(dataUrl, myToken);
+        const wavBytes = buildWavBytesFromPcmBase64(res.data.audioBase64, 24000);
+        const played = await playWavBytesReliably(wavBytes, myToken);
         if (played) return;
       }
     } catch {
-      // Continue to standalone engines
+      // Continue to standalone Neural engines
     }
 
     if (myToken !== currentSpeechToken) return;
 
-    // 3) Optional client-side Gemini 2.5 Studio Human Acting TTS if user registered a Gemini API Key
-    const geminiPlayed = await trySpeakWithClientGeminiKey(cleanedText, speaker, lang, myToken);
-    if (geminiPlayed || myToken !== currentSpeechToken) return;
-
-    // 4) Primary Android APK Zero-Key Native Korean Neural TTS Bridge (`EdgeNeuralTtsClient` + fixed MediaPlayer)
+    // 3) Primary Android APK Zero-Key Conversational MultilingualNeural v2 Bridge (96kbps 24kHz MP3 + Native MediaPlayer)
     const androidPlayed = await speakWithAndroidNativeBridge(cleanedText, speaker, lang, myToken);
     if (androidPlayed || myToken !== currentSpeechToken) return;
+
+    // 4) Optional On-Device Supertone Supertonic-2 Offline Engine (when explicitly enabled & offline)
+    try {
+      const supertonicUrl = await trySynthesizeSupertonicWavUrl(cleanedText, speaker, lang);
+      if (myToken !== currentSpeechToken) return;
+      if (supertonicUrl) {
+        const played = await playAudioDataUrl(supertonicUrl, myToken);
+        if (played) return;
+      }
+    } catch {
+      // Continue to Browser / Cloud engines
+    }
+
+    if (myToken !== currentSpeechToken) return;
 
     // 5) Desktop / Web Browser speechSynthesis
     const browserPlayed = await speakWithBrowserSpeechSynthesis(
