@@ -54,8 +54,12 @@ try {
 
     if (-not $SkipPublish) {
         Write-Host "[KIDS_Photo] Publishing KIDS_Photo.apk to GitHub Releases..." -ForegroundColor Green
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & $GhWrapper release view latest-apk --repo bluewind201/KIDS_Photo *> $null
-        if ($LASTEXITCODE -eq 0) {
+        $latestExists = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $prevEap
+        if ($latestExists) {
             & $GhWrapper release upload latest-apk $latestApk --clobber --repo bluewind201/KIDS_Photo
             & $GhWrapper release edit latest-apk --prerelease --title "KIDS_Photo 최신 APK (v$versionName)" --notes "로컬 PC 정식 서명 빌드`n버전 v$versionName (versionCode $nextVc), 커밋 $($commit.Substring(0,7))`nSHA-256: $sha256`n기존 앱 삭제 없이 바로 덮어쓰기 업데이트 설치가 가능합니다." --repo bluewind201/KIDS_Photo
         } else {
@@ -63,8 +67,11 @@ try {
         }
 
         $vTag = "v$versionName"
+        $ErrorActionPreference = "Continue"
         & $GhWrapper release view $vTag --repo bluewind201/KIDS_Photo *> $null
-        if ($LASTEXITCODE -eq 0) {
+        $vTagExists = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $prevEap
+        if ($vTagExists) {
             & $GhWrapper release upload $vTag $latestApk --clobber --repo bluewind201/KIDS_Photo
         } else {
             & $GhWrapper release create $vTag $latestApk --latest --title "KIDS_Photo $vTag" --notes "$subject`n`n- 버전: $vTag (versionCode $nextVc, 로컬 PC 고정 서명)`n- 커밋: $($commit.Substring(0,7))`n- SHA-256: ``$sha256``" --repo bluewind201/KIDS_Photo
