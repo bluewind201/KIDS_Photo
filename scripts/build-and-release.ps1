@@ -69,11 +69,12 @@ try {
 
     if (-not $SkipPublish) {
         Write-Host "[KIDS_Photo] Publishing KIDS_Photo.apk + latest.json to GitHub Releases..." -ForegroundColor Green
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        & $GhWrapper release view latest-apk --repo bluewind201/KIDS_Photo *> $null
-        $latestExists = ($LASTEXITCODE -eq 0)
-        $ErrorActionPreference = $prevEap
+        $existingTagsJson = & $GhWrapper release list --repo bluewind201/KIDS_Photo --limit 50 --json tagName
+        $existingTags = @()
+        if ($existingTagsJson) {
+            $existingTags = @(($existingTagsJson | ConvertFrom-Json) | ForEach-Object { $_.tagName })
+        }
+        $latestExists = ($existingTags -contains "latest-apk")
         if ($latestExists) {
             & $GhWrapper release upload latest-apk $latestApk $latestJsonFile --clobber --repo bluewind201/KIDS_Photo
             & $GhWrapper release edit latest-apk --prerelease --title "KIDS_Photo 최신 APK (v$versionName)" --notes "로컬 PC 고정 서명 빌드`n버전 v$versionName (versionCode $nextVc), 커밋 $($commit.Substring(0,7))`nSHA-256: $sha256`n앱 내부 자동 업데이트 또는 덮어쓰기 설치를 지원합니다." --repo bluewind201/KIDS_Photo
@@ -82,10 +83,7 @@ try {
         }
 
         $vTag = "v$versionName"
-        $ErrorActionPreference = "Continue"
-        & $GhWrapper release view $vTag --repo bluewind201/KIDS_Photo *> $null
-        $vTagExists = ($LASTEXITCODE -eq 0)
-        $ErrorActionPreference = $prevEap
+        $vTagExists = ($existingTags -contains $vTag)
         if ($vTagExists) {
             & $GhWrapper release upload $vTag $latestApk $latestJsonFile --clobber --repo bluewind201/KIDS_Photo
         } else {
