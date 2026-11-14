@@ -1,4 +1,5 @@
 import { PhotoItem } from '../types';
+import { reverseGeocodeKoreaLatLng } from './koreaLocations';
 import {
   getAllVaultCachedPhotoIds,
   getVaultPhotoRecord,
@@ -146,6 +147,16 @@ export async function runAlbumVaultAndAiPipeline(params: {
         if (rec?.aiThumbBase64) {
           thumbB64 = rec.aiThumbBase64;
           visualTags = rec.visualHintTags ?? [];
+          if (rec.gpsLat !== undefined && rec.gpsLng !== undefined && !vaultResults.has(photo.id)) {
+            const geo = reverseGeocodeKoreaLatLng(rec.gpsLat, rec.gpsLng);
+            if (geo) visualTags = Array.from(new Set([...visualTags, ...geo.tags]));
+          }
+        }
+      } else if (vaultResults.has(photo.id)) {
+        const vr = vaultResults.get(photo.id);
+        if (vr?.gpsLat !== undefined && vr?.gpsLng !== undefined) {
+          const geo = reverseGeocodeKoreaLatLng(vr.gpsLat, vr.gpsLng);
+          if (geo) visualTags = Array.from(new Set([...visualTags, ...geo.tags]));
         }
       }
 
@@ -208,20 +219,30 @@ export async function runAlbumVaultAndAiPipeline(params: {
   }
 
   // ==========================================================================
-  // STEP 3: Merge Compact Vault Status + Structured AI Metadata onto PhotoItems
+  // STEP 3: Merge Compact Vault Status + EXIF GPS Location + AI Metadata
   // ==========================================================================
-  const finalPhotos: PhotoItem[] = photos.map((photo) => {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const GENERIC_LOCS = new Set(['우리 가족 앨범', '우리 가족 클라우드', '가족 추억 장소', '']);
+
+  const mergedPhotos: PhotoItem[] = photos.map((photo) => {
     const vRes = vaultResults.get(photo.id);
     let aiMeta = aiResultById.get(photo.id);
+
+    const lat = vRes?.gpsLat ?? photo.gpsLat;
+    const lng = vRes?.gpsLng ?? photo.gpsLng;
+    const geo =
+      typeof lat === 'number' && typeof lng === 'number'
+        ? reverseGeocodeKoreaLatLng(lat, lng)
+        : null;
 
     if (!aiMeta && !photo.aiAnalyzed && vRes) {
       aiMeta = buildSmartLocalPhotoIndex({
         photoId: photo.id,
         fileName: photo.title,
         albumName: photo.albumName,
-        dateStr: photo.date,
+        dateStr: vRes.exifDate || photo.date,
         aiThumbBase64: vRes.aiThumbBase64,
-        visualHintTags: vRes.visualHintTags,
+        visualHintTags: geo ? [...vRes.visualHintTags, ...geo.tags] : vRes.visualHintTags,
       });
     }
 
@@ -229,21 +250,70 @@ export async function runAlbumVaultAndAiPipeline(params: {
     const compactSrc =
       isNowInVault && photo.src.startsWith('data:') ? `idb://photo/${photo.id}` : photo.src;
 
+    // Prefer real EXIF GPS location over AI visual guess or generic album fallback
+    let resolvedLocation = photo.location;
+    if (geo?.locationLabel) {
+      resolvedLocation = geo.locationLabel;
+    } else if (aiMeta?.location && !GENERIC_LOCS.has(aiMeta.location)) {
+      resolvedLocation = aiMeta.location;
+    } else if (GENERIC_LOCS.has(resolvedLocation) && aiMeta?.location) {
+      resolvedLocation = aiMeta.location;
+    }
+
+    const resolvedDate =
+      vRes?.exifDate && (!photo.date || photo.date === todayIso) ? vRes.exifDate : photo.date;
+
+    const mergedTags = Array.from(
+      new Set([
+        ...(aiMeta?.tags && aiMeta.tags.length > 0 ? aiMeta.tags : photo.tags),
+        ...(geo ? geo.tags : []),
+        ...(resolvedLocation && !GENERIC_LOCS.has(resolvedLocation) ? [resolvedLocation] : []),
+      ])
+    ).slice(0, 16);
+
     return {
       ...photo,
       src: compactSrc,
+      date: resolvedDate,
+      gpsLat: lat,
+      gpsLng: lng,
       vaultCached: isNowInVault,
       optimizedBytes: vRes?.byteSize ?? photo.optimizedBytes,
       title: aiMeta?.title || photo.title,
-      location: aiMeta?.location || photo.location,
+      location: resolvedLocation,
       aiSummary: aiMeta?.aiSummary || photo.aiSummary,
       season: aiMeta?.season ?? photo.season,
       mood: aiMeta?.mood ?? photo.mood,
       people: aiMeta?.people ?? photo.people,
       objects: aiMeta?.objects ?? photo.objects,
-      tags: aiMeta?.tags && aiMeta.tags.length > 0 ? aiMeta.tags : photo.tags,
+      tags: mergedTags,
       aiAnalyzed: aiMeta ? aiMeta.analyzedByGemini : photo.aiAnalyzed,
     };
+  });
+
+  // Propagate real trip locations to same-day photos in the same album that lacked GPS
+  const dateAlbumLocationMap = new Map<string, string>();
+  for (const p of mergedPhotos) {
+    if (p.date && p.location && !GENERIC_LOCS.has(p.location)) {
+      const key = `${p.albumId}::${p.date}`;
+      if (!dateAlbumLocationMap.has(key)) {
+        dateAlbumLocationMap.set(key, p.location);
+      }
+    }
+  }
+
+  const finalPhotos: PhotoItem[] = mergedPhotos.map((p) => {
+    if (GENERIC_LOCS.has(p.location) && p.date) {
+      const inferredLoc = dateAlbumLocationMap.get(`${p.albumId}::${p.date}`);
+      if (inferredLoc) {
+        return {
+          ...p,
+          location: inferredLoc,
+          tags: Array.from(new Set([...p.tags, inferredLoc])).slice(0, 16),
+        };
+      }
+    }
+    return p;
   });
 
   const totalVaultCachedInAlbum = finalPhotos.filter((p) => p.vaultCached).length;

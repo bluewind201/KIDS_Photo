@@ -1,5 +1,6 @@
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { BunnyVoiceSpeaker } from '../types';
+import { getSavedElevenLabsApiKey, synthesizeViaElevenLabsMp3 } from './elevenLabsTts';
 import { getSavedGeminiApiKey, tryBackendJson } from './standaloneApi';
 import { trySynthesizeSupertonicWavUrl } from './supertonicTts';
 
@@ -47,67 +48,68 @@ interface SpeakerVoiceProfile {
 
 const SPEAKER_PROFILES: Record<SpeechSpeakerKey, SpeakerVoiceProfile> = {
   tosuni: {
-    // 다정하고 상냥한 첫째 언니 토순이 톤 (사람처럼 자연스러운 호흡과 포근한 한국어 억양)
-    pitchKo: 1.02,
-    rateKo: 1.0,
-    pitchEn: 1.02,
-    rateEn: 0.92,
+    // 다정하고 사랑스러운 아기 토끼 인형 토순이 톤
+    pitchKo: 1.18,
+    rateKo: 1.03,
+    pitchEn: 1.15,
+    rateEn: 0.94,
     geminiVoice: 'Leda',
     geminiStyleKo:
-      '실제 다정하고 따뜻한 한국인 유치원 선생님처럼 자연스러운 호흡과 미소 섞인 사람 목소리로 부드럽게 말해 주세요',
+      '디즈니·픽사 애니메이션에 나오는 작고 복슬복슬한 아기 토끼 인형 친구처럼, 딱딱한 어른 성우 톤을 절대 쓰지 말고 한 톤 높고 해맑게 웃음기 가득한 아주 귀여운 아기 동물 목소리로 통통 튀듯 사랑스럽게 말해 주세요',
     chimeNotes: [587.33, 783.99, 1046.5], // D5 - G5 - C6
   },
   tosili: {
-    // 밝고 생동감 있는 단짝 토실이 톤
-    pitchKo: 1.04,
-    rateKo: 1.05,
-    pitchEn: 1.04,
-    rateEn: 0.95,
-    geminiVoice: 'Zephyr',
+    // 통통 튀는 장난꾸러기 단짝 인형 토실이 톤
+    pitchKo: 1.24,
+    rateKo: 1.07,
+    pitchEn: 1.2,
+    rateEn: 0.96,
+    geminiVoice: 'Puck',
     geminiStyleKo:
-      '실제 밝고 명랑한 한국인 젊은 여성 친구처럼 자연스럽고 생동감 있는 일상 대화 톤으로 말해 주세요',
+      '폴짝폴짝 신이 난 귀여운 아기 다람쥐·강아지 인형 친구처럼, 장난기 가득하고 한 톤 높게 통통 튀는 아주 밝고 귀여운 어린이 만화 캐릭터 목소리로 신나게 말해 주세요',
     chimeNotes: [659.25, 880.0, 1174.66], // E5 - A5 - D6
   },
   toddungi: {
-    // 포근하고 귀여운 막내 토뚱이 톤
-    pitchKo: 0.98,
-    rateKo: 0.96,
-    pitchEn: 0.98,
-    rateEn: 0.9,
-    geminiVoice: 'Puck',
+    // 말랑말랑 볼이 통통한 막내 애착인형 토뚱이 톤
+    pitchKo: 1.16,
+    rateKo: 0.99,
+    pitchEn: 1.14,
+    rateEn: 0.91,
+    geminiVoice: 'Zephyr',
     geminiStyleKo:
-      '실제 포근하고 다정한 한국인 동화 구연가처럼 친근하고 따뜻한 사람 목소리로 말해 주세요',
+      '말랑말랑 볼이 통통한 막내 아기 곰돌이·햄스터 인형 친구처럼, 포근하고 애교 가득하며 미소가 묻어나는 아주 귀여운 아기 동물 목소리로 다정하게 말해 주세요',
     chimeNotes: [523.25, 659.25, 783.99], // C5 - E5 - G5
   },
   tobyeori: {
-    // 맑고 고운 동화 요정 토별이 톤
-    pitchKo: 1.01,
-    rateKo: 0.97,
-    pitchEn: 1.02,
-    rateEn: 0.91,
-    geminiVoice: 'Aoede',
+    // 반짝반짝 동화 요정·아기고양이 인형 토별이 톤
+    pitchKo: 1.2,
+    rateKo: 1.0,
+    pitchEn: 1.16,
+    rateEn: 0.92,
+    geminiVoice: 'Kore',
     geminiStyleKo:
-      '실제 차분하고 고운 목소리의 한국인 성우가 아이에게 옛날이야기를 들려주듯 자연스럽게 말해 주세요',
+      '반짝반짝 동화 나라의 귀여운 아기 고양이·요정 인형 친구처럼, 방울방울 맑고 사랑스러운 높은 톤의 귀여운 목소리로 상냥하게 말해 주세요',
     chimeNotes: [698.46, 880.0, 1318.51], // F5 - A5 - E6
   },
   togureum: {
-    // 씩씩하고 명랑한 소년 대장 토구름 톤
-    pitchKo: 1.0,
-    rateKo: 1.03,
-    pitchEn: 1.0,
-    rateEn: 0.93,
-    geminiVoice: 'Fenrir',
+    // 씩씩하고 해맑은 꼬마 아기공룡·강아지 대장 토구름 톤 (어른 남성 저음 배제!)
+    pitchKo: 1.14,
+    rateKo: 1.05,
+    pitchEn: 1.12,
+    rateEn: 0.94,
+    geminiVoice: 'Puck',
     geminiStyleKo:
-      '실제 유쾌하고 다정한 한국인 삼촌이나 형처럼 밝고 자연스러운 사람 목소리로 말해 주세요',
+      '씩씩하고 해맑은 꼬마 아기 공룡·강아지 대장 인형 친구처럼, 절대 낮고 무거운 어른 남성 톤을 쓰지 말고 밝고 귀엽고 명랑한 꼬마 만화 캐릭터 목소리로 씩씩하게 말해 주세요',
     chimeNotes: [493.88, 659.25, 987.77], // B4 - E5 - B5
   },
   assistant: {
-    pitchKo: 1.0,
-    rateKo: 1.0,
-    pitchEn: 1.0,
-    rateEn: 0.93,
-    geminiVoice: 'Kore',
-    geminiStyleKo: '실제 친절하고 차분한 한국인 안내원처럼 자연스러운 사람 억양으로 읽어 주세요',
+    pitchKo: 1.12,
+    rateKo: 1.02,
+    pitchEn: 1.1,
+    rateEn: 0.94,
+    geminiVoice: 'Leda',
+    geminiStyleKo:
+      '다정하고 밝은 미소가 담긴 귀여운 스마트 가족 도우미 요정 목소리로 따뜻하고 부드럽게 말해 주세요',
     chimeNotes: [523.25, 783.99],
   },
 };
@@ -463,8 +465,8 @@ async function synthesizeViaGeminiNativeLiveOnce(
 
       const sysPrompt =
         lang === 'en-US'
-          ? 'You are a warm, real human voice actor speaking to a young child. Read ONLY the exact sentence provided by the user naturally and warmly, without adding any extra words.'
-          : `${styleInstruction}. 절대로 다른 인사말이나 부연 설명을 덧붙이지 말고, 사용자가 전달한 대사 문장만 실제 사람처럼 아주 자연스럽고 다정한 호흡으로 그대로 말하세요.`;
+          ? 'You are an adorable, playful, high-pitched Pixar/Disney baby plush animal character speaking to a young child! Use a super cute, bouncy, cheerful cartoon animal voice and read ONLY the exact words provided without adding anything extra.'
+          : `[매우 중요한 목소리 연기 지침] ${styleInstruction}. 절대로 낮고 진지한 어른 목소리나 기계적인 아나운서 톤을 쓰지 마세요! 귀여운 만화 속 아기 동물 인형 캐릭터의 목소리 톤과 억양으로, 다른 인사말을 덧붙이지 말고 전달된 대사 문장만 사랑스럽고 자연스럽게 그대로 연기해 말하세요.`;
 
       const session = await ai.live.connect({
         model: modelName,
@@ -555,10 +557,103 @@ async function synthesizeViaGeminiNativeLiveOnce(
   return null;
 }
 
+async function playMp3ArrayBufferReliably(
+  mp3Buf: ArrayBuffer,
+  speechToken: number
+): Promise<boolean> {
+  if (speechToken !== currentSpeechToken) return true;
+  const mp3Bytes = new Uint8Array(mp3Buf);
+
+  // 1) Native Android MediaPlayer (`playBase64Audio` with `mp3` ext — rock-solid hardware STREAM_MUSIC)
+  const bridge = getAndroidSpeechBridge();
+  if (bridge?.playBase64Audio) {
+    const b64 = uint8ToBase64(mp3Bytes);
+    const uttId = `el-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const nativePlayed = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('nativeTtsEvent', onEv as EventListener);
+        window.clearTimeout(timer);
+        resolve(ok);
+      };
+      const onEv = (ev: Event) => {
+        const d = (ev as CustomEvent<{ id?: string; type?: string }>).detail;
+        if (!d || d.id !== uttId) return;
+        if (d.type === 'done') finish(true);
+        else if (d.type === 'error') finish(false);
+      };
+      const timer = window.setTimeout(() => finish(true), 22000);
+      window.addEventListener('nativeTtsEvent', onEv as EventListener);
+      try {
+        bridge.playBase64Audio!(b64, 'mp3', uttId);
+      } catch {
+        finish(false);
+      }
+    });
+    if (nativePlayed) return true;
+  }
+
+  // 2) Hardware-unlocked WebAudio decodeAudioData
+  const ctx = getAudioContext();
+  if (ctx) {
+    try {
+      if (ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+      const decoded = await ctx.decodeAudioData(mp3Buf.slice(0));
+      if (speechToken !== currentSpeechToken) return true;
+      return await new Promise<boolean>((resolve) => {
+        const src = ctx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(ctx.destination);
+        activeBufferSource = src;
+        src.onended = () => {
+          if (activeBufferSource === src) activeBufferSource = null;
+          resolve(true);
+        };
+        try {
+          src.start(0);
+        } catch {
+          if (activeBufferSource === src) activeBufferSource = null;
+          resolve(false);
+        }
+      });
+    } catch {
+      // Fallback to HTMLAudioElement
+    }
+  }
+
+  const blobUrl = URL.createObjectURL(new Blob([mp3Buf.slice(0)], { type: 'audio/mpeg' }));
+  return await playAudioDataUrl(blobUrl, speechToken);
+}
+
 /**
- * Tier 1: Client-Side Gemini 2.5 Native Audio when user saved a Gemini API Key in Settings.
- * Uses studio prebuilt human voices (`Leda`, `Zephyr`, `Puck`, `Aoede`, `Fenrir`) + Native MediaPlayer/WebAudio
- * and automatically falls over from `gemini-2.5-flash-preview-tts` (3 RPM cap) to `gemini-2.5-flash-native-audio`!
+ * Tier 0: ElevenLabs (`eleven_flash_v2_5` ~75ms latency) Ultra-Natural Cute Character Voice Engine!
+ * Runs FIRST whenever user configured an ElevenLabs API key (`Gigi` / `Mimi` / `Jessica` / custom Korean voice).
+ */
+async function trySpeakWithElevenLabs(
+  text: string,
+  speaker: SpeechSpeakerKey,
+  lang: 'ko-KR' | 'en-US',
+  speechToken: number,
+  explicitVoiceId?: string
+): Promise<boolean> {
+  if (!getSavedElevenLabsApiKey()) return false;
+  const mp3Buf = await synthesizeViaElevenLabsMp3(text, speaker, {
+    explicitVoiceId,
+    isEnglish: lang === 'en-US',
+  });
+  if (speechToken !== currentSpeechToken) return true;
+  if (!mp3Buf) return false;
+  return await playMp3ArrayBufferReliably(mp3Buf, speechToken);
+}
+
+/**
+ * Tier 1: Client-Side Gemini 2.5 Native Live Audio (`gemini-2.5-flash-native-audio-preview-12-2025`)!
+ * Prioritizes smooth Native Live Audio FIRST (generous free-tier quota & expressive cute baby-animal acting!)
+ * and falls back to `gemini-2.5-flash-preview-tts` only if Live WebSocket cannot connect.
  */
 async function trySpeakWithClientGeminiKey(
   text: string,
@@ -570,19 +665,45 @@ async function trySpeakWithClientGeminiKey(
   if (!apiKey) return false;
 
   const profile = SPEAKER_PROFILES[speaker] ?? SPEAKER_PROFILES.assistant;
-  const cacheKey = `${profile.geminiVoice}|${lang}|${text.slice(0, 420)}`;
+  const cacheKey = `cute-v2|${profile.geminiVoice}|${lang}|${text.slice(0, 420)}`;
   const cachedWav = GEMINI_AUDIO_LRU.get(cacheKey);
   if (cachedWav) {
     return await playWavBytesReliably(cachedWav, speechToken);
   }
 
-  // 1A) Fast single-call Gemini 2.5 Preview TTS (when not in 429 cooldown)
+  // 1A) PRIMARY: Genuine Gemini 2.5 Native Audio Live synthesis!
+  // Smooth, expressive cute animal character acting even on the Free Gemini API tier (no 3-RPM wall!).
+  try {
+    const liveWavBytes = await synthesizeViaGeminiNativeLiveOnce(
+      apiKey,
+      text,
+      profile.geminiVoice,
+      profile.geminiStyleKo,
+      lang,
+      speechToken
+    );
+    if (speechToken !== currentSpeechToken) return true;
+    if (liveWavBytes) {
+      if (GEMINI_AUDIO_LRU.size >= MAX_GEMINI_AUDIO_LRU) {
+        const firstKey = GEMINI_AUDIO_LRU.keys().next().value;
+        if (firstKey) GEMINI_AUDIO_LRU.delete(firstKey);
+      }
+      GEMINI_AUDIO_LRU.set(cacheKey, liveWavBytes);
+      return await playWavBytesReliably(liveWavBytes, speechToken);
+    }
+  } catch {
+    // Try REST preview-tts fallback below
+  }
+
+  if (speechToken !== currentSpeechToken) return true;
+
+  // 1B) Secondary fallback: Gemini 2.5 Preview TTS (when not in 429 cooldown)
   if (Date.now() >= previewTtsCooldownUntil) {
     try {
       const ai = new GoogleGenAI({ apiKey });
       const promptText =
         lang === 'en-US'
-          ? `Say warmly and naturally to a child: ${text.slice(0, 420)}`
+          ? `Say in a super cute, bright, bouncy baby plush animal cartoon voice to a child: ${text.slice(0, 420)}`
           : `${profile.geminiStyleKo}: ${text.slice(0, 420)}`;
 
       const res = await ai.models.generateContent({
@@ -615,34 +736,9 @@ async function trySpeakWithClientGeminiKey(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/429|RESOURCE_EXHAUSTED|quota/i.test(msg)) {
-        previewTtsCooldownUntil = Date.now() + 65_000;
+        previewTtsCooldownUntil = Date.now() + 90_000;
       }
     }
-  }
-
-  if (speechToken !== currentSpeechToken) return true;
-
-  // 1B) Genuine Gemini 2.5 Native Audio Live synthesis (zero 3-RPM TTS cap, true human conversational voice!)
-  try {
-    const liveWavBytes = await synthesizeViaGeminiNativeLiveOnce(
-      apiKey,
-      text,
-      profile.geminiVoice,
-      profile.geminiStyleKo,
-      lang,
-      speechToken
-    );
-    if (speechToken !== currentSpeechToken) return true;
-    if (liveWavBytes) {
-      if (GEMINI_AUDIO_LRU.size >= MAX_GEMINI_AUDIO_LRU) {
-        const firstKey = GEMINI_AUDIO_LRU.keys().next().value;
-        if (firstKey) GEMINI_AUDIO_LRU.delete(firstKey);
-      }
-      GEMINI_AUDIO_LRU.set(cacheKey, liveWavBytes);
-      return await playWavBytesReliably(liveWavBytes, speechToken);
-    }
-  } catch {
-    // Fall back to Neural TTS bridge below
   }
 
   return false;
@@ -846,7 +942,8 @@ async function runUnifiedSpeechPipeline(
   speaker: SpeechSpeakerKey,
   lang: 'ko-KR' | 'en-US',
   enabled: boolean,
-  onSpeakingChange?: (speaking: boolean) => void
+  onSpeakingChange?: (speaking: boolean) => void,
+  explicitElevenLabsVoiceId?: string
 ): Promise<void> {
   const cleanedText = sanitizeTextForSpeech(rawText);
   if (!enabled || !cleanedText) {
@@ -863,8 +960,17 @@ async function runUnifiedSpeechPipeline(
   onSpeakingChange?.(true);
 
   try {
-    // 1) Primary Studio Human Acting Engine: Client-side Gemini 2.5 Native Audio (`Leda`/`Zephyr`/`Puck`/`Aoede`/`Fenrir`)
-    // Runs FIRST whenever user configured a Gemini API key so Supertonic/Offline TTS never overrides human Gemini voices!
+    // 0) Expressive Cute Character Voice Engine: ElevenLabs (`eleven_flash_v2_5` ~75ms Gigi/Mimi/Jessica/Custom)!
+    const elevenPlayed = await trySpeakWithElevenLabs(
+      cleanedText,
+      speaker,
+      lang,
+      myToken,
+      explicitElevenLabsVoiceId
+    );
+    if (elevenPlayed || myToken !== currentSpeechToken) return;
+
+    // 1) Smooth Cute Animal Acting Engine: Client-side Gemini 2.5 Native Live Audio (`Leda`/`Puck`/`Zephyr`/`Kore`)
     const geminiPlayed = await trySpeakWithClientGeminiKey(cleanedText, speaker, lang, myToken);
     if (geminiPlayed || myToken !== currentSpeechToken) return;
 
@@ -941,9 +1047,17 @@ export async function speakText(
   text: string,
   speaker: SpeechSpeakerKey,
   enabled = true,
-  onSpeakingChange?: (speaking: boolean) => void
+  onSpeakingChange?: (speaking: boolean) => void,
+  explicitElevenLabsVoiceId?: string
 ): Promise<void> {
-  await runUnifiedSpeechPipeline(text, speaker, 'ko-KR', enabled, onSpeakingChange);
+  await runUnifiedSpeechPipeline(
+    text,
+    speaker,
+    'ko-KR',
+    enabled,
+    onSpeakingChange,
+    explicitElevenLabsVoiceId
+  );
 }
 
 /**
@@ -954,7 +1068,15 @@ export async function speakEnglishPhrase(
   englishText: string,
   speaker: SpeechSpeakerKey = 'tosuni',
   enabled = true,
-  onSpeakingChange?: (speaking: boolean) => void
+  onSpeakingChange?: (speaking: boolean) => void,
+  explicitElevenLabsVoiceId?: string
 ): Promise<void> {
-  await runUnifiedSpeechPipeline(englishText, speaker, 'en-US', enabled, onSpeakingChange);
+  await runUnifiedSpeechPipeline(
+    englishText,
+    speaker,
+    'en-US',
+    enabled,
+    onSpeakingChange,
+    explicitElevenLabsVoiceId
+  );
 }

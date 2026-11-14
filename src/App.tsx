@@ -13,7 +13,6 @@ import {
 } from './data/englishFlashcards';
 import {
   INITIAL_ALBUMS,
-  INITIAL_MART_TICKERS,
   INITIAL_SCHEDULES,
 } from './data/initialAlbums';
 import {
@@ -55,8 +54,23 @@ import {
   saveCalendarSources,
   testAndPreviewIcsCalendar,
 } from './utils/calendarSync';
+import { hasElevenLabsApiKey } from './utils/elevenLabsTts';
 import { GeminiLiveVoiceController } from './utils/geminiLiveSession';
-import { deleteAlbumPhotosFromVault, getAllVaultCachedPhotoIds } from './utils/photoCacheDb';
+import {
+  buildExactDateMartTickers,
+  shouldAutoUpgradeMartTickers,
+} from './utils/martSchedule';
+import {
+  getActiveSponsorCampaign,
+  loadMonetizationConfig,
+  MonetizationConfig,
+  saveMonetizationConfig,
+} from './utils/monetization';
+import {
+  deleteAlbumPhotosFromVault,
+  getAllVaultCachedPhotoIds,
+  getVaultThumbBase64,
+} from './utils/photoCacheDb';
 import { runAlbumVaultAndAiPipeline } from './utils/photoSyncPipeline';
 import {
   getAndroidSpeechBridge,
@@ -73,7 +87,9 @@ import {
   checkGeminiVisionAvailable,
   fetchWeatherUnified,
   FRAME_SETTINGS_STORAGE_KEY,
+  getCachedWeatherSnapshot,
   getSavedGeminiApiKey,
+  getSavedPhotoSyncConfig,
   isPhotoSearchIntent,
   resolvePublicShareLinkUnified,
   searchPhotosSmart,
@@ -417,11 +433,13 @@ export default function App() {
   const [weatherPosition, setWeatherPosition] = useState<LayoutSide>('left');
   const [weatherEffectMode, setWeatherEffectMode] = useState<WeatherEffectMode>('auto');
 
-  // Child Growth Stage, English Pacing, Wait Duration & Gemini Live Voice Mode
+  // Child Growth Stage, English Pacing, Wait Duration & Voice Mode (ElevenLabs / Gemini Live)
   const [childAgeStage, setChildAgeStage] = useState<ChildGrowthStage>('age_5');
   const [englishFrequency, setEnglishFrequency] = useState<EnglishFrequencyMode>('rare');
   const [englishWaitSeconds, setEnglishWaitSeconds] = useState<number>(30);
-  const [geminiVoiceMode, setGeminiVoiceMode] = useState<GeminiVoiceMode>('gemini_live');
+  const [geminiVoiceMode, setGeminiVoiceMode] = useState<GeminiVoiceMode>(() =>
+    hasElevenLabsApiKey() ? 'elevenlabs' : 'gemini_live'
+  );
   const [isGeminiLiveActive, setIsGeminiLiveActive] = useState<boolean>(false);
   const [growthStars, setGrowthStars] = useState<number>(0);
   const geminiLiveControllerRef = useRef<GeminiLiveVoiceController | null>(null);
@@ -442,21 +460,45 @@ export default function App() {
   const lastActivityRef = useRef<number>(Date.now());
   const prevScheduledShouldBeOnRef = useRef<boolean | null>(null);
 
-  // Weather, Schedule & Top Mart Ticker State
+  // Weather (with 0ms local cache + 10-min auto-sync), Schedule, Exact-Date Mart Ticker & Sponsor Monetization State
   const [locationInfo, setLocationInfo] = useState({
     city: '서울특별시',
     lat: 37.5665,
     lng: 126.978,
   });
-  const [weather, setWeather] = useState<WeatherPayload | null>(null);
+  const [weather, setWeather] = useState<WeatherPayload | null>(() => getCachedWeatherSnapshot());
   const [isWeatherLoading, setIsWeatherLoading] = useState(false);
+  const lastWeatherSyncMsRef = useRef<number>(0);
   const [schedules, setSchedules] = useState<ScheduleItem[]>(INITIAL_SCHEDULES);
   const [calendarSources, setCalendarSources] = useState<SelectableCalendarSource[]>(() =>
     loadSavedCalendarSources()
   );
   const [syncedCalendarSchedules, setSyncedCalendarSchedules] = useState<ScheduleItem[]>([]);
   const [isCalendarSyncing, setIsCalendarSyncing] = useState<boolean>(false);
-  const [martItems, setMartItems] = useState<MartTickerItem[]>(INITIAL_MART_TICKERS);
+  const [martItems, setMartItems] = useState<MartTickerItem[]>(() =>
+    buildExactDateMartTickers('서울특별시')
+  );
+  const [monetizationConfig, setMonetizationConfig] = useState<MonetizationConfig>(() =>
+    loadMonetizationConfig()
+  );
+  const [sponsorRotIndex, setSponsorRotIndex] = useState<number>(0);
+
+  const handleChangeMonetizationConfig = useCallback((nextCfg: MonetizationConfig) => {
+    setMonetizationConfig(nextCfg);
+    saveMonetizationConfig(nextCfg);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setSponsorRotIndex((i) => i + 1);
+    }, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const activeSponsorCampaign = useMemo(
+    () => getActiveSponsorCampaign(monetizationConfig, sponsorRotIndex),
+    [monetizationConfig, sponsorRotIndex]
+  );
 
   const mergedSchedules = useMemo<ScheduleItem[]>(() => {
     const manualItems = schedules.filter((s) => !s.isSynced);
@@ -636,11 +678,13 @@ export default function App() {
 
     for (const album of candidates) {
       try {
+        const desiredMax = getSavedPhotoSyncConfig().maxPhotoFetchCount;
         const resolved = await resolvePublicShareLinkUnified({
           url: album.folderPath,
           customTitle: album.name,
           password: album.sharePassword,
           albumId: album.id,
+          maxCount: desiredMax,
         });
         if (!Array.isArray(resolved.photos) || resolved.photos.length === 0) continue;
 
@@ -653,8 +697,7 @@ export default function App() {
             const mergedPhotos: PhotoItem[] = resolved.photos.map((fresh, idx) => {
               const prior =
                 priorById.get(fresh.id) ??
-                existingPhotos.find((ep) => ep.title === fresh.title) ??
-                existingPhotos[idx];
+                existingPhotos.find((ep) => ep.title === fresh.title);
               const stableId = prior?.id || fresh.id || `${curAlbum.id}-p-${idx}`;
               const alreadyInVault = Boolean(prior?.vaultCached || vaultIds.has(stableId));
               if (!prior) {
@@ -675,11 +718,24 @@ export default function App() {
                 fallbackUrls: fresh.fallbackUrls,
                 nativeHeaders: fresh.nativeHeaders ?? prior.nativeHeaders,
                 date: prior.date || fresh.date,
+                gpsLat: prior.gpsLat ?? fresh.gpsLat,
+                gpsLng: prior.gpsLng ?? fresh.gpsLng,
+                takenTimestampMs: prior.takenTimestampMs ?? fresh.takenTimestampMs,
                 vaultCached: alreadyInVault,
                 optimizedBytes: prior.optimizedBytes,
                 // Preserve Gemini Vision structured index if already analyzed!
                 title: prior.aiAnalyzed ? prior.title : prior.title || fresh.title,
-                location: prior.aiAnalyzed ? prior.location : prior.location || fresh.location,
+                location:
+                  prior.aiAnalyzed &&
+                  prior.location &&
+                  prior.location !== '가족 추억 장소' &&
+                  prior.location !== '클라우드 공유 앨범'
+                    ? prior.location
+                    : fresh.location &&
+                      fresh.location !== '가족 추억 장소' &&
+                      fresh.location !== '클라우드 공유 앨범'
+                    ? fresh.location
+                    : prior.location || fresh.location,
                 season: prior.season,
                 mood: prior.mood,
                 people: prior.people,
@@ -737,18 +793,32 @@ export default function App() {
         });
       }
 
+      const desiredMaxCount = getSavedPhotoSyncConfig().maxPhotoFetchCount;
       const uncachedShareAlbums = albumsRef.current.filter(
         (a) =>
           a.enabled &&
           !isBuiltInOrSampleAlbum(a) &&
           /^https?:\/\//i.test(a.folderPath || '') &&
-          a.photos.some((p) => !p.vaultCached && !vaultIds.has(p.id))
+          (a.photos.some((p) => !p.vaultCached && !vaultIds.has(p.id)) ||
+            (a.photos.length === 100 && desiredMaxCount > 100))
       );
       for (const pendingAlbum of uncachedShareAlbums) {
         await refreshShareLinkAlbumUrls(pendingAlbum.id);
       }
     })();
   }, [hasHydratedState, refreshShareLinkAlbumUrls]);
+
+  const handleSyncAllAlbumsToMaxCount = useCallback(async () => {
+    failedVaultIdsRef.current.clear();
+    failedAnalysisIdsRef.current.clear();
+    const shareAlbums = albumsRef.current.filter(
+      (a) => !isBuiltInOrSampleAlbum(a) && /^https?:\/\//i.test(a.folderPath || '')
+    );
+    for (const a of shareAlbums) {
+      await refreshShareLinkAlbumUrls(a.id);
+    }
+    setAnalysisRunNonce((n) => n + 1);
+  }, [refreshShareLinkAlbumUrls]);
 
   // Monitor Gemini Vision availability (saved Gemini API key OR connected backend)
   useEffect(() => {
@@ -791,8 +861,9 @@ export default function App() {
             }
       )
     );
+    void handleSyncAllAlbumsToMaxCount();
     setAnalysisRunNonce((n) => n + 1);
-  }, []);
+  }, [handleSyncAllAlbumsToMaxCount]);
 
   // Background Compact Vault Compression + 5-Photo Batch Gemini AI Data Indexing Queue
   // Automatically optimizes previously registered high-res albums AND newly synced remaining photos!
@@ -982,6 +1053,52 @@ export default function App() {
     return activePhotos;
   }, [matchedPlaylist, activePhotos]);
 
+  const currentDisplayedPhoto = useMemo<PhotoItem | null>(() => {
+    return framePhotos[currentPhotoIdx] ?? framePhotos[0] ?? activePhotos[0] ?? null;
+  }, [framePhotos, currentPhotoIdx, activePhotos]);
+
+  // Discover all meaningful photo locations across albums so parents & kids can browse by region in 1 tap!
+  const discoveredLocations = useMemo<Array<{ location: string; count: number }>>(() => {
+    const pool = activePhotos.length > 0 ? activePhotos : albums.flatMap((a) => a.photos);
+    const counts = new Map<string, number>();
+    const genericNames = new Set([
+      '가족 추억 장소',
+      '클라우드 공유 앨범',
+      '시놀로지 공유 앨범',
+      '구글 포토 공유 앨범',
+      '구글 드라이브 앨범',
+      '원드라이브 공유 앨범',
+      '내 기기 앨범',
+    ]);
+    for (const p of pool) {
+      const loc = (p.location || '').trim();
+      if (!loc || genericNames.has(loc)) continue;
+      counts.set(loc, (counts.get(loc) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([location, count]) => ({ location, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 24);
+  }, [activePhotos, albums]);
+
+  // Keep active Gemini Live animal friend aware of whichever slide is currently on the frame!
+  useEffect(() => {
+    if (!isGeminiLiveActive || !currentDisplayedPhoto) return;
+    let cancelled = false;
+    void (async () => {
+      const thumbB64 = await getVaultThumbBase64(currentDisplayedPhoto.id).catch(() => null);
+      if (!cancelled && geminiLiveControllerRef.current?.isActive()) {
+        geminiLiveControllerRef.current.updateCurrentPhotoContext(
+          currentDisplayedPhoto,
+          thumbB64
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isGeminiLiveActive, currentDisplayedPhoto]);
+
   useEffect(() => {
     if (currentPhotoIdx >= framePhotos.length && framePhotos.length > 0) {
       setCurrentPhotoIdx(0);
@@ -1057,6 +1174,7 @@ export default function App() {
         setChatWaitSeconds(saved.englishWaitSeconds);
       }
       if (
+        saved.geminiVoiceMode === 'elevenlabs' ||
         saved.geminiVoiceMode === 'gemini_live' ||
         saved.geminiVoiceMode === 'pro_model' ||
         saved.geminiVoiceMode === 'standard'
@@ -1074,7 +1192,14 @@ export default function App() {
       }
       if (saved.locationInfo?.city) setLocationInfo(saved.locationInfo);
       if (Array.isArray(saved.schedules) && saved.schedules.length > 0) setSchedules(saved.schedules);
-      if (Array.isArray(saved.martItems) && saved.martItems.length > 0) setMartItems(saved.martItems);
+      if (Array.isArray(saved.martItems) && saved.martItems.length > 0) {
+        const targetCity = saved.locationInfo?.city || '서울특별시';
+        setMartItems(
+          shouldAutoUpgradeMartTickers(saved.martItems)
+            ? buildExactDateMartTickers(targetCity)
+            : saved.martItems
+        );
+      }
     };
 
     (async () => {
@@ -1267,6 +1392,7 @@ export default function App() {
         locationInfo.city
       );
       if (data) {
+        lastWeatherSyncMsRef.current = Date.now();
         setWeather(data);
       }
     } catch {
@@ -1276,11 +1402,37 @@ export default function App() {
     }
   }, [locationInfo]);
 
+  // Keep exact-date mart holiday tickers synchronized with current city and date changes
+  useEffect(() => {
+    if (!hasHydratedState) return;
+    setMartItems((prev) =>
+      shouldAutoUpgradeMartTickers(prev)
+        ? buildExactDateMartTickers(locationInfo.city)
+        : prev
+    );
+  }, [hasHydratedState, locationInfo.city]);
+
+  // Guaranteed 10-minute weather auto-sync + instant re-sync on screen wakeup / network online!
   useEffect(() => {
     if (sleepState.sleeping) return;
-    fetchWeather();
-    const interval = window.setInterval(fetchWeather, 10 * 60 * 1000);
-    return () => window.clearInterval(interval);
+    void fetchWeather();
+    const interval = window.setInterval(() => {
+      void fetchWeather();
+    }, 10 * 60 * 1000);
+
+    const onWakeOrOnline = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - lastWeatherSyncMsRef.current >= 2 * 60 * 1000) {
+        void fetchWeather();
+      }
+    };
+    document.addEventListener('visibilitychange', onWakeOrOnline);
+    window.addEventListener('online', onWakeOrOnline);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onWakeOrOnline);
+      window.removeEventListener('online', onWakeOrOnline);
+    };
   }, [fetchWeather, sleepState.sleeping]);
 
   // FrameSway Slideshow Auto-Advance Timer (paused during power-saving sleep!)
@@ -1533,10 +1685,12 @@ export default function App() {
 
         setActiveInquiry(enriched);
         setSplitRemainingSeconds(120);
-        speakText(
+        void speakText(
           enriched.spokenSummary,
           speakingCharacter ? speakingCharacter.voiceSpeaker : 'assistant',
-          ttsEnabled
+          ttsEnabled,
+          undefined,
+          speakingCharacter?.elevenLabsVoiceId
         );
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : '일시적인 오류가 발생했습니다.';
@@ -1654,7 +1808,13 @@ export default function App() {
         ) {
           const byeMsg = `응응~! 다음에 또 ${charCfg?.name || '나'} 불러줘! 안녕~!`;
           handleFinishBunnyChat(bunnyId);
-          speakText(byeMsg, charCfg?.voiceSpeaker ?? 'tosuni', ttsEnabled);
+          void speakText(
+            byeMsg,
+            charCfg?.voiceSpeaker ?? 'tosuni',
+            ttsEnabled,
+            undefined,
+            charCfg?.elevenLabsVoiceId
+          );
           return;
         }
       }
@@ -1748,6 +1908,10 @@ export default function App() {
             ? '햇살 쨍쨍 맑음 (잔디밭에 앉아 쉬기 좋은 날)'
             : '산들바람 불고 쾌청함';
 
+        const currentThumbB64 = currentDisplayedPhoto
+          ? await getVaultThumbBase64(currentDisplayedPhoto.id).catch(() => null)
+          : null;
+
         const data = await askBunnyChatUnified({
           bunnyId,
           characterName: charCfg?.name,
@@ -1765,6 +1929,18 @@ export default function App() {
             ? { koreanWord: currentCard.koreanWord, englishWord: currentCard.englishWord }
             : null,
           history: updatedHistory.map((m) => ({ role: m.role, text: m.text })),
+          currentFramePhoto: currentDisplayedPhoto
+            ? {
+                id: currentDisplayedPhoto.id,
+                title: currentDisplayedPhoto.title,
+                date: currentDisplayedPhoto.date,
+                location: currentDisplayedPhoto.location,
+                albumName: currentDisplayedPhoto.albumName,
+                tags: currentDisplayedPhoto.tags,
+                aiSummary: currentDisplayedPhoto.aiSummary,
+              }
+            : null,
+          currentFrameThumbBase64: currentThumbB64,
           photos: allCatalogPhotos,
         });
 
@@ -1876,14 +2052,14 @@ export default function App() {
               combined.push(p);
             }
           }
-          for (const p of searchPhotosSmart(primaryPool, text, 40)) {
+          for (const p of searchPhotosSmart(primaryPool, text, 200)) {
             if (!seen.has(p.id)) {
               seen.add(p.id);
               combined.push(p);
             }
           }
           if (combined.length === 0 && primaryPool !== allPhotoObjects) {
-            for (const p of searchPhotosSmart(allPhotoObjects, text, 40)) {
+            for (const p of searchPhotosSmart(allPhotoObjects, text, 200)) {
               if (!seen.has(p.id)) {
                 seen.add(p.id);
                 combined.push(p);
@@ -1914,22 +2090,29 @@ export default function App() {
           setSplitRemainingSeconds(120);
         }
 
-        speakText(spokenReply, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
-          setBunnySpeakingFlag(bunnyId, speaking);
-          if (!speaking && foundPhotoMemoriesCount > 0) {
-            // Auto-hide bunny chat card right after announcing found photos so photos stay completely unobstructed!
-            handleFinishBunnyChat(bunnyId);
-            return;
-          }
-          if (!speaking && nextCard) {
-            speakEnglishPhrase(
-              nextCard.englishWord,
-              charCfg?.voiceSpeaker ?? 'tosuni',
-              true,
-              (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk)
-            );
-          }
-        });
+        void speakText(
+          spokenReply,
+          charCfg?.voiceSpeaker ?? 'tosuni',
+          true,
+          (speaking) => {
+            setBunnySpeakingFlag(bunnyId, speaking);
+            if (!speaking && foundPhotoMemoriesCount > 0) {
+              // Auto-hide bunny chat card right after announcing found photos so photos stay completely unobstructed!
+              handleFinishBunnyChat(bunnyId);
+              return;
+            }
+            if (!speaking && nextCard) {
+              void speakEnglishPhrase(
+                nextCard.englishWord,
+                charCfg?.voiceSpeaker ?? 'tosuni',
+                true,
+                (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk),
+                charCfg?.elevenLabsVoiceId
+              );
+            }
+          },
+          charCfg?.elevenLabsVoiceId
+        );
       } catch {
         const fallback = '앗, 잠깐 귀가 간지러웠어! 한 번만 다시 말해줄래~?';
         setBunnies((prev) => ({
@@ -1941,8 +2124,12 @@ export default function App() {
             isThinking: false,
           },
         }));
-        speakText(fallback, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) =>
-          setBunnySpeakingFlag(bunnyId, speaking)
+        void speakText(
+          fallback,
+          charCfg?.voiceSpeaker ?? 'tosuni',
+          true,
+          (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+          charCfg?.elevenLabsVoiceId
         );
       }
     },
@@ -1953,6 +2140,7 @@ export default function App() {
       bunnyHistories,
       characters,
       childAgeStage,
+      currentDisplayedPhoto,
       effectiveWeather,
       englishFrequency,
       englishWaitSeconds,
@@ -1997,7 +2185,13 @@ export default function App() {
       const charCfg = characters.find((c) => c.id === activeChatBunny);
       const byeLine = '우리 친구 다른 놀이 하러 갔나 보다~! 이따가 심심할 때 이름 불러줘!';
       if (!geminiLiveActiveRef.current) {
-        speakText(byeLine, charCfg?.voiceSpeaker ?? 'tosuni', ttsEnabled);
+        void speakText(
+          byeLine,
+          charCfg?.voiceSpeaker ?? 'tosuni',
+          ttsEnabled,
+          undefined,
+          charCfg?.elevenLabsVoiceId
+        );
       }
       handleFinishBunnyChat(activeChatBunny);
     }
@@ -2019,8 +2213,12 @@ export default function App() {
       lastActivityRef.current = Date.now();
       setChatWaitSeconds(englishWaitSeconds);
       const charCfg = characters.find((c) => c.id === bunnyId);
-      speakEnglishPhrase(englishText, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) =>
-        setBunnySpeakingFlag(bunnyId, speaking)
+      void speakEnglishPhrase(
+        englishText,
+        charCfg?.voiceSpeaker ?? 'tosuni',
+        true,
+        (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+        charCfg?.elevenLabsVoiceId
       );
     },
     [characters, englishWaitSeconds, setBunnySpeakingFlag]
@@ -2083,17 +2281,24 @@ export default function App() {
           `(아이가 영어 단어 "${choice}"를 멋지게 소리 내어 말했어! 신나게 칭찬해주고 자연스럽게 한국어로 대화를 이어가 줘!)`
         );
       } else {
-        speakText(praiseMsg, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) => {
-          setBunnySpeakingFlag(bunnyId, speaking);
-          if (!speaking) {
-            speakEnglishPhrase(
-              `${card.englishWord}! ${card.exampleEn}`,
-              charCfg?.voiceSpeaker ?? 'tosuni',
-              true,
-              (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk)
-            );
-          }
-        });
+        void speakText(
+          praiseMsg,
+          charCfg?.voiceSpeaker ?? 'tosuni',
+          true,
+          (speaking) => {
+            setBunnySpeakingFlag(bunnyId, speaking);
+            if (!speaking) {
+              void speakEnglishPhrase(
+                `${card.englishWord}! ${card.exampleEn}`,
+                charCfg?.voiceSpeaker ?? 'tosuni',
+                true,
+                (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk),
+                charCfg?.elevenLabsVoiceId
+              );
+            }
+          },
+          charCfg?.elevenLabsVoiceId
+        );
       }
     },
     [bunnies, characters, englishWaitSeconds, handleDismissFlashcard, setBunnySpeakingFlag]
@@ -2124,8 +2329,12 @@ export default function App() {
         },
       }));
       if (ttsEnabled) {
-        speakText(nextOut.bubbleText, charCfg.voiceSpeaker, true, (speaking) =>
-          setBunnySpeakingFlag(bunnyId, speaking)
+        void speakText(
+          nextOut.bubbleText,
+          charCfg.voiceSpeaker,
+          true,
+          (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+          charCfg.elevenLabsVoiceId
         );
       } else {
         playBunnyChime(charCfg.voiceSpeaker, true);
@@ -2179,8 +2388,12 @@ export default function App() {
       lastActivityRef.current = Date.now();
       const charCfg = characters.find((c) => c.id === bunnyId);
       const text = bunnies[bunnyId]?.bubbleText || charCfg?.greeting || '안녕~!';
-      speakText(text, charCfg?.voiceSpeaker ?? 'tosuni', true, (speaking) =>
-        setBunnySpeakingFlag(bunnyId, speaking)
+      void speakText(
+        text,
+        charCfg?.voiceSpeaker ?? 'tosuni',
+        true,
+        (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+        charCfg?.elevenLabsVoiceId
       );
     },
     [bunnies, characters, setBunnySpeakingFlag]
@@ -2342,14 +2555,19 @@ export default function App() {
           }));
         }
 
-        void controller
-          .start({
+        void (async () => {
+          const initialThumbB64 = currentDisplayedPhoto
+            ? await getVaultThumbBase64(currentDisplayedPhoto.id).catch(() => null)
+            : null;
+          const startedOk = await controller.start({
             character: charCfg,
             childAgeStage,
             englishFrequency,
             weatherSummary: weatherSummaryLabel,
             schedules: mergedSchedules,
             photos: allPhotoObjects,
+            currentPhoto: currentDisplayedPhoto,
+            currentPhotoThumbBase64: initialThumbB64,
             initialUserPrompt,
             silentGreeting,
             callbacks: {
@@ -2436,11 +2654,11 @@ export default function App() {
                 const allPool = albumsRef.current.flatMap((a) => a.photos);
                 const enabledPool = latestStateRef.current.activePhotos;
                 const primaryPool = enabledPool.length > 0 ? enabledPool : allPool;
-                let matched = kw ? searchPhotosSmart(primaryPool, kw, 40) : primaryPool.slice(0, 20);
+                let matched = kw ? searchPhotosSmart(primaryPool, kw, 200) : primaryPool.slice(0, 60);
                 if (matched.length === 0 && primaryPool !== allPool && kw) {
-                  matched = searchPhotosSmart(allPool, kw, 40);
+                  matched = searchPhotosSmart(allPool, kw, 200);
                 }
-                const finalPhotos = matched.length > 0 ? matched : primaryPool.slice(0, 10);
+                const finalPhotos = matched.length > 0 ? matched : primaryPool.slice(0, 20);
                 if (finalPhotos.length > 0) {
                   setMatchedPlaylist({
                     label: kw || '추억 사진',
@@ -2477,27 +2695,31 @@ export default function App() {
                 return true;
               },
             },
-          })
-          .then((startedOk) => {
-            if (!startedOk && geminiLiveControllerRef.current === controller) {
-              // Seamless fallback to standard voice mode if Live socket or mic stream couldn't open
-              geminiLiveControllerRef.current = null;
-              geminiLiveActiveRef.current = false;
-              setIsGeminiLiveActive(false);
-              startVoiceListeningSilentlyRef.current();
-              if (initialUserPrompt?.trim()) {
-                void latestStateRef.current.handleSendBunnyMessage(bunnyId, initialUserPrompt.trim());
-              } else if (!silentGreeting) {
-                speakText(charCfg.greeting, charCfg.voiceSpeaker, true, (speaking) =>
-                  setBunnySpeakingFlag(bunnyId, speaking)
-                );
-              }
-            }
           });
+
+          if (!startedOk && geminiLiveControllerRef.current === controller) {
+            // Seamless fallback to cute ElevenLabs / neural voice mode if Live socket or mic stream couldn't open
+            geminiLiveControllerRef.current = null;
+            geminiLiveActiveRef.current = false;
+            setIsGeminiLiveActive(false);
+            startVoiceListeningSilentlyRef.current();
+            if (initialUserPrompt?.trim()) {
+              void latestStateRef.current.handleSendBunnyMessage(bunnyId, initialUserPrompt.trim());
+            } else if (!silentGreeting) {
+              void speakText(
+                charCfg.greeting,
+                charCfg.voiceSpeaker,
+                true,
+                (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+                charCfg.elevenLabsVoiceId
+              );
+            }
+          }
+        })();
         return;
       }
 
-      // 2) Standard Voice Mode (or no Gemini API key yet)
+      // 2) ElevenLabs Cute Character Voice / Pro / Standard Voice Mode
       startVoiceListeningSilentlyRef.current();
 
       if (initialUserPrompt?.trim()) {
@@ -2509,8 +2731,12 @@ export default function App() {
         showTemporaryToast(
           `${SPECIES_EMOJIS[charCfg.species || 'bunny']} ${charCfg.name} 호출됨! ${charCfg.name} 목소리로 대화를 시작해요`
         );
-        speakText(charCfg.greeting, charCfg.voiceSpeaker, true, (speaking) =>
-          setBunnySpeakingFlag(bunnyId, speaking)
+        void speakText(
+          charCfg.greeting,
+          charCfg.voiceSpeaker,
+          true,
+          (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
+          charCfg.elevenLabsVoiceId
         );
       }
     },
@@ -2519,6 +2745,7 @@ export default function App() {
       characters,
       activePhotos.length,
       childAgeStage,
+      currentDisplayedPhoto,
       effectiveWeather,
       englishFrequency,
       englishWaitSeconds,
@@ -3018,12 +3245,103 @@ export default function App() {
     }
   };
 
+  const handleSelectLocationFilter = useCallback(
+    (loc: string) => {
+      const cleanLoc = loc.trim();
+      if (!cleanLoc) return;
+      lastActivityRef.current = Date.now();
+      const allPool = albums.flatMap((a) => a.photos);
+      const primaryPool = activePhotos.length > 0 ? activePhotos : allPool;
+      const directMatches = primaryPool.filter((p) => (p.location || '').includes(cleanLoc));
+      const smartMatches = searchPhotosSmart(primaryPool, `${cleanLoc} 사진`, 200);
+      const seen = new Set<string>();
+      const combined: PhotoItem[] = [];
+      for (const p of [...directMatches, ...smartMatches]) {
+        if (!seen.has(p.id)) {
+          seen.add(p.id);
+          combined.push(p);
+        }
+      }
+      if (combined.length === 0) return;
+
+      const leadChar = enabledCharacters[0] ?? characters[0];
+      const summaryLine = `우와~! "${cleanLoc}"에서 찍은 우리 가족 추억 사진 ${combined.length}장을 모두 찾았어! 액자에 차례대로 보여줄게!`;
+      setMatchedPlaylist({
+        label: `📍 ${cleanLoc}`,
+        photos: combined,
+      });
+      setCurrentPhotoIdx(0);
+      setIsPlaying(true);
+      setActiveInquiry({
+        category: 'photo_memories',
+        headline: `📍 ${cleanLoc} 추억 사진 모음 (${combined.length}장)`,
+        spokenSummary: summaryLine,
+        matchedPhotos: combined,
+        bunnySpeaker: leadChar?.voiceSpeaker ?? 'tosuni',
+        bunnySpeakerName: leadChar?.name,
+      });
+      setSplitRemainingSeconds(120);
+      void speakText(
+        summaryLine,
+        leadChar?.voiceSpeaker ?? 'tosuni',
+        ttsEnabled,
+        undefined,
+        leadChar?.elevenLabsVoiceId
+      );
+    },
+    [activePhotos, albums, characters, enabledCharacters, ttsEnabled]
+  );
+
+  const handleTalkAboutCurrentPhoto = useCallback(
+    (photo: PhotoItem) => {
+      lastActivityRef.current = Date.now();
+      const targetId = activeChatBunny ?? enabledCharacters[0]?.id ?? characters[0]?.id ?? 'tosuni';
+      const prompt = `우와! 지금 액자에 나온 "${photo.location || photo.albumName}" 사진 같이 보면서 재미있게 이야기하자! 이 사진에 뭐가 보여?`;
+      if (activeChatBunny === targetId) {
+        void handleSendBunnyMessage(targetId, prompt);
+      } else {
+        handleSummonBunny(targetId, true, prompt);
+      }
+    },
+    [activeChatBunny, characters, enabledCharacters, handleSendBunnyMessage, handleSummonBunny]
+  );
+
+  const openSponsorUrl = useCallback((url?: string) => {
+    if (!url) return;
+    try {
+      if (window.AndroidSpeechBridge?.openExternalUrl) {
+        window.AndroidSpeechBridge.openExternalUrl(url);
+        return;
+      }
+    } catch {
+      // fallback
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }, []);
+
   const leftInsetPx =
     (menuPosition === 'left' ? 62 : 0) + (weatherPosition === 'left' ? 268 : 0);
   const rightInsetPx =
     (menuPosition === 'right' ? 62 : 0) + (weatherPosition === 'right' ? 268 : 0);
 
-  const duplicatedTickerItems = useMemo(() => [...martItems, ...martItems], [martItems]);
+  const duplicatedTickerItems = useMemo(() => {
+    const baseItems: MartTickerItem[] = [...martItems];
+    if (
+      monetizationConfig.planTier === 'free_ad_supported' &&
+      monetizationConfig.showInTopTicker &&
+      activeSponsorCampaign
+    ) {
+      baseItems.push({
+        id: `sponsor-ticker-${activeSponsorCampaign.id}`,
+        category: 'AD·혜택',
+        storeName: activeSponsorCampaign.sponsorBrand,
+        content: `${activeSponsorCampaign.headline} (${activeSponsorCampaign.benefitSummary})`,
+        isSponsorAd: true,
+        landingUrl: activeSponsorCampaign.landingUrl,
+      });
+    }
+    return [...baseItems, ...baseItems];
+  }, [martItems, monetizationConfig, activeSponsorCampaign]);
 
   const callHintLabel = useMemo(() => {
     const targetList = enabledCharacters.length > 0 ? enabledCharacters : characters;
@@ -3053,6 +3371,12 @@ export default function App() {
       schedules={mergedSchedules}
       syncedCalendarCount={syncedSelectedCalendarCount}
       isCalendarSyncing={isCalendarSyncing}
+      sponsorCampaign={
+        monetizationConfig.planTier === 'free_ad_supported' &&
+        monetizationConfig.showInSidebarCard
+          ? activeSponsorCampaign
+          : null
+      }
       onRefreshCalendars={() => {
         void refreshSelectedCalendarsNow();
       }}
@@ -3097,10 +3421,20 @@ export default function App() {
           <div className="flex-1 overflow-hidden mx-3">
             <div className="animate-ticker flex items-center gap-10 text-xs text-zinc-600">
               {duplicatedTickerItems.map((item, idx) => (
-                <div key={`${item.id}-${idx}`} className="flex items-center gap-2 whitespace-nowrap">
+                <div
+                  key={`${item.id}-${idx}`}
+                  onClick={item.isSponsorAd && item.landingUrl ? () => openSponsorUrl(item.landingUrl) : undefined}
+                  className={`flex items-center gap-2 whitespace-nowrap ${
+                    item.isSponsorAd ? 'cursor-pointer hover:underline' : ''
+                  }`}
+                >
                   <span
                     className={`font-bold ${
-                      item.category === '휴무일' ? 'text-rose-600' : 'text-[#141519]'
+                      item.category === '휴무일'
+                        ? 'text-rose-600'
+                        : item.category === 'AD·혜택'
+                        ? 'rounded-full bg-amber-100 text-amber-900 px-1.5 py-0.5 text-[10px]'
+                        : 'text-[#141519]'
                     }`}
                   >
                     {item.category}
@@ -3181,6 +3515,9 @@ export default function App() {
                   ? { label: matchedPlaylist.label, count: matchedPlaylist.photos.length }
                   : null
               }
+              discoveredLocations={discoveredLocations}
+              onSelectLocationFilter={handleSelectLocationFilter}
+              onTalkAboutCurrentPhoto={handleTalkAboutCurrentPhoto}
               onExitMatchedPlaylist={() => {
                 setMatchedPlaylist(null);
                 setCurrentPhotoIdx(0);
@@ -3346,6 +3683,9 @@ export default function App() {
           onChangeTtsEnabled={setTtsEnabled}
           onUpdateLocation={(city, lat, lng) => setLocationInfo({ city, lat, lng })}
           onUpdateMartItems={setMartItems}
+          monetizationConfig={monetizationConfig}
+          onChangeMonetizationConfig={handleChangeMonetizationConfig}
+          onSyncAllAlbumsToMaxCount={handleSyncAllAlbumsToMaxCount}
         />
       )}
 

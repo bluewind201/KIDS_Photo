@@ -49,10 +49,15 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
 }) => {
   const [followUpText, setFollowUpText] = useState('');
   const [vaultUrls, setVaultUrls] = useState<Record<string, string>>({});
+  const [selectedLocChip, setSelectedLocChip] = useState<string>('ALL');
+
+  useEffect(() => {
+    setSelectedLocChip('ALL');
+  }, [inquiry.headline, inquiry.matchedPhotos?.length]);
 
   useEffect(() => {
     if (!inquiry.matchedPhotos?.length) return;
-    inquiry.matchedPhotos.forEach((p) => {
+    inquiry.matchedPhotos.slice(0, 60).forEach((p) => {
       if (vaultUrls[p.id] || p.src.startsWith('/')) return;
       getVaultDisplayObjectUrl(p.id)
         .then((u) => {
@@ -218,65 +223,111 @@ export const SplitInquiryPanel: React.FC<SplitInquiryPanelProps> = ({
           </div>
         )}
 
-        {/* 2. Bunny Photo Memories Search Grid ("내가 언제 어디 갔는데" 사진 분석 나열) */}
-        {inquiry.category === 'photo_memories' && inquiry.matchedPhotos && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-zinc-500">
-              <span>
-                찾아낸 추억 사진 총 <strong className="text-[#141519]">{inquiry.matchedPhotos.length}장</strong> 연속 슬라이드 재생 중 · 클릭 시 즉시 보기
-              </span>
-            </div>
+        {/* 2. Bunny Photo Memories Search Grid ("내가 언제 어디 갔는데" 위치별·주제별 다중 사진 나열) */}
+        {inquiry.category === 'photo_memories' && inquiry.matchedPhotos && (() => {
+          const locCounts = new Map<string, number>();
+          for (const p of inquiry.matchedPhotos) {
+            const loc = (p.location || '기타 장소').trim();
+            locCounts.set(loc, (locCounts.get(loc) || 0) + 1);
+          }
+          const locEntries = Array.from(locCounts.entries()).sort((a, b) => b[1] - a[1]);
+          const filteredGridPhotos =
+            selectedLocChip === 'ALL'
+              ? inquiry.matchedPhotos
+              : inquiry.matchedPhotos.filter((p) => (p.location || '기타 장소').trim() === selectedLocChip);
 
-            {inquiry.matchedPhotos.length === 0 ? (
-              <div className="rounded-2xl border border-zinc-200 bg-[#F6F7F9] p-6 text-center text-xs text-zinc-500">
-                아직 해당 조건과 일치하는 사진을 앨범에서 찾지 못했어요. 다른 장소나 계절·단어로 물어봐 주세요!
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-zinc-500">
+                <span>
+                  찾아낸 추억 사진 총 <strong className="text-[#141519]">{inquiry.matchedPhotos.length}장</strong> 연속 슬라이드 재생 중 · 클릭 시 즉시 보기
+                </span>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                {inquiry.matchedPhotos.map((photo, idx) => {
-                  const thumbSrc =
-                    vaultUrls[photo.id] ||
-                    peekVaultObjectUrlSync(photo.id) ||
-                    (photo.src.startsWith('idb:') ? photo.assetUrl || '' : photo.src);
-                  return (
+
+              {locEntries.length > 1 && (
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedLocChip('ALL')}
+                    className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition-colors ${
+                      selectedLocChip === 'ALL'
+                        ? 'bg-[#141519] text-white'
+                        : 'bg-[#F4F5F7] text-zinc-700 hover:bg-zinc-200/80'
+                    }`}
+                  >
+                    전체 ({inquiry.matchedPhotos.length})
+                  </button>
+                  {locEntries.slice(0, 10).map(([loc, cnt]) => (
                     <button
-                      key={photo.id}
+                      key={loc}
                       type="button"
-                      onClick={() => onSelectMemoryPhoto(photo)}
-                      className="group text-left rounded-2xl overflow-hidden bg-[#F7F8FA] border border-zinc-200/80 hover:border-[#141519] transition-colors"
+                      onClick={() => setSelectedLocChip(loc)}
+                      className={`rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                        selectedLocChip === loc
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-indigo-50 text-indigo-800 hover:bg-indigo-100'
+                      }`}
                     >
-                      <div className="relative aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
-                        {thumbSrc ? (
-                          <img
-                            src={thumbSrc}
-                            alt={photo.title}
-                            referrerPolicy="no-referrer"
-                            decoding="async"
-                            className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
-                          />
-                        ) : (
-                          <span className="text-[11px] text-zinc-400">사진 불러오는 중...</span>
-                        )}
-                        <span className="absolute left-2 top-2 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-bold text-white">
-                          #{idx + 1}
-                        </span>
-                      </div>
-                      <div className="p-3">
-                        <p className="text-xs font-bold text-[#141519] truncate">{photo.title}</p>
-                        <p className="mt-0.5 text-[11px] font-medium text-zinc-500">
-                          {photo.date} · {photo.location}
-                        </p>
-                        <p className="mt-1 text-[11px] text-zinc-600 line-clamp-2 leading-relaxed">
-                          {photo.aiSummary}
-                        </p>
-                      </div>
+                      📍 {loc} ({cnt})
                     </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
+                  ))}
+                </div>
+              )}
+
+              {filteredGridPhotos.length === 0 ? (
+                <div className="rounded-2xl border border-zinc-200 bg-[#F6F7F9] p-6 text-center text-xs text-zinc-500">
+                  아직 해당 조건과 일치하는 사진을 앨범에서 찾지 못했어요. 다른 장소나 계절·단어로 물어봐 주세요!
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  {filteredGridPhotos.map((photo, idx) => {
+                    const thumbSrc =
+                      vaultUrls[photo.id] ||
+                      peekVaultObjectUrlSync(photo.id) ||
+                      (photo.src.startsWith('idb:') ? photo.assetUrl || '' : photo.src);
+                    return (
+                      <button
+                        key={photo.id}
+                        type="button"
+                        onClick={() => onSelectMemoryPhoto(photo)}
+                        className="group text-left rounded-2xl overflow-hidden bg-[#F7F8FA] border border-zinc-200/80 hover:border-[#141519] transition-colors"
+                      >
+                        <div className="relative aspect-video w-full overflow-hidden bg-[#181A20] flex items-center justify-center">
+                          {thumbSrc ? (
+                            <img
+                              src={thumbSrc}
+                              alt={photo.title}
+                              referrerPolicy="no-referrer"
+                              decoding="async"
+                              className="w-full h-full object-contain group-hover:scale-[1.03] transition-transform duration-200"
+                            />
+                          ) : (
+                            <span className="text-[11px] text-zinc-400">사진 불러오는 중...</span>
+                          )}
+                          <span className="absolute left-2 top-2 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-bold text-white">
+                            #{idx + 1}
+                          </span>
+                          <span className="absolute right-2 bottom-2 rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-medium text-amber-200 max-w-[75%] truncate">
+                            📍 {photo.location}
+                          </span>
+                        </div>
+                        <div className="p-3">
+                          <p className="text-xs font-bold text-[#141519] truncate">{photo.title}</p>
+                          <p className="mt-0.5 text-[11px] font-medium text-zinc-500">
+                            {photo.date} · {photo.location}
+                          </p>
+                          <p className="mt-1 text-[11px] text-zinc-600 line-clamp-2 leading-relaxed">
+                            {photo.aiSummary}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {inquiry.detailMarkdown && inquiry.category !== 'photo_memories' && (
           <div className="space-y-1.5">

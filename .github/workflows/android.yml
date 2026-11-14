@@ -1,9 +1,7 @@
+# [비활성화 — 로컬 PC 빌드(C:\BuildToolset & scripts\build-and-release.ps1)로 이관 완료]
 name: Android Build & Release
 
 on:
-  push:
-    branches: [main, master, "feature/**", "claude/**", "bluewind201/**"]
-  pull_request:
   workflow_dispatch:
 
 concurrency:

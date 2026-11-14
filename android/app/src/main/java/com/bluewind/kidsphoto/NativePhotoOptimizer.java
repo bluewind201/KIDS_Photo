@@ -374,10 +374,10 @@ public final class NativePhotoOptimizer {
             return null;
         }
 
-        int rotationDegrees = readJpegExifRotationDegrees(imageFile);
+        ExifMeta exifMeta = readJpegExifMetadata(imageFile);
 
         // 3) Scale cleanly to maxDisplayDim + apply EXIF rotation
-        Bitmap displayBmp = transformBitmap(subsampled, maxDisplayDim, rotationDegrees);
+        Bitmap displayBmp = transformBitmap(subsampled, maxDisplayDim, exifMeta.rotationDeg);
         if (displayBmp != subsampled) {
             subsampled.recycle();
         }
@@ -416,6 +416,13 @@ public final class NativePhotoOptimizer {
         out.put("byteSize", displayBytes.length);
         out.put("width", finalW);
         out.put("height", finalH);
+        if (exifMeta.hasGps) {
+            out.put("gpsLat", exifMeta.gpsLat);
+            out.put("gpsLng", exifMeta.gpsLng);
+        }
+        if (exifMeta.exifDateIso != null && !exifMeta.exifDateIso.isEmpty()) {
+            out.put("exifDate", exifMeta.exifDateIso);
+        }
         return out;
     }
 
@@ -448,17 +455,27 @@ public final class NativePhotoOptimizer {
         return transformed != null ? transformed : src;
     }
 
+    private static final class ExifMeta {
+        int rotationDeg = 0;
+        boolean hasGps = false;
+        double gpsLat = 0.0;
+        double gpsLng = 0.0;
+        String exifDateIso = null;
+    }
+
     /**
-     * Zero-dependency JPEG APP1 EXIF Orientation (tag 0x0112) reader so camera portrait photos
-     * are always oriented upright without needing extra AndroidX dependencies.
+     * Zero-dependency JPEG APP1 EXIF Orientation (0x0112), DateTimeOriginal (0x9003 / 0x0132),
+     * and GPS Latitude/Longitude (0x8825) reader so photos keep accurate upright orientation,
+     * real shooting dates, and regional GPS location search tags.
      */
-    private static int readJpegExifRotationDegrees(File file) {
+    private static ExifMeta readJpegExifMetadata(File file) {
+        ExifMeta meta = new ExifMeta();
         try (FileInputStream fis = new FileInputStream(file)) {
             byte[] header = new byte[64 * 1024];
             int len = fis.read(header);
-            if (len < 14) return 0;
+            if (len < 14) return meta;
             if ((header[0] & 0xFF) != 0xFF || (header[1] & 0xFF) != 0xD8) {
-                return 0; // Not JPEG
+                return meta; // Not JPEG
             }
 
             int offset = 2;
@@ -486,37 +503,169 @@ public final class NativePhotoOptimizer {
                     header[offset + 9] == 0
                 ) {
                     int tiffStart = offset + 10;
+                    int tiffEnd = Math.min(len, offset + 2 + segLen);
                     boolean littleEndian =
                         header[tiffStart] == 'I' && header[tiffStart + 1] == 'I';
                     int firstIfdOffset = readInt32(header, tiffStart + 4, littleEndian);
                     int dirStart = tiffStart + firstIfdOffset;
-                    if (dirStart + 2 > len) return 0;
+                    if (dirStart + 2 > tiffEnd) return meta;
+
+                    int exifIfdOffset = -1;
+                    int gpsIfdOffset = -1;
+                    String fallbackDate = null;
 
                     int entryCount = readUint16(header, dirStart, littleEndian);
                     for (int i = 0; i < entryCount; i++) {
                         int entryOffset = dirStart + 2 + (i * 12);
-                        if (entryOffset + 12 > len) break;
+                        if (entryOffset + 12 > tiffEnd) break;
                         int tag = readUint16(header, entryOffset, littleEndian);
                         if (tag == 0x0112) {
                             int orientation = readUint16(header, entryOffset + 8, littleEndian);
                             switch (orientation) {
                                 case 3:
-                                    return 180;
+                                    meta.rotationDeg = 180;
+                                    break;
                                 case 6:
-                                    return 90;
+                                    meta.rotationDeg = 90;
+                                    break;
                                 case 8:
-                                    return 270;
+                                    meta.rotationDeg = 270;
+                                    break;
                                 default:
-                                    return 0;
+                                    meta.rotationDeg = 0;
+                                    break;
+                            }
+                        } else if (tag == 0x0132) {
+                            fallbackDate = readExifDateAscii(header, tiffStart, tiffEnd, entryOffset, littleEndian);
+                        } else if (tag == 0x8769) {
+                            exifIfdOffset = readInt32(header, entryOffset + 8, littleEndian);
+                        } else if (tag == 0x8825) {
+                            gpsIfdOffset = readInt32(header, entryOffset + 8, littleEndian);
+                        }
+                    }
+
+                    if (exifIfdOffset > 0 && tiffStart + exifIfdOffset + 2 <= tiffEnd) {
+                        int exifDir = tiffStart + exifIfdOffset;
+                        int subCount = readUint16(header, exifDir, littleEndian);
+                        for (int i = 0; i < subCount; i++) {
+                            int eo = exifDir + 2 + (i * 12);
+                            if (eo + 12 > tiffEnd) break;
+                            int subTag = readUint16(header, eo, littleEndian);
+                            if (subTag == 0x9003 || (subTag == 0x9004 && meta.exifDateIso == null)) {
+                                String dt = readExifDateAscii(header, tiffStart, tiffEnd, eo, littleEndian);
+                                if (dt != null) meta.exifDateIso = dt;
                             }
                         }
                     }
-                    return 0;
+                    if (meta.exifDateIso == null && fallbackDate != null) {
+                        meta.exifDateIso = fallbackDate;
+                    }
+
+                    if (gpsIfdOffset > 0 && tiffStart + gpsIfdOffset + 2 <= tiffEnd) {
+                        int gpsDir = tiffStart + gpsIfdOffset;
+                        int gpsCount = readUint16(header, gpsDir, littleEndian);
+                        char latRef = 'N';
+                        char lngRef = 'E';
+                        Double latVal = null;
+                        Double lngVal = null;
+
+                        for (int i = 0; i < gpsCount; i++) {
+                            int go = gpsDir + 2 + (i * 12);
+                            if (go + 12 > tiffEnd) break;
+                            int gpsTag = readUint16(header, go, littleEndian);
+                            if (gpsTag == 0x0001) {
+                                char c = (char) (header[go + 8] & 0xFF);
+                                if (c == 'S' || c == 's' || c == 'N' || c == 'n') {
+                                    latRef = Character.toUpperCase(c);
+                                }
+                            } else if (gpsTag == 0x0002) {
+                                latVal = readGpsDmsRational(header, tiffStart, tiffEnd, go, littleEndian);
+                            } else if (gpsTag == 0x0003) {
+                                char c = (char) (header[go + 8] & 0xFF);
+                                if (c == 'W' || c == 'w' || c == 'E' || c == 'e') {
+                                    lngRef = Character.toUpperCase(c);
+                                }
+                            } else if (gpsTag == 0x0004) {
+                                lngVal = readGpsDmsRational(header, tiffStart, tiffEnd, go, littleEndian);
+                            }
+                        }
+
+                        if (latVal != null && lngVal != null) {
+                            double finalLat = (latRef == 'S') ? -latVal : latVal;
+                            double finalLng = (lngRef == 'W') ? -lngVal : lngVal;
+                            if (
+                                Math.abs(finalLat) <= 90.0 &&
+                                Math.abs(finalLng) <= 180.0 &&
+                                (Math.abs(finalLat) > 0.0001 || Math.abs(finalLng) > 0.0001)
+                            ) {
+                                meta.hasGps = true;
+                                meta.gpsLat = finalLat;
+                                meta.gpsLng = finalLng;
+                            }
+                        }
+                    }
+
+                    return meta;
                 }
                 offset += 2 + segLen;
             }
         } catch (Exception ignored) {}
-        return 0;
+        return meta;
+    }
+
+    private static String readExifDateAscii(
+        byte[] buf,
+        int tiffStart,
+        int tiffEnd,
+        int entryOffset,
+        boolean littleEndian
+    ) {
+        int count = readInt32(buf, entryOffset + 4, littleEndian);
+        if (count < 10 || count > 64) return null;
+        int valOffset = tiffStart + readInt32(buf, entryOffset + 8, littleEndian);
+        if (valOffset < tiffStart || valOffset + 10 > tiffEnd) return null;
+        String raw = new String(buf, valOffset, Math.min(count, 19), StandardCharsets.US_ASCII).trim();
+        if (raw.length() >= 10 && Character.isDigit(raw.charAt(0)) && Character.isDigit(raw.charAt(1))) {
+            String yyyy = raw.substring(0, 4);
+            String mm = raw.substring(5, 7);
+            String dd = raw.substring(8, 10);
+            if (
+                yyyy.matches("\\d{4}") &&
+                mm.matches("\\d{2}") &&
+                dd.matches("\\d{2}") &&
+                !yyyy.equals("0000")
+            ) {
+                return yyyy + "-" + mm + "-" + dd;
+            }
+        }
+        return null;
+    }
+
+    private static Double readGpsDmsRational(
+        byte[] buf,
+        int tiffStart,
+        int tiffEnd,
+        int entryOffset,
+        boolean littleEndian
+    ) {
+        int type = readUint16(buf, entryOffset + 2, littleEndian);
+        int count = readInt32(buf, entryOffset + 4, littleEndian);
+        if ((type != 5 && type != 10) || count < 3) return null;
+        int valOffset = tiffStart + readInt32(buf, entryOffset + 8, littleEndian);
+        if (valOffset < tiffStart || valOffset + 24 > tiffEnd) return null;
+
+        long degNum = readInt32(buf, valOffset, littleEndian) & 0xFFFFFFFFL;
+        long degDen = readInt32(buf, valOffset + 4, littleEndian) & 0xFFFFFFFFL;
+        long minNum = readInt32(buf, valOffset + 8, littleEndian) & 0xFFFFFFFFL;
+        long minDen = readInt32(buf, valOffset + 12, littleEndian) & 0xFFFFFFFFL;
+        long secNum = readInt32(buf, valOffset + 16, littleEndian) & 0xFFFFFFFFL;
+        long secDen = readInt32(buf, valOffset + 20, littleEndian) & 0xFFFFFFFFL;
+
+        if (degDen == 0) return null;
+        double deg = (double) degNum / (double) degDen;
+        double min = minDen > 0 ? ((double) minNum / (double) minDen) : 0.0;
+        double sec = secDen > 0 ? ((double) secNum / (double) secDen) : 0.0;
+        return deg + (min / 60.0) + (sec / 3600.0);
     }
 
     private static int readUint16(byte[] buf, int idx, boolean littleEndian) {

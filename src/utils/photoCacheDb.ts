@@ -17,6 +17,9 @@ export interface VaultPhotoRecord {
   width: number;
   height: number;
   visualHintTags: string[];
+  gpsLat?: number;
+  gpsLng?: number;
+  exifDate?: string;
   updatedAt: number;
 }
 
@@ -43,9 +46,9 @@ function getAndroidPhotoBridge(): AndroidPhotoBridgeGlobal | null {
   return null;
 }
 
-// Fast in-memory ObjectURL cache backed by IndexedDB Blobs
+// Fast in-memory ObjectURL cache backed by IndexedDB Blobs (sized for 500+ photo albums)
 const VAULT_OBJECT_URL_CACHE = new Map<string, string>();
-const MAX_OBJECT_URLS = 120;
+const MAX_OBJECT_URLS = 650;
 const INFLIGHT_OPTIMIZATIONS = new Map<string, Promise<VaultOptimizeResult | null>>();
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -141,6 +144,23 @@ export async function getVaultDisplayObjectUrl(photoId: string): Promise<string 
   const rec = await getVaultPhotoRecord(photoId);
   if (!rec || !rec.displayBlob) return null;
   return rememberObjectUrl(photoId, rec.displayBlob);
+}
+
+export function invalidateVaultObjectUrl(photoId: string): void {
+  const mem = VAULT_OBJECT_URL_CACHE.get(photoId);
+  if (mem) {
+    try {
+      URL.revokeObjectURL(mem);
+    } catch {
+      // ignore
+    }
+    VAULT_OBJECT_URL_CACHE.delete(photoId);
+  }
+}
+
+export async function getVaultThumbBase64(photoId: string): Promise<string | null> {
+  const rec = await getVaultPhotoRecord(photoId);
+  return rec?.aiThumbBase64 || null;
 }
 
 async function putVaultPhotoRecord(record: VaultPhotoRecord): Promise<void> {
@@ -308,6 +328,9 @@ function invokeNativePhotoBridge(
   aiThumbBase64: string;
   width: number;
   height: number;
+  gpsLat?: number;
+  gpsLng?: number;
+  exifDate?: string;
 } | null> {
   const bridge = getAndroidPhotoBridge();
   if (!bridge || !bridge.optimizePhotoAsync || !bridge.consumeCompletedResult) {
@@ -345,6 +368,9 @@ function invokeNativePhotoBridge(
           aiThumbBase64?: string;
           width?: number;
           height?: number;
+          gpsLat?: number;
+          gpsLng?: number;
+          exifDate?: string;
         };
         if (parsed?.ok && parsed.displayBase64 && parsed.aiThumbBase64) {
           const mime = parsed.displayMime || 'image/webp';
@@ -355,6 +381,9 @@ function invokeNativePhotoBridge(
             aiThumbBase64: parsed.aiThumbBase64,
             width: parsed.width || 1280,
             height: parsed.height || 960,
+            gpsLat: typeof parsed.gpsLat === 'number' ? parsed.gpsLat : undefined,
+            gpsLng: typeof parsed.gpsLng === 'number' ? parsed.gpsLng : undefined,
+            exifDate: parsed.exifDate || undefined,
           });
           return;
         }
@@ -509,12 +538,141 @@ async function compressImgElementToVaultPayloads(
   });
 }
 
+async function parseJpegExifFromBlob(
+  blob: Blob
+): Promise<{ gpsLat?: number; gpsLng?: number; exifDate?: string }> {
+  try {
+    const slice = blob.slice(0, 65536);
+    const buf = await slice.arrayBuffer();
+    const view = new DataView(buf);
+    if (view.byteLength < 14 || view.getUint16(0, false) !== 0xffd8) return {};
+
+    let offset = 2;
+    while (offset + 4 < view.byteLength) {
+      if (view.getUint8(offset) !== 0xff) break;
+      const marker = view.getUint8(offset + 1);
+      if (marker === 0xff) {
+        offset += 1;
+        continue;
+      }
+      if (marker === 0xda || marker === 0xd9) break;
+      const segLen = view.getUint16(offset + 2, false);
+      if (segLen < 2 || offset + 2 + segLen > view.byteLength) break;
+
+      if (
+        marker === 0xe1 &&
+        segLen >= 14 &&
+        view.getUint8(offset + 4) === 0x45 &&
+        view.getUint8(offset + 5) === 0x78 &&
+        view.getUint8(offset + 6) === 0x69 &&
+        view.getUint8(offset + 7) === 0x66
+      ) {
+        const tiffStart = offset + 10;
+        const tiffEnd = Math.min(view.byteLength, offset + 2 + segLen);
+        const le = view.getUint16(tiffStart, false) === 0x4949;
+        const firstIfd = tiffStart + view.getUint32(tiffStart + 4, le);
+        if (firstIfd + 2 > tiffEnd) return {};
+
+        const readDate = (eo: number): string | undefined => {
+          const count = view.getUint32(eo + 4, le);
+          if (count < 10 || count > 64) return undefined;
+          const vo = tiffStart + view.getUint32(eo + 8, le);
+          if (vo < tiffStart || vo + 10 > tiffEnd) return undefined;
+          let s = '';
+          for (let k = 0; k < Math.min(count, 10); k++) {
+            s += String.fromCharCode(view.getUint8(vo + k));
+          }
+          if (/^\d{4}[:-]\d{2}[:-]\d{2}$/.test(s) && !s.startsWith('0000')) {
+            return `${s.slice(0, 4)}-${s.slice(5, 7)}-${s.slice(8, 10)}`;
+          }
+          return undefined;
+        };
+
+        const readDms = (eo: number): number | undefined => {
+          const type = view.getUint16(eo + 2, le);
+          const count = view.getUint32(eo + 4, le);
+          if ((type !== 5 && type !== 10) || count < 3) return undefined;
+          const vo = tiffStart + view.getUint32(eo + 8, le);
+          if (vo < tiffStart || vo + 24 > tiffEnd) return undefined;
+          const dN = view.getUint32(vo, le);
+          const dD = view.getUint32(vo + 4, le);
+          const mN = view.getUint32(vo + 8, le);
+          const mD = view.getUint32(vo + 12, le);
+          const sN = view.getUint32(vo + 16, le);
+          const sD = view.getUint32(vo + 20, le);
+          if (!dD) return undefined;
+          return dN / dD + (mD ? mN / mD / 60 : 0) + (sD ? sN / sD / 3600 : 0);
+        };
+
+        let exifPtr = 0;
+        let gpsPtr = 0;
+        let exifDate: string | undefined;
+        const cnt0 = view.getUint16(firstIfd, le);
+        for (let i = 0; i < cnt0; i++) {
+          const eo = firstIfd + 2 + i * 12;
+          if (eo + 12 > tiffEnd) break;
+          const tag = view.getUint16(eo, le);
+          if (tag === 0x0132) exifDate = readDate(eo);
+          else if (tag === 0x8769) exifPtr = view.getUint32(eo + 8, le);
+          else if (tag === 0x8825) gpsPtr = view.getUint32(eo + 8, le);
+        }
+
+        if (exifPtr && tiffStart + exifPtr + 2 <= tiffEnd) {
+          const eDir = tiffStart + exifPtr;
+          const eCnt = view.getUint16(eDir, le);
+          for (let i = 0; i < eCnt; i++) {
+            const eo = eDir + 2 + i * 12;
+            if (eo + 12 > tiffEnd) break;
+            const tag = view.getUint16(eo, le);
+            if (tag === 0x9003) {
+              const dt = readDate(eo);
+              if (dt) exifDate = dt;
+            }
+          }
+        }
+
+        let gpsLat: number | undefined;
+        let gpsLng: number | undefined;
+        if (gpsPtr && tiffStart + gpsPtr + 2 <= tiffEnd) {
+          const gDir = tiffStart + gpsPtr;
+          const gCnt = view.getUint16(gDir, le);
+          let latRef = 'N';
+          let lngRef = 'E';
+          let latV: number | undefined;
+          let lngV: number | undefined;
+          for (let i = 0; i < gCnt; i++) {
+            const go = gDir + 2 + i * 12;
+            if (go + 12 > tiffEnd) break;
+            const tag = view.getUint16(go, le);
+            if (tag === 0x0001) latRef = String.fromCharCode(view.getUint8(go + 8)).toUpperCase();
+            else if (tag === 0x0002) latV = readDms(go);
+            else if (tag === 0x0003) lngRef = String.fromCharCode(view.getUint8(go + 8)).toUpperCase();
+            else if (tag === 0x0004) lngV = readDms(go);
+          }
+          if (latV !== undefined && lngV !== undefined && (latV > 0.0001 || lngV > 0.0001)) {
+            gpsLat = latRef === 'S' ? -latV : latV;
+            gpsLng = lngRef === 'W' ? -lngV : lngV;
+          }
+        }
+        return { gpsLat, gpsLng, exifDate };
+      }
+      offset += 2 + segLen;
+    }
+  } catch {
+    // Ignore non-JPEG or malformed EXIF
+  }
+  return {};
+}
+
 export interface VaultOptimizeResult {
   photoId: string;
   displayObjectUrl: string;
   aiThumbBase64: string;
   byteSize: number;
   visualHintTags: string[];
+  gpsLat?: number;
+  gpsLng?: number;
+  exifDate?: string;
 }
 
 export async function optimizeLocalFileToVault(
@@ -522,6 +680,7 @@ export async function optimizeLocalFileToVault(
   photoId: string,
   albumId: string
 ): Promise<VaultOptimizeResult | null> {
+  const exif = await parseJpegExifFromBlob(file);
   const objectUrl = URL.createObjectURL(file);
   const compressed = await compressImgElementToVaultPayloads(objectUrl, true);
   if (!compressed) return null;
@@ -536,6 +695,9 @@ export async function optimizeLocalFileToVault(
     width: compressed.width,
     height: compressed.height,
     visualHintTags: compressed.visualHintTags,
+    gpsLat: exif.gpsLat,
+    gpsLng: exif.gpsLng,
+    exifDate: exif.exifDate,
     updatedAt: Date.now(),
   };
 
@@ -547,6 +709,9 @@ export async function optimizeLocalFileToVault(
     aiThumbBase64: record.aiThumbBase64,
     byteSize: record.byteSize,
     visualHintTags: record.visualHintTags,
+    gpsLat: record.gpsLat,
+    gpsLng: record.gpsLng,
+    exifDate: record.exifDate,
   };
 }
 
@@ -567,6 +732,9 @@ export async function optimizeAndCachePhotoToVault(
       aiThumbBase64: existing.aiThumbBase64,
       byteSize: existing.byteSize,
       visualHintTags: existing.visualHintTags ?? [],
+      gpsLat: existing.gpsLat,
+      gpsLng: existing.gpsLng,
+      exifDate: existing.exifDate,
     };
   }
 
@@ -634,6 +802,9 @@ export async function optimizeAndCachePhotoToVault(
           width: nativeRes.width,
           height: nativeRes.height,
           visualHintTags,
+          gpsLat: nativeRes.gpsLat,
+          gpsLng: nativeRes.gpsLng,
+          exifDate: nativeRes.exifDate,
           updatedAt: Date.now(),
         };
         await putVaultPhotoRecord(rec);
@@ -643,6 +814,9 @@ export async function optimizeAndCachePhotoToVault(
           aiThumbBase64: rec.aiThumbBase64,
           byteSize: rec.byteSize,
           visualHintTags,
+          gpsLat: rec.gpsLat,
+          gpsLng: rec.gpsLng,
+          exifDate: rec.exifDate,
         };
       }
 
@@ -682,6 +856,7 @@ export async function optimizeAndCachePhotoToVault(
         if (r.ok) {
           const b = await r.blob();
           if (b.type.startsWith('image/') && b.size > 128) {
+            const exif = await parseJpegExifFromBlob(b);
             const tempUrl = URL.createObjectURL(b);
             const compressed = await compressImgElementToVaultPayloads(tempUrl, true);
             if (compressed) {
@@ -695,6 +870,9 @@ export async function optimizeAndCachePhotoToVault(
                 width: compressed.width,
                 height: compressed.height,
                 visualHintTags: compressed.visualHintTags,
+                gpsLat: exif.gpsLat,
+                gpsLng: exif.gpsLng,
+                exifDate: exif.exifDate,
                 updatedAt: Date.now(),
               };
               await putVaultPhotoRecord(rec);
@@ -704,6 +882,9 @@ export async function optimizeAndCachePhotoToVault(
                 aiThumbBase64: rec.aiThumbBase64,
                 byteSize: rec.byteSize,
                 visualHintTags: rec.visualHintTags,
+                gpsLat: rec.gpsLat,
+                gpsLng: rec.gpsLng,
+                exifDate: rec.exifDate,
               };
             }
           }

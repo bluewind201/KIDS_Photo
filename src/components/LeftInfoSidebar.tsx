@@ -11,10 +11,14 @@ import {
   MapPin,
   Plus,
   RefreshCw,
+  ShoppingBag,
+  Sparkles,
   Sun,
   Wind,
 } from 'lucide-react';
 import { ScheduleItem, WeatherPayload } from '../types';
+import { computeKoreanMartHolidaySummary } from '../utils/martSchedule';
+import { SponsorCampaignItem } from '../utils/monetization';
 import { SettingsTabKey } from './MenuRail';
 
 interface LeftInfoSidebarProps {
@@ -23,6 +27,7 @@ interface LeftInfoSidebarProps {
   schedules: ScheduleItem[];
   syncedCalendarCount?: number;
   isCalendarSyncing?: boolean;
+  sponsorCampaign?: SponsorCampaignItem | null;
   onRefreshCalendars?: () => void;
   onRefreshWeather: () => void;
   onAddSchedule: (item: Omit<ScheduleItem, 'id'>) => void;
@@ -72,6 +77,7 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
   schedules,
   syncedCalendarCount = 0,
   isCalendarSyncing = false,
+  sponsorCampaign = null,
   onRefreshCalendars,
   onRefreshWeather,
   onAddSchedule,
@@ -89,6 +95,15 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
     const t = window.setInterval(() => setNow(new Date()), 15000);
     return () => window.clearInterval(t);
   }, []);
+
+  const martSummary = computeKoreanMartHolidaySummary(weather?.city || '서울특별시', now);
+  const syncedTimeLabel = weather?.updatedAt
+    ? new Date(weather.updatedAt).toLocaleTimeString('ko-KR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    : null;
 
   const timeString = now.toLocaleTimeString('ko-KR', {
     hour: '2-digit',
@@ -185,22 +200,40 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
             {weather ? `${weather.tomorrow.minTemp}° / ${weather.tomorrow.maxTemp}°` : '--° / --°'}
           </span>
         </div>
+
+        {/* Weather Source & 10-Min Auto-Sync Status */}
+        <div className="mt-2.5 pt-2 border-t border-zinc-100 flex flex-col gap-0.5 text-[10px] text-zinc-400">
+          <div className="flex items-center justify-between gap-1">
+            <span className="font-medium text-zinc-500 truncate">
+              출처: {weather?.weatherSource || '기상청(KMA) · Open-Meteo'}
+            </span>
+            <span className="inline-flex items-center gap-1 font-mono text-emerald-600 font-semibold shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              {syncedTimeLabel ? `${syncedTimeLabel} 동기화` : '동기화 중'}
+            </span>
+          </div>
+          <div className="text-[9.5px] text-zinc-400">
+            10분 주기 자동 동기화 · 강수확률 {weather?.tomorrow.rainChance ?? 10}%
+          </div>
+        </div>
       </section>
 
       {/* Card 2: Dark Charcoal Accent Card — Fine Dust (미세먼지 / 초미세먼지) */}
       <section
         aria-label="미세먼지 농도"
-        className="rounded-[20px] bg-[#16181D] text-white p-4 shadow-[0_6px_18px_rgba(20,21,25,0.12)] shrink-0"
+        className="rounded-[20px] bg-[#16181D] text-white p-3.5 shadow-[0_6px_18px_rgba(20,21,25,0.12)] shrink-0"
       >
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold text-zinc-200">대기 · 미세먼지</span>
-          <Wind className="w-3.5 h-3.5 text-zinc-400" />
+          <span className="text-[9.5px] text-zinc-400 truncate max-w-[140px]">
+            {weather?.airSource || '환경부 기준 · Open-Meteo CAMS'}
+          </span>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <div className="rounded-xl bg-white/[0.06] px-3 py-2.5">
+        <div className="mt-2.5 grid grid-cols-2 gap-2">
+          <div className="rounded-xl bg-white/[0.06] px-3 py-2">
             <div className="text-[10px] text-zinc-400">미세 PM10</div>
-            <div className="mt-1 flex items-baseline justify-between gap-1">
+            <div className="mt-0.5 flex items-baseline justify-between gap-1">
               <span className={`text-xs font-bold ${getAirDotTone(weather?.airQuality.pm10Level)}`}>
                 {weather?.airQuality.pm10Grade || '좋음'}
               </span>
@@ -210,9 +243,9 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
             </div>
           </div>
 
-          <div className="rounded-xl bg-white/[0.06] px-3 py-2.5">
+          <div className="rounded-xl bg-white/[0.06] px-3 py-2">
             <div className="text-[10px] text-zinc-400">초미세 PM2.5</div>
-            <div className="mt-1 flex items-baseline justify-between gap-1">
+            <div className="mt-0.5 flex items-baseline justify-between gap-1">
               <span className={`text-xs font-bold ${getAirDotTone(weather?.airQuality.pm25Level)}`}>
                 {weather?.airQuality.pm25Grade || '좋음'}
               </span>
@@ -222,6 +255,32 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
             </div>
           </div>
         </div>
+      </section>
+
+      {/* Card 2.5: Exact Calendar Dates for Large Mart Holidays */}
+      <section
+        aria-label="대형마트 정확 휴무 날짜"
+        className="rounded-[18px] bg-white border border-black/[0.06] px-3.5 py-3 shadow-[0_2px_8px_rgba(0,0,0,0.02)] shrink-0"
+      >
+        <div className="flex items-center justify-between gap-1.5">
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-[#141519]">
+            <ShoppingBag className="w-3.5 h-3.5 text-indigo-600" />
+            대형마트 휴무일 ({martSummary.regionLabel})
+          </span>
+          <button
+            type="button"
+            onClick={() => onOpenSettings('life')}
+            className="text-[10px] font-semibold text-indigo-600 hover:underline shrink-0"
+          >
+            상세
+          </button>
+        </div>
+        <p className="mt-1 text-[11px] font-bold text-zinc-800 leading-snug">
+          {martSummary.thisSundayStatusText}
+        </p>
+        <p className="mt-0.5 text-[10.5px] text-zinc-500 leading-snug">
+          이번 달 휴무: <strong className="text-[#141519]">{martSummary.thisMonthHolidayListText}</strong>
+        </p>
       </section>
 
       {/* Card 3: Family Schedule Card */}
@@ -395,12 +454,41 @@ export const LeftInfoSidebar: React.FC<LeftInfoSidebarProps> = ({
         <button
           type="button"
           onClick={() => setShowAddForm((v) => !v)}
-          className="mt-3 w-full inline-flex items-center justify-center gap-1.5 rounded-full bg-[#141519] hover:bg-zinc-800 text-white py-2.5 px-4 text-xs font-semibold transition-colors shrink-0"
+          className="mt-3 w-full inline-flex items-center justify-center gap-1.5 rounded-full bg-[#141519] hover:bg-zinc-800 text-white py-2 px-4 text-xs font-semibold transition-colors shrink-0"
         >
           <Plus className="w-3.5 h-3.5" />
           {showAddForm ? '일정 입력 닫기' : '일정 추가하기'}
         </button>
       </section>
+
+      {/* Non-Intrusive Parent Lifestyle Sponsor / Ad Benefit Card (Hidden in PRO mode) */}
+      {sponsorCampaign && (
+        <section
+          aria-label="패밀리 라이프 혜택 안내"
+          className="rounded-[18px] bg-gradient-to-br from-amber-50/90 via-white to-indigo-50/70 border border-amber-200/70 p-3 shadow-[0_2px_8px_rgba(0,0,0,0.02)] shrink-0"
+        >
+          <div className="flex items-center justify-between gap-1">
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[9.5px] font-bold text-amber-800">
+              {sponsorCampaign.badge} · {sponsorCampaign.sponsorName}
+            </span>
+            <button
+              type="button"
+              onClick={() => onOpenSettings('life')}
+              className="inline-flex items-center gap-0.5 text-[9.5px] font-semibold text-zinc-400 hover:text-indigo-600"
+              title="패밀리 플러스 PRO 멤버십으로 광고 숨기기"
+            >
+              <Sparkles className="w-2.5 h-2.5" />
+              광고제거
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] font-bold text-[#141519] leading-snug">
+            {sponsorCampaign.headline}
+          </p>
+          <p className="mt-0.5 text-[10px] text-zinc-600 line-clamp-2 leading-relaxed">
+            {sponsorCampaign.subtext}
+          </p>
+        </section>
+      )}
     </aside>
   );
 };

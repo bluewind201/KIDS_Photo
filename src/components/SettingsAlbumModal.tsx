@@ -56,6 +56,21 @@ import {
 import { runAlbumVaultAndAiPipeline } from '../utils/photoSyncPipeline';
 import { speakText } from '../utils/speech';
 import {
+  ELEVENLABS_CUTE_PRESET_VOICES,
+  ElevenLabsConfig,
+  ElevenLabsRemoteVoice,
+  fetchElevenLabsAccountAndVoices,
+  loadElevenLabsConfig,
+  saveElevenLabsConfig,
+  SPEAKER_DEFAULT_ELEVENLABS_VOICE,
+} from '../utils/elevenLabsTts';
+import { reverseGeocodeKoreaLatLng } from '../utils/koreaLocations';
+import {
+  buildExactDateMartTickers,
+  computeKoreanMartHolidaySummary,
+} from '../utils/martSchedule';
+import { MonetizationConfig } from '../utils/monetization';
+import {
   getSupertonicStatus,
   getSupertonicVoiceDescription,
   initializeSupertonicEngine,
@@ -166,6 +181,9 @@ interface SettingsAlbumModalProps {
   onChangeTtsEnabled: (enabled: boolean) => void;
   onUpdateLocation: (city: string, lat: number, lng: number) => void;
   onUpdateMartItems: (items: MartTickerItem[]) => void;
+  monetizationConfig?: MonetizationConfig;
+  onChangeMonetizationConfig?: (cfg: MonetizationConfig) => void;
+  onSyncAllAlbumsToMaxCount?: () => Promise<void>;
 }
 
 export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
@@ -220,11 +238,32 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
   onChangeTtsEnabled,
   onUpdateLocation,
   onUpdateMartItems,
+  monetizationConfig,
+  onChangeMonetizationConfig,
+  onSyncAllAlbumsToMaxCount,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTabKey>(initialTab);
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
+
+  // ElevenLabs Expressive Character Voice Studio State
+  const [elevenCfg, setElevenCfg] = useState<ElevenLabsConfig>(() => loadElevenLabsConfig());
+  const [elevenKeyDraft, setElevenKeyDraft] = useState<string>(() => loadElevenLabsConfig().apiKey);
+  const [elevenKeySavedToast, setElevenKeySavedToast] = useState(false);
+  const [elevenAccountVoices, setElevenAccountVoices] = useState<ElevenLabsRemoteVoice[]>([]);
+  const [elevenQuotaInfo, setElevenQuotaInfo] = useState<{
+    tier?: string;
+    used?: number;
+    limit?: number;
+    error?: string;
+  } | null>(null);
+  const [isCheckingElevenAccount, setIsCheckingElevenAccount] = useState(false);
+  const [isResyncingAllToMax, setIsResyncingAllToMax] = useState(false);
+  const [newSponsorTitle, setNewSponsorTitle] = useState('');
+  const [newSponsorBrand, setNewSponsorBrand] = useState('');
+  const [newSponsorSummary, setNewSponsorSummary] = useState('');
+  const [newSponsorUrl, setNewSponsorUrl] = useState('');
 
   // Cloud & NAS Connector State
   const [selectedProvider, setSelectedProvider] = useState<StorageProvider>('share_link');
@@ -892,11 +931,22 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           (file.size || 2_500_000) - (vaultRec?.byteSize || 140_000)
         );
 
-        const fileDate = new Date(file.lastModified || Date.now()).toLocaleDateString('ko-KR', {
+        let fileDate = new Date(file.lastModified || Date.now()).toLocaleDateString('ko-KR', {
           year: 'numeric',
           month: 'long',
           day: 'numeric',
         });
+        if (vaultRec?.exifDate) {
+          const m = vaultRec.exifDate.match(/^(\d{4})[:/-](\d{1,2})[:/-](\d{1,2})/);
+          if (m) {
+            fileDate = `${Number(m[1])}년 ${Number(m[2])}월 ${Number(m[3])}일`;
+          }
+        }
+        const geoLoc =
+          typeof vaultRec?.gpsLat === 'number' && typeof vaultRec?.gpsLng === 'number'
+            ? reverseGeocodeKoreaLatLng(vaultRec.gpsLat, vaultRec.gpsLng)
+            : null;
+        const resolvedLocation = geoLoc?.displayLocation || '가족 추억 장소';
 
         newPhotos.push({
           id: photoId,
@@ -906,14 +956,22 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           src: `idb://photo/${photoId}`,
           title,
           date: fileDate,
-          location: '가족 추억 장소',
-          tags: [
-            '가족사진',
-            '추억',
-            folderTitle,
-            ...(vaultRec?.visualHintTags ?? []),
-          ],
-          aiSummary: `${fileDate}에 촬영된 소중한 가족 사진입니다.`,
+          location: resolvedLocation,
+          gpsLat: vaultRec?.gpsLat,
+          gpsLng: vaultRec?.gpsLng,
+          tags: Array.from(
+            new Set([
+              '가족사진',
+              '추억',
+              folderTitle,
+              ...(geoLoc?.searchTokens ?? []),
+              ...(vaultRec?.visualHintTags ?? []),
+            ])
+          ),
+          aiSummary:
+            resolvedLocation !== '가족 추억 장소'
+              ? `${fileDate} ${resolvedLocation}에서 촬영된 소중한 가족 사진입니다.`
+              : `${fileDate}에 촬영된 소중한 가족 사진입니다.`,
           aiAnalyzed: false,
           vaultCached: Boolean(vaultRec),
           optimizedBytes: vaultRec?.byteSize,
@@ -2674,11 +2732,44 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                   <div>
                     <strong>📌 최신 사진 기준 연동 &amp; 소요 시간 안내:</strong> 모든 앨범은{' '}
-                    <strong>가장 최근에 찍은 최신 사진 기준</strong>으로 지정하신 수량(최대 {photoSyncCfg.maxPhotoFetchCount}장)만큼 순서대로 가져옵니다. 수량을 많이 설정할수록(예: 200~500장){' '}
+                    <strong>가장 최근에 찍은 최신 사진 기준</strong>으로 지정하신 수량(최대 {photoSyncCfg.maxPhotoFetchCount}장)만큼 페이지네이션으로 전부 가져옵니다. 수량을 많이 설정할수록(예: 200~500장){' '}
                     <strong>최초 연동 시 사진을 불러와 경량 최적화(~135KB)하고 AI 분석·데이터화하는 시간이 오래 걸립니다.</strong>{' '}
                     단, <strong>최초 1회 저장이 완료된 사진은 기기 내장 금고(IndexedDB)에 영구 보관</strong>되어 이후 앱 실행 시 다시 최적화하지 않고 즉시 표시됩니다!
                   </div>
                 </div>
+
+                {userAlbums.length > 0 && onSyncAllAlbumsToMaxCount && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-indigo-50/90 border border-indigo-200 px-3.5 py-2.5">
+                    <div className="text-[11px] text-indigo-950">
+                      현재 등록된 앨범(총 <strong>{totalUserPhotosCount}장</strong>)을 설정한{' '}
+                      <strong>최신 {photoSyncCfg.maxPhotoFetchCount}장 기준</strong>으로 다시 불러와 누락 사진을 전부 최적화·데이터화합니다.
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isResyncingAllToMax || Boolean(photoAnalysisProgress?.active)}
+                      onClick={async () => {
+                        setIsResyncingAllToMax(true);
+                        try {
+                          await onSyncAllAlbumsToMaxCount();
+                          setConnectorStatus({
+                            type: 'success',
+                            msg: `🔄 등록된 앨범을 최신 ${photoSyncCfg.maxPhotoFetchCount}장 기준으로 다시 불러와 백그라운드 최적화를 시작했습니다!`,
+                          });
+                        } finally {
+                          setIsResyncingAllToMax(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 px-3.5 py-1.5 text-xs font-extrabold text-white shrink-0 transition-colors"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${
+                          isResyncingAllToMax || photoAnalysisProgress?.active ? 'animate-spin' : ''
+                        }`}
+                      />
+                      기존 앨범도 {photoSyncCfg.maxPhotoFetchCount}장 기준으로 전체 다시 동기화
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
@@ -3649,24 +3740,29 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   </div>
                 </div>
 
-                {/* 3-Way Voice Mode Selector */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* 4-Way Voice Mode Selector */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {(
                     [
                       {
+                        id: 'elevenlabs',
+                        title: '🎀 일레븐랩스(ElevenLabs) 귀여운 캐릭터 보이스 (강력 추천!)',
+                        desc: '기계음 없이 디즈니·애니메이션 아기 동물처럼 통통 튀고 사랑스러운 초자연 캐릭터 목소리 (~75ms 초고속)',
+                      },
+                      {
                         id: 'gemini_live',
-                        title: '⚡ Gemini Live 실시간 음성대화 (권장)',
-                        desc: '제미나이 음성대화처럼 딜레이 없이 감정·호흡이 살아있는 실시간 양방향 대화',
+                        title: '⚡ Gemini Live 실시간 양방향 음성대화',
+                        desc: '제미나이 앱 음성대화처럼 숨소리·호흡·끼어들기가 살아있는 양방향 실시간 네이티브 오디오',
                       },
                       {
                         id: 'pro_model',
                         title: '🧠 Gemini 2.5 Pro 고성능 대화',
-                        desc: '구독급 Pro 추론 모델 두뇌로 깊이 있는 답변 생성 + 고품질 한국어 음성',
+                        desc: '구독급 Pro 추론 두뇌로 사진·일정을 깊이 있게 대화 + 일레븐랩스/네이티브 음성 출력',
                       },
                       {
                         id: 'standard',
-                        title: '🔊 기본 경량 음성 모드',
-                        desc: 'API 키 없이도 동작하는 내장 대화 엔진 + 한국어 성우/Supertone 음성',
+                        title: '🔊 기본 귀여운 신경망 음성 (무료·키 불필요)',
+                        desc: 'API 키 없이 동작하는 아기 동물 하이톤 한국어 신경망(SunHi +24Hz) & 어린이 영어(Ana) 보이스',
                       },
                     ] as const
                   ).map((m) => {
@@ -3698,11 +3794,207 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   })}
                 </div>
 
+                {/* ElevenLabs Expressive Cute Character Voice Studio Card */}
+                <div className="rounded-xl bg-gradient-to-br from-pink-500/20 via-fuchsia-500/15 to-amber-500/15 border border-pink-300/40 p-4 space-y-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm">🎀</span>
+                      <div className="text-xs font-extrabold text-pink-200">
+                        일레븐랩스(ElevenLabs) 귀여운 아기 동물 보이스 스튜디오 연동
+                      </div>
+                      {elevenCfg.enabled && elevenCfg.apiKey.trim().length > 10 && (
+                        <span className="rounded-full bg-pink-500 text-white px-2 py-0.5 text-[10px] font-bold">
+                          연결됨
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openExternalUrlSafe('https://elevenlabs.io/app/settings/api-keys')
+                      }
+                      className="inline-flex items-center gap-1 rounded-full bg-pink-300 hover:bg-pink-200 px-3 py-1 text-[11px] font-extrabold text-[#141519] transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      일레븐랩스 API 키 발급 열기
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-indigo-100/90 leading-relaxed">
+                    무료 기본 TTS의 딱딱함을 완전히 없애고 싶을 때 <strong>일레븐랩스(ElevenLabs)</strong> 키를 연결해 보세요!{' '}
+                    <strong>Flash v2.5</strong> 엔진은 응답 지연이 약 <strong>0.07초(75ms)</strong>로 매우 빠르고 크레딧도 50%만 소모하여 무료 플랜에서도 넉넉히 쓸 수 있으며, 동물친구마다 귀여운 애니메이션 전용 목소리(Gigi, Mimi, Jessica 등)나 직접 추가한 커스텀 보이스를 개별로 배정할 수 있습니다.
+                  </p>
+
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <input
+                      type="password"
+                      value={elevenKeyDraft}
+                      onChange={(e) => setElevenKeyDraft(e.target.value)}
+                      placeholder="sk_... (일레븐랩스 API 키 입력 시 귀여운 캐릭터 보이스 즉시 활성화!)"
+                      className="flex-1 rounded-xl bg-white px-3.5 py-2 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none"
+                    />
+                    <select
+                      value={elevenCfg.modelId}
+                      onChange={(e) => {
+                        const nextModel = e.target.value as ElevenLabsConfig['modelId'];
+                        const next = saveElevenLabsConfig({ modelId: nextModel });
+                        setElevenCfg(next);
+                      }}
+                      className="rounded-xl bg-white px-3 py-2 text-xs font-bold text-[#141519] focus:outline-none"
+                    >
+                      <option value="eleven_flash_v2_5">
+                        Flash v2.5 (초고속·크레딧 50% 절약 권장)
+                      </option>
+                      <option value="eleven_multilingual_v2">
+                        Multilingual v2 (고감성 스튜디오)
+                      </option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const trimmed = elevenKeyDraft.trim();
+                        const next = saveElevenLabsConfig({
+                          apiKey: trimmed,
+                          enabled: trimmed.length > 10,
+                        });
+                        setElevenCfg(next);
+                        if (trimmed.length > 10) {
+                          onChangeGeminiVoiceMode('elevenlabs');
+                          setIsCheckingElevenAccount(true);
+                          const info = await fetchElevenLabsAccountAndVoices(trimmed);
+                          setIsCheckingElevenAccount(false);
+                          setElevenAccountVoices(info.voices);
+                          setElevenQuotaInfo({
+                            tier: info.subscriptionTier,
+                            used: info.characterCount,
+                            limit: info.characterLimit,
+                            error: info.error,
+                          });
+                        }
+                        setElevenKeySavedToast(true);
+                        window.setTimeout(() => setElevenKeySavedToast(false), 2500);
+                      }}
+                      className="rounded-full bg-pink-400 hover:bg-pink-300 px-4 py-2 text-xs font-extrabold text-[#141519] whitespace-nowrap"
+                    >
+                      {elevenKeySavedToast ? '✅ 일레븐랩스 연결됨!' : '키 저장 · 보이스 불러오기'}
+                    </button>
+                  </div>
+
+                  {elevenQuotaInfo && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-black/25 px-3 py-2 text-[11px]">
+                      {elevenQuotaInfo.error ? (
+                        <span className="text-amber-300">{elevenQuotaInfo.error}</span>
+                      ) : (
+                        <span className="text-emerald-300 font-semibold">
+                          ✅ 플랜: {elevenQuotaInfo.tier || '연결됨'} · 사용량:{' '}
+                          {(elevenQuotaInfo.used ?? 0).toLocaleString()} /{' '}
+                          {(elevenQuotaInfo.limit ?? 0).toLocaleString()}자 · 불러온 보이스{' '}
+                          {elevenAccountVoices.length}개
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isCheckingElevenAccount || elevenKeyDraft.trim().length <= 10}
+                        onClick={async () => {
+                          setIsCheckingElevenAccount(true);
+                          const info = await fetchElevenLabsAccountAndVoices(elevenKeyDraft.trim());
+                          setIsCheckingElevenAccount(false);
+                          setElevenAccountVoices(info.voices);
+                          setElevenQuotaInfo({
+                            tier: info.subscriptionTier,
+                            used: info.characterCount,
+                            limit: info.characterLimit,
+                            error: info.error,
+                          });
+                        }}
+                        className="text-[10px] font-bold text-pink-200 underline"
+                      >
+                        {isCheckingElevenAccount ? '조회 중...' : '다시 조회'}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Per-Character Cute Voice Selector & Instant Preview */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-bold text-pink-100">
+                      🐾 동물친구별 일레븐랩스 전용 목소리 배정 &amp; 미리듣기
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {characters.map((c) => {
+                        const selectedVoiceId =
+                          c.elevenLabsVoiceId || SPEAKER_DEFAULT_ELEVENLABS_VOICE[c.voiceSpeaker];
+                        const presetIds = new Set(ELEVENLABS_CUTE_PRESET_VOICES.map((v) => v.id));
+                        const extraVoices = elevenAccountVoices.filter((v) => !presetIds.has(v.id));
+                        return (
+                          <div
+                            key={`el-char-${c.id}`}
+                            className="flex items-center justify-between gap-2 rounded-xl bg-white/10 border border-white/15 px-3 py-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-extrabold text-white truncate">
+                                {SPECIES_EMOJIS[c.species || 'bunny']} {c.name}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <select
+                                value={selectedVoiceId}
+                                onChange={(e) => {
+                                  const vid = e.target.value;
+                                  onUpdateCharacters(
+                                    characters.map((item) =>
+                                      item.id === c.id ? { ...item, elevenLabsVoiceId: vid } : item
+                                    )
+                                  );
+                                }}
+                                className="max-w-[165px] rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-[#141519] focus:outline-none"
+                              >
+                                <optgroup label="🎀 추천 귀여운 캐릭터 보이스">
+                                  {ELEVENLABS_CUTE_PRESET_VOICES.map((pv) => (
+                                    <option key={pv.id} value={pv.id}>
+                                      {pv.name}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                                {extraVoices.length > 0 && (
+                                  <optgroup label="🎙️ 내 계정 Voice Library">
+                                    {extraVoices.map((rv) => (
+                                      <option key={rv.id} value={rv.id}>
+                                        {rv.name} ({rv.category || 'custom'})
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void speakText(
+                                    c.greeting || `안녕! 나는 ${c.name}야! 우리 신나게 사진 보며 놀자!`,
+                                    c.voiceSpeaker,
+                                    true,
+                                    undefined,
+                                    selectedVoiceId
+                                  );
+                                }}
+                                className="inline-flex items-center gap-1 rounded-lg bg-pink-300 hover:bg-pink-200 px-2 py-1 text-[10px] font-extrabold text-[#141519]"
+                                title="귀여운 목소리 미리듣기"
+                              >
+                                <Play className="w-2.5 h-2.5" />
+                                듣기
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+
                 {/* Google Gemini Key + Phone Subscription Guide */}
                 <div className="rounded-xl bg-white/10 border border-white/15 p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-xs font-bold text-amber-300">
-                      🔑 방법 1: 앱 안에서 3D 동물친구들이 Gemini Live 음성으로 직접 말하게 하기
+                      🔑 방법 1: Gemini AI 두뇌 &amp; 실시간 Gemini Live 음성 연결 (사진 대화·영어 놀이 필수)
                     </div>
                     <button
                       type="button"
@@ -3714,20 +4006,27 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                     </button>
                   </div>
                   <p className="text-[11px] text-indigo-100/80 leading-relaxed">
-                    구글 보안 정책상 스마트폰 <em>Google One / Gemini Advanced</em> 월 구독권 토큰은 외부 앱이 직접 빼올 수 없도록 잠겨 있지만, 구독 중인 동일한 구글 계정으로 <strong>Google AI Studio</strong>에서 키를 발급해 아래에 한 번만 넣어두면 액자 속 3D 동물친구들이 <strong>제미나이 실시간 Live 음성</strong>으로 직접 대화합니다! (무료 등급에서도 Gemini Live 음성대화 지원)
+                    구글 보안 정책상 스마트폰 <em>Google One / Gemini Advanced</em> 월 구독권 토큰은 외부 앱이 직접 빼올 수 없도록 잠겨 있지만, 구독 중인 동일한 구글 계정으로 <strong>Google AI Studio</strong>에서 키를 발급해 넣어두면 액자 속 동물친구들이 <strong>현재 화면의 사진까지 눈으로 보며</strong> 자연스럽게 대화합니다! (일레븐랩스와 함께 쓰면 <strong>Gemini 두뇌 + 일레븐랩스 귀여운 목소리</strong>로 동작합니다)
                   </p>
                   <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <input
                       type="password"
                       value={geminiKeyDraft}
                       onChange={(e) => setGeminiKeyDraft(e.target.value)}
-                      placeholder="AIzaSy... (키 입력 시 ⚡ Gemini Live 실시간 음성대화 즉시 활성화!)"
+                      placeholder="AIzaSy... (키 입력 시 사진 분석·대화 & Gemini Live 활성화!)"
                       className="flex-1 rounded-xl bg-white px-3.5 py-2 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none"
                     />
                     <button
                       type="button"
                       onClick={() => {
                         saveGeminiApiKey(geminiKeyDraft);
+                        if (geminiKeyDraft.trim().length > 10 && geminiVoiceMode === 'standard') {
+                          onChangeGeminiVoiceMode(
+                            elevenCfg.enabled && elevenCfg.apiKey.trim().length > 10
+                              ? 'elevenlabs'
+                              : 'gemini_live'
+                          );
+                        }
                         setGeminiKeySavedToast(true);
                         window.setTimeout(() => setGeminiKeySavedToast(false), 2500);
                       }}
@@ -4227,7 +4526,14 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-3">
-                <h3 className="text-sm font-bold text-[#141519]">날씨 · 미세먼지 기준 위치 설정</h3>
+                <div className="space-y-0.5">
+                  <h3 className="text-sm font-bold text-[#141519]">
+                    날씨 · 미세먼지 기준 위치 설정 (10분 주기 자동 동기화)
+                  </h3>
+                  <p className="text-[11px] text-zinc-500">
+                    기상청(KMA) · Open-Meteo 및 환경부 기준(CAMS) 데이터를 <strong>10분마다 자동 동기화</strong>하며, 메인 사이드바에 데이터 출처와 동기화 시각이 항상 표시됩니다.
+                  </p>
+                </div>
                 <form onSubmit={handleCitySearch} className="flex flex-wrap items-center gap-2">
                   <input
                     type="text"
@@ -4255,21 +4561,61 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
               </div>
 
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <h3 className="text-sm font-bold text-[#141519]">상단 전광판 · 마트 휴무일 및 세일 이벤트 관리</h3>
-                    <p className="text-xs text-zinc-500">메인 화면 최상단에 흘러가는 마트 의무휴무일 및 할인 소식입니다.</p>
+                    <h3 className="text-sm font-bold text-[#141519]">
+                      상단 전광판 · 대형마트 정확 휴무 날짜 및 세일 이벤트 관리
+                    </h3>
+                    <p className="text-xs text-zinc-500">
+                      단순 요일이 아닌 이번 달·다음 달의 정확한 의무휴무 날짜를 자동 계산하여 전광판과 사이드바에 표시합니다.
+                    </p>
                   </div>
-                  <button
-                    type="button"
-                    disabled={isRefreshingMartAi}
-                    onClick={handleRefreshMartByAi}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-3.5 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap shrink-0"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingMartAi ? 'animate-spin' : ''}`} />
-                    AI 최신 마트소식
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onUpdateMartItems(buildExactDateMartTickers(currentCity))}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 hover:bg-indigo-700 px-3.5 py-2 text-xs font-bold text-white whitespace-nowrap shrink-0"
+                    >
+                      <Calendar className="w-3.5 h-3.5" />
+                      정확 휴무 날짜로 자동 갱신
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isRefreshingMartAi}
+                      onClick={handleRefreshMartByAi}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-50 px-3.5 py-2 text-xs font-semibold text-[#141519] whitespace-nowrap shrink-0"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingMartAi ? 'animate-spin' : ''}`} />
+                      AI 최신 마트소식
+                    </button>
+                  </div>
                 </div>
+
+                {/* Exact-Date Monthly Mart Holiday Preview Banner */}
+                {(() => {
+                  const summary = computeKoreanMartHolidaySummary(currentCity);
+                  return (
+                    <div className="rounded-xl bg-rose-50/80 border border-rose-200/80 px-3.5 py-2.5 space-y-1 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-extrabold text-rose-950">
+                          🛒 {currentCity} 대형마트 정확 휴무일 ({summary.ruleLabel})
+                        </span>
+                        <span
+                          className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                            summary.isClosedToday
+                              ? 'bg-rose-600 text-white'
+                              : 'bg-emerald-600 text-white'
+                          }`}
+                        >
+                          {summary.upcomingStatusBadge}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-rose-900">
+                        • {summary.thisMonthClosedText} &nbsp;|&nbsp; • {summary.nextMonthClosedText}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <form onSubmit={handleAddMartItem} className="grid grid-cols-1 sm:grid-cols-4 gap-2">
                   <select
@@ -4327,6 +4673,183 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   ))}
                 </ul>
               </div>
+
+              {/* Family Lifestyle Ad Monetization & PRO Subscription Management Card */}
+              {monetizationConfig && onChangeMonetizationConfig && (
+                <div className="rounded-2xl bg-gradient-to-br from-amber-50/90 via-white to-orange-50/60 border border-amber-200/80 p-5 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-1 max-w-xl">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-amber-600" />
+                        <h3 className="text-sm font-bold text-[#141519]">
+                          패밀리 라이프스타일 제휴 광고 수익화 &amp; Family Plus PRO 플랜
+                        </h3>
+                      </div>
+                      <p className="text-xs text-zinc-600 leading-relaxed">
+                        아이들이 보는 추억 사진과 동물 대화는 100% 청정하게 보호하면서, 부모님이 확인하시는 상단 전광판과 생활정보 사이드바에 육아·장보기·가족여행 스폰서 혜택을 노출해 광고 수익을 창출하거나 PRO 구독 시 광고를 제거하는 상용 구조입니다.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 rounded-full bg-white border border-amber-200 p-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangeMonetizationConfig({
+                            ...monetizationConfig,
+                            planTier: 'free_ad_supported',
+                          })
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-bold transition-colors ${
+                          monetizationConfig.planTier === 'free_ad_supported'
+                            ? 'bg-amber-500 text-white'
+                            : 'text-zinc-600 hover:bg-zinc-100'
+                        }`}
+                      >
+                        광고 지원 무료 플랜
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onChangeMonetizationConfig({
+                            ...monetizationConfig,
+                            planTier: 'family_plus_pro',
+                          })
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-bold transition-colors ${
+                          monetizationConfig.planTier === 'family_plus_pro'
+                            ? 'bg-[#141519] text-white'
+                            : 'text-zinc-600 hover:bg-zinc-100'
+                        }`}
+                      >
+                        👑 Family Plus PRO (무광고)
+                      </button>
+                    </div>
+                  </div>
+
+                  {monetizationConfig.planTier === 'free_ad_supported' && (
+                    <div className="space-y-3 pt-1">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <label className="flex items-center justify-between rounded-xl bg-white border border-zinc-200 px-3.5 py-2.5 text-xs">
+                          <span className="font-semibold text-zinc-800">
+                            상단 마트·생활 전광판 스폰서 노출
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={monetizationConfig.showInTopTicker}
+                            onChange={(e) =>
+                              onChangeMonetizationConfig({
+                                ...monetizationConfig,
+                                showInTopTicker: e.target.checked,
+                              })
+                            }
+                            className="accent-amber-600 w-4 h-4"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-xl bg-white border border-zinc-200 px-3.5 py-2.5 text-xs">
+                          <span className="font-semibold text-zinc-800">
+                            생활정보 사이드바 제휴 혜택 카드 노출
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={monetizationConfig.showInSidebarCard}
+                            onChange={(e) =>
+                              onChangeMonetizationConfig({
+                                ...monetizationConfig,
+                                showInSidebarCard: e.target.checked,
+                              })
+                            }
+                            className="accent-amber-600 w-4 h-4"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={monetizationConfig.adMobBannerUnitId || ''}
+                          onChange={(e) =>
+                            onChangeMonetizationConfig({
+                              ...monetizationConfig,
+                              adMobBannerUnitId: e.target.value,
+                            })
+                          }
+                          placeholder="Google AdMob 배너 광고 단위 ID (예: ca-app-pub-xxxx/yyyy)"
+                          className={`${inputCls} bg-white`}
+                        />
+                        <input
+                          type="text"
+                          value={newSponsorBrand}
+                          onChange={(e) => setNewSponsorBrand(e.target.value)}
+                          placeholder="직접 제휴 브랜드명 (예: 컬리 · 쿠팡 로켓프레시)"
+                          className={`${inputCls} bg-white`}
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={newSponsorTitle}
+                          onChange={(e) => setNewSponsorTitle(e.target.value)}
+                          placeholder="캠페인 제목 (예: 주말 유기농 우유 특가)"
+                          className={`${inputCls} bg-white`}
+                        />
+                        <input
+                          type="text"
+                          value={newSponsorSummary}
+                          onChange={(e) => setNewSponsorSummary(e.target.value)}
+                          placeholder="혜택 설명 문구"
+                          className={`${inputCls} bg-white`}
+                        />
+                        <div className="flex gap-2">
+                          <input
+                            type="url"
+                            value={newSponsorUrl}
+                            onChange={(e) => setNewSponsorUrl(e.target.value)}
+                            placeholder="랜딩 URL (https://...)"
+                            className={`flex-1 ${inputCls} bg-white`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!newSponsorBrand.trim() || !newSponsorTitle.trim()) return;
+                              onChangeMonetizationConfig({
+                                ...monetizationConfig,
+                                campaigns: [
+                                  ...monetizationConfig.campaigns,
+                                  {
+                                    id: `sp-${Date.now()}`,
+                                    badge: 'AD · 패밀리 혜택',
+                                    badgeText: 'AD · 패밀리 혜택',
+                                    brandName: newSponsorBrand.trim(),
+                                    sponsorName: newSponsorBrand.trim(),
+                                    sponsorBrand: newSponsorBrand.trim(),
+                                    headline: newSponsorTitle.trim(),
+                                    subtext:
+                                      newSponsorSummary.trim() || '우리 가족 맞춤 제휴 할인 혜택',
+                                    benefitSummary:
+                                      newSponsorSummary.trim() || '우리 가족 맞춤 제휴 할인 혜택',
+                                    ctaLabel: '혜택 보기',
+                                    landingUrl:
+                                      newSponsorUrl.trim() || 'https://www.coupang.com',
+                                    enabled: true,
+                                  },
+                                ],
+                              });
+                              setNewSponsorBrand('');
+                              setNewSponsorTitle('');
+                              setNewSponsorSummary('');
+                              setNewSponsorUrl('');
+                            }}
+                            className="rounded-xl bg-amber-500 hover:bg-amber-600 px-3 py-2 text-xs font-extrabold text-white shrink-0"
+                          >
+                            추가
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

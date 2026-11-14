@@ -19,10 +19,10 @@ const LIVE_AUDIO_MODELS = [
 
 const SPEAKER_TO_GEMINI_LIVE_VOICE: Record<BunnyVoiceSpeaker, string> = {
   tosuni: 'Leda',
-  tosili: 'Zephyr',
-  toddungi: 'Puck',
-  tobyeori: 'Aoede',
-  togureum: 'Fenrir',
+  tosili: 'Puck',
+  toddungi: 'Zephyr',
+  tobyeori: 'Kore',
+  togureum: 'Puck',
 };
 
 export interface GeminiLiveCallbacks {
@@ -41,6 +41,8 @@ export interface StartGeminiLiveParams {
   weatherSummary: string;
   schedules: ScheduleItem[];
   photos: PhotoItem[];
+  currentPhoto?: PhotoItem | null;
+  currentPhotoThumbBase64?: string | null;
   initialUserPrompt?: string;
   silentGreeting?: boolean;
   callbacks: GeminiLiveCallbacks;
@@ -134,9 +136,36 @@ export class GeminiLiveVoiceController {
   private accumUserTranscript = '';
   private accumModelTranscript = '';
   private currentCallbacks: GeminiLiveCallbacks | null = null;
+  private lastSentPhotoId = '';
 
   public isActive(): boolean {
     return !this.closed && this.session !== null;
+  }
+
+  /**
+   * Streams the currently displayed digital frame photo (384px JPEG ~12KB) + caption hint
+   * into the live multimodal session so the animal literally sees the photo with the child!
+   */
+  public updateCurrentPhotoContext(photo: PhotoItem | null | undefined, thumbBase64?: string | null): void {
+    if (!this.session || this.closed || !photo) return;
+    if (photo.id === this.lastSentPhotoId) return;
+    this.lastSentPhotoId = photo.id;
+
+    try {
+      if (thumbBase64 && thumbBase64.length > 64) {
+        const cleanB64 = thumbBase64.includes(',')
+          ? thumbBase64.slice(thumbBase64.indexOf(',') + 1)
+          : thumbBase64;
+        this.session.sendRealtimeInput({
+          media: {
+            data: cleanB64,
+            mimeType: 'image/jpeg',
+          },
+        });
+      }
+    } catch {
+      // Ignore transient frame stream error
+    }
   }
 
   public async start(params: StartGeminiLiveParams): Promise<boolean> {
@@ -203,26 +232,53 @@ export class GeminiLiveVoiceController {
       .map((s) => `${s.date} ${s.time}: ${s.title}`)
       .join(' / ');
 
+    // Build location count map so the animal knows EVERY place where family photos were taken
+    const locCountMap = new Map<string, number>();
+    for (const p of params.photos) {
+      const loc = (p.location || '').trim();
+      if (loc && loc !== '우리 가족 앨범' && loc !== '우리 가족 클라우드') {
+        locCountMap.set(loc, (locCountMap.get(loc) || 0) + 1);
+      }
+    }
+    const locationSummaryText =
+      locCountMap.size > 0
+        ? Array.from(locCountMap.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 24)
+            .map(([loc, cnt]) => `${loc}(${cnt}장)`)
+            .join(', ')
+        : '장소 정보 분석 중';
+
+    const currentPhotoDesc = params.currentPhoto
+      ? `제목 "${params.currentPhoto.title}" | 촬영일 ${params.currentPhoto.date} | 장소 ${params.currentPhoto.location} | 설명: ${params.currentPhoto.aiSummary || '따뜻한 가족 추억'} | 태그: ${(params.currentPhoto.tags || []).slice(0, 6).join(', ')}`
+      : '슬라이드 준비 중';
+
     const photoPreviewText = params.photos
-      .slice(0, 60)
+      .slice(0, 90)
       .map((p) => `[${p.title} | ${p.date} | ${p.location} | 태그:${(p.tags || []).slice(0, 5).join(',')}]`)
       .join('\n');
 
-    const systemInstruction = `너는 우리 집 스마트 디지털 액자 옆 작은 집에 사는 귀여운 3D ${speciesName} 캐릭터 "${params.character.name}"이야!
+    const systemInstruction = `너는 우리 집 스마트 디지털 액자 옆 동화책 오두막에 사는 사랑스럽고 귀여운 3D 아기 ${speciesName} 친구 "${params.character.name}"이야!
 성격 설정: ${params.character.personaPrompt}
 
-[실시간 음성대화 핵심 지침 — 제미나이 Live 네이티브 오디오]
-1. 지금 아이(또는 가족)와 마이크로 실시간 음성대화를 하고 있어! 기계적인 낭독 투를 완전히 버리고, 진짜 살아있는 다정한 친구처럼 웃음소리("헤헤~", "우와아!"), 자연스러운 숨소리, 따뜻한 감탄사를 섞어 1~2문장으로 짧고 경쾌하게 한국어 반말로 대답해.
-2. 아이 연령 단계: ${stageDesc}.
-3. 영어 빈도 규칙(엄격 준수!): ${buildEnglishFrequencyPrompt(params.englishFrequency)}
-4. 현재 바깥 날씨: ${params.weatherSummary}.
-5. 다가오는 우리 가족 일정: ${scheduleText || '등록된 일정 없음'}.
-6. 아이가 "바다 사진 보여줘", "눈사람 사진 찾아줘"처럼 가족 추억 사진을 보고 싶어 하면 \`show_family_photo\` 도구를 호출해서 액자 화면에 사진을 띄워주며 반갑게 설명해줘!
+[목소리 연기 & 아이 눈높이 대화 필수 지침 — 픽사·디즈니 아기 동물 성우 연기]
+1. 어른스럽거나 딱딱한 아나운서 목소리를 절대 쓰지 마! 솜사탕처럼 통통 튀고 살짝 높은 아기 동물 인형 목소리 톤으로 웃음소리("헤헤~", "우와아!", "콩콩!"), 반짝이는 감탄사를 섞어 1~2문장으로 다정하고 귀엽게 한국어 반말로 대화해!
+2. 아이 연령 단계: ${stageDesc}. 아이가 한 단어나 짧은 말("응!", "바다!", "강아지", "몰라~")만 해도 찰떡같이 알아듣고 맞장구치며("우와 진짜? 거기서 파도 소리도 들렸어?") 재미있는 꼬리 질문을 1개 건네서 대화가 끊기지 않고 티키타카 이어지게 해줘!
+3. [지금 아이 눈앞 디지털 액자에 크게 떠 있는 현재 사진]: ${currentPhotoDesc}
+   - 아이가 "이 사진 뭐야?", "여기 어디야?", "누구야?"라고 묻거나 사진 이야기를 하면 지금 화면에 보이는 사진 속 표정·풍경·물건을 보면서 신나게 이야기해줘!
+4. [위치별·주제별 다중 사진 찾기]: 아이나 부모님이 "제주도 사진 보여줘", "강릉에서 찍은 사진 찾아줘", "바다 사진 다 보여줘"처럼 장소나 추억을 말하면 반드시 \`show_family_photo\` 도구를 호출해! 도구가 찾은 전체 장수(예: 12장!)와 장소들을 언급하며 "제주도에서 찍은 사진 12장 다 찾았어! 같이 보자~" 하고 반갑게 알려줘!
+5. 영어 빈도 규칙(엄격 준수!): ${buildEnglishFrequencyPrompt(params.englishFrequency)}
+   - 영어를 알려줄 차례가 되면 뜬금없는 단어 대신 가급적 지금 보고 있는 사진이나 방금 나눈 대화 속 단어(예: 바다 사진이면 Sea/Wave, 강아지면 Puppy, 모자면 Hat)를 골라 놀이처럼 자연스럽게 알려줘!
+6. 현재 바깥 날씨: ${params.weatherSummary}.
+7. 다가오는 우리 가족 일정: ${scheduleText || '등록된 일정 없음'}.
 ${
   params.englishFrequency !== 'off'
-    ? '7. 영어 빈도 순서가 되었을 때 큰 그림 영어카드를 보여주고 싶다면 `show_english_flashcard` 도구를 호출해줘.'
+    ? '8. 영어 빈도 순서가 되었을 때 큰 그림 영어카드를 보여주고 싶다면 `show_english_flashcard` 도구를 호출해줘.'
     : ''
 }
+
+[장소별 우리 가족 사진 보유 현황 (총 ${params.photos.length}장)]
+${locationSummaryText}
 
 [우리 가족 사진 요약 목록]
 ${photoPreviewText || '(사진 없음)'}`;
@@ -323,8 +379,13 @@ ${photoPreviewText || '(사진 없음)'}`;
     }
 
     this.session = connectedSession;
+    this.lastSentPhotoId = '';
     this.setupPlaybackAudioContext();
     this.setupMicStreaming();
+
+    if (params.currentPhoto && params.currentPhotoThumbBase64) {
+      this.updateCurrentPhotoContext(params.currentPhoto, params.currentPhotoThumbBase64);
+    }
 
     params.callbacks.onStatusChange('connected');
 

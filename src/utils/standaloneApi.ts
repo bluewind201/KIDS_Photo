@@ -12,11 +12,18 @@ import {
   StorageProvider,
   WeatherPayload,
 } from '../types';
+import {
+  LOCATION_HIERARCHY_GROUPS,
+  reverseGeocodeKoreaLatLng,
+  stripKoreanAdminSuffix,
+} from './koreaLocations';
+import { computeKoreanMartHolidaySummary } from './martSchedule';
 
 export const BACKEND_URL_STORAGE_KEY = 'kids_photo_backend_url';
 export const GEMINI_KEY_STORAGE_KEY = 'kids_photo_gemini_api_key';
 export const FRAME_SETTINGS_STORAGE_KEY = 'kids_photo_frame_settings_v1';
 export const PHOTO_SYNC_CONFIG_STORAGE_KEY = 'kids_photo_sync_config_v1';
+export const WEATHER_CACHE_STORAGE_KEY = 'kids_photo_weather_cache_v1';
 
 export interface PhotoSyncConfig {
   /** Maximum number of latest photos to import per album sync (default 100, range 20..500) */
@@ -150,9 +157,17 @@ const PHOTO_SYNONYM_GROUPS: string[][] = [
 export function isPhotoSearchIntent(rawQuery: string): boolean {
   const q = rawQuery.trim();
   if (!q) return false;
-  if (/사진|앨범|추억\s*(보여|찾아)|옛날\s*사진|과거\s*사진|찍은\s*거/.test(q)) return true;
-  if (/(보여\s*줘|보여\s*줄래|찾아\s*줘|찾아\s*봐|틀어\s*줘|띄워\s*줘)/.test(q)) {
-    if (!/날씨|기온|미세먼지|일정|스케줄|가는\s*길|얼마나\s*걸/.test(q)) {
+  if (
+    /사진|앨범|추억\s*(보여|찾아)|옛날\s*사진|과거\s*사진|찍은\s*거|어디서\s*찍|장소별|지역별/.test(q)
+  ) {
+    return true;
+  }
+  // Location-based memory request: e.g. "제주도 갔을 때 보여줘", "강릉에서 찍은 거", "에버랜드 여행"
+  if (/[가-힣]{2,}(에서\s*찍|갔을\s*때|갔던\s*거|여행\s*갔)/.test(q)) {
+    return true;
+  }
+  if (/(보여\s*줘|보여\s*줄래|찾아\s*줘|찾아\s*봐|틀어\s*줘|띄워\s*줘|꺼내\s*줘)/.test(q)) {
+    if (!/날씨|기온|미세먼지|일정|스케줄|가는\s*길|얼마나\s*걸|마트|휴무/.test(q)) {
       return true;
     }
   }
@@ -160,8 +175,8 @@ export function isPhotoSearchIntent(rawQuery: string): boolean {
 }
 
 /**
- * Multi-photo smart Korean semantic & synonym search engine.
- * Finds ALL matching photos across title, location, tags, objects, season, mood, people, date, albumName, and AI summary!
+ * Multi-photo smart Korean semantic, synonym & regional location hierarchy search engine.
+ * Finds ALL matching photos (up to 200+) across location, EXIF GPS region, title, tags, objects, season, mood, people, date, albumName, and AI summary!
  */
 export function searchPhotosSmart<
   T extends {
@@ -177,7 +192,7 @@ export function searchPhotosSmart<
     people?: string;
     objects?: string[];
   }
->(photos: T[], rawQuery: string, maxResults = 40): T[] {
+>(photos: T[], rawQuery: string, maxResults = 200): T[] {
   if (photos.length === 0) return [];
   const cleanQ = rawQuery.trim();
   if (!cleanQ) return photos.slice(0, maxResults);
@@ -192,52 +207,91 @@ export function searchPhotosSmart<
   const stripped = cleanQ
     .replace(/[?!.,~"']/g, ' ')
     .replace(
-      /(사진들?|앨범|보여\s*줘요?|보여\s*줄래요?|찾아\s*줘요?|찾아\s*봐줘?|틀어\s*줘요?|띄워\s*줘요?|꺼내\s*줘|다\s*찾아|모두|전부|언제야?|어디야?|갔던|찍은|찍었던|있어|있나|볼래|보고\s*싶어)/g,
+      /(사진들?|앨범|보여\s*줘요?|보여\s*줄래요?|찾아\s*줘요?|찾아\s*봐줘?|틀어\s*줘요?|띄워\s*줘요?|꺼내\s*줘|다\s*찾아|모두|전부|언제야?|어디야?|갔던|갔을\s*때|찍은|찍었던|있어|있나|볼래|보고\s*싶어|여행)/g,
       ' '
     )
     .trim();
 
   const rawTokens = stripped
     .split(/\s+/)
-    .map((tok) => tok.replace(/(에서|으로|이랑|하고|이랑|부터|까지|에|의|을|를|이|가|은|는|도|만)$/g, '').trim())
-    .filter((tok) => tok.length >= 1 && !/^(우리|내가|같이|제일|너무|진짜|좀|그거|저거)$/.test(tok));
+    .map((tok) =>
+      tok
+        .replace(/(에서|으로|이랑|하고|부터|까지|에|의|을|를|이|가|은|는|도|만)$/g, '')
+        .trim()
+    )
+    .filter((tok) => tok.length >= 1 && !/^(우리|내가|같이|제일|너무|진짜|좀|그거|저거|최근)$/.test(tok));
 
-  // Expand synonyms for every matched token
+  // Expand synonyms + Korean administrative suffixes ("제주도" -> "제주") + regional location hierarchy!
   const expandedTerms = new Map<string, number>(); // term -> weight
-  for (const tok of rawTokens) {
-    const low = tok.toLowerCase();
-    expandedTerms.set(low, 6);
+  const addTermWithHierarchy = (termRaw: string, baseWeight: number) => {
+    const low = termRaw.toLowerCase().trim();
+    if (!low) return;
+    expandedTerms.set(low, Math.max(expandedTerms.get(low) ?? 0, baseWeight));
+
+    const rootLoc = stripKoreanAdminSuffix(low);
+    if (rootLoc && rootLoc !== low && rootLoc.length >= 2) {
+      expandedTerms.set(rootLoc, Math.max(expandedTerms.get(rootLoc) ?? 0, baseWeight));
+    }
+
     for (const group of PHOTO_SYNONYM_GROUPS) {
-      if (group.some((g) => low.includes(g) || g.includes(low))) {
+      if (group.some((g) => low === g || (low.length >= 2 && (low.includes(g) || g.includes(low))))) {
         for (const syn of group) {
-          if (!expandedTerms.has(syn)) {
-            expandedTerms.set(syn, 3);
-          }
+          if (!expandedTerms.has(syn)) expandedTerms.set(syn, 3);
         }
       }
     }
+
+    for (const locGroup of LOCATION_HIERARCHY_GROUPS) {
+      const checkRoot = rootLoc || low;
+      // If user asked for broad province/city (index 0, e.g., "강원도", "제주도"), include all sub-cities!
+      // Or if user asked for a specific landmark ("협재", "해운대"), match exact landmark + parent city weight!
+      const hitParent =
+        stripKoreanAdminSuffix(locGroup[0]) === checkRoot || locGroup[0] === low;
+      const hitSub = locGroup.some(
+        (place) => stripKoreanAdminSuffix(place) === checkRoot || place === low
+      );
+      if (hitParent) {
+        for (const place of locGroup) {
+          const pClean = stripKoreanAdminSuffix(place);
+          expandedTerms.set(place.toLowerCase(), Math.max(expandedTerms.get(place.toLowerCase()) ?? 0, 5));
+          if (pClean.length >= 2) {
+            expandedTerms.set(pClean.toLowerCase(), Math.max(expandedTerms.get(pClean.toLowerCase()) ?? 0, 5));
+          }
+        }
+      } else if (hitSub) {
+        expandedTerms.set(checkRoot, Math.max(expandedTerms.get(checkRoot) ?? 0, 8));
+      }
+    }
+  };
+
+  for (const tok of rawTokens) {
+    addTermWithHierarchy(tok, 7);
   }
 
-  // Also check if full cleanQ directly hits any synonym group (e.g., attached words like "바다사진")
+  // Also check if full cleanQ directly hits any synonym or location group (attached words like "제주도사진", "강릉바다")
   for (const group of PHOTO_SYNONYM_GROUPS) {
     for (const kw of group) {
       if (cleanQ.includes(kw)) {
-        expandedTerms.set(kw, Math.max(expandedTerms.get(kw) ?? 0, 6));
-        for (const syn of group) {
-          if (!expandedTerms.has(syn)) {
-            expandedTerms.set(syn, 3);
-          }
-        }
+        addTermWithHierarchy(kw, 6);
+      }
+    }
+  }
+  for (const locGroup of LOCATION_HIERARCHY_GROUPS) {
+    for (const locKw of locGroup) {
+      const rootKw = stripKoreanAdminSuffix(locKw);
+      if (cleanQ.includes(locKw) || (rootKw.length >= 2 && cleanQ.includes(rootKw))) {
+        addTermWithHierarchy(locKw, 8);
       }
     }
   }
 
   if (expandedTerms.size === 0) {
-    return photos.slice(0, Math.min(12, maxResults));
+    return photos.slice(0, Math.min(24, maxResults));
   }
 
   const scored = photos
     .map((p) => {
+      const locField = `${p.location} ${p.albumName}`.toLowerCase();
       const primaryFields = [
         p.title,
         p.location,
@@ -255,7 +309,10 @@ export function searchPhotosSmart<
       let score = 0;
       for (const [term, weight] of expandedTerms.entries()) {
         if (!term) continue;
-        if (primaryFields.includes(term)) {
+        if (locField.includes(term)) {
+          // Strong boost when photo's actual location or album name matches!
+          score += weight * 3;
+        } else if (primaryFields.includes(term)) {
           score += weight * 2;
         } else if (secondaryFields.includes(term)) {
           score += weight;
@@ -385,6 +442,28 @@ function gradePm25(val: number): { grade: string; level: 'good' | 'normal' | 'ba
   return { grade: '매우나쁨', level: 'very-bad' };
 }
 
+export function getCachedWeatherSnapshot(): WeatherPayload | null {
+  try {
+    const raw = localStorage.getItem(WEATHER_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as WeatherPayload;
+    if (parsed && parsed.current && typeof parsed.current.temp === 'number') {
+      return parsed;
+    }
+  } catch {
+    // Ignore cache parse error
+  }
+  return null;
+}
+
+function saveCachedWeatherSnapshot(payload: WeatherPayload): void {
+  try {
+    localStorage.setItem(WEATHER_CACHE_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage error
+  }
+}
+
 export async function fetchWeatherUnified(
   lat: number,
   lng: number,
@@ -396,62 +475,122 @@ export async function fetchWeatherUnified(
     city,
   });
   const backend = await tryBackendJson<WeatherPayload>(`/api/weather?${params.toString()}`);
-  if (backend.ok) return backend.data;
+  if (backend.ok && backend.data?.current) {
+    const enriched: WeatherPayload = {
+      ...backend.data,
+      weatherSource: backend.data.weatherSource || '기상청(KMA) · Open-Meteo (서버 연동)',
+      airSource: backend.data.airSource || '환경부 기준 · Open-Meteo CAMS',
+      syncIntervalMinutes: 10,
+      updatedAt: new Date().toISOString(),
+    };
+    saveCachedWeatherSnapshot(enriched);
+    return enriched;
+  }
+
+  type OpenMeteoForecastJson = {
+    current?: {
+      temperature_2m?: number;
+      apparent_temperature?: number;
+      relative_humidity_2m?: number;
+      weather_code?: number;
+      wind_speed_10m?: number;
+    };
+    daily?: {
+      weather_code?: number[];
+      temperature_2m_max?: number[];
+      temperature_2m_min?: number[];
+      precipitation_probability_max?: number[];
+    };
+  };
+
+  const isInKoreaBounds = lat >= 32.5 && lat <= 39.0 && lng >= 124.0 && lng <= 132.0;
+  const baseForecastParams = `latitude=${lat}&longitude=${lng}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FSeoul&forecast_days=3`;
+  const kmaWeatherUrl = `https://api.open-meteo.com/v1/forecast?${baseForecastParams}&models=kma_seamless`;
+  const globalWeatherUrl = `https://api.open-meteo.com/v1/forecast?${baseForecastParams}`;
+  const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lng}&current=pm10,pm2_5&timezone=Asia%2FSeoul`;
 
   try {
-    const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FSeoul&forecast_days=3`;
-    const airUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lng}&current=pm10,pm2_5&timezone=Asia%2FSeoul`;
+    let wData: OpenMeteoForecastJson | undefined;
+    let weatherSourceLabel = 'Open-Meteo 글로벌 기상모델';
 
-    const [wRes, aRes] = await Promise.all([fetch(weatherUrl), fetch(airUrl)]);
-    if (!wRes.ok) return null;
-
-    const wData = (await wRes.json()) as {
-      current: {
-        temperature_2m: number;
-        apparent_temperature: number;
-        relative_humidity_2m: number;
-        weather_code: number;
-        wind_speed_10m: number;
-      };
-      daily: {
-        weather_code: number[];
-        temperature_2m_max: number[];
-        temperature_2m_min: number[];
-        precipitation_probability_max: number[];
-      };
-    };
-
-    let pm10 = 26;
-    let pm25 = 13;
-    if (aRes.ok) {
-      const aData = (await aRes.json()) as { current?: { pm10?: number; pm2_5?: number } };
-      if (typeof aData.current?.pm10 === 'number') pm10 = Math.round(aData.current.pm10);
-      if (typeof aData.current?.pm2_5 === 'number') pm25 = Math.round(aData.current.pm2_5);
+    if (isInKoreaBounds) {
+      try {
+        const kmaRes = await rawGet(kmaWeatherUrl, { Accept: 'application/json' }, 9500);
+        const kmaJson = kmaRes.json as OpenMeteoForecastJson | undefined;
+        if (kmaRes.status >= 200 && kmaRes.status < 300 && typeof kmaJson?.current?.temperature_2m === 'number') {
+          wData = kmaJson;
+          weatherSourceLabel = '기상청(KMA) · Open-Meteo';
+        }
+      } catch {
+        // Fallback to standard Open-Meteo endpoint below
+      }
     }
 
-    const currentMapped = mapWeatherCodeToKorean(wData.current.weather_code);
-    const tomorrowMapped = mapWeatherCodeToKorean(wData.daily.weather_code[1] ?? 1);
+    if (!wData) {
+      const stdRes = await rawGet(globalWeatherUrl, { Accept: 'application/json' }, 9500);
+      const stdJson = stdRes.json as OpenMeteoForecastJson | undefined;
+      if (stdRes.status >= 200 && stdRes.status < 300 && typeof stdJson?.current?.temperature_2m === 'number') {
+        wData = stdJson;
+        weatherSourceLabel = isInKoreaBounds ? '기상청(KMA)·ECMWF · Open-Meteo' : 'Open-Meteo 기상예보 API';
+      }
+    }
+
+    if (!wData || !wData.current || typeof wData.current.temperature_2m !== 'number') {
+      return getCachedWeatherSnapshot();
+    }
+
+    // Fetch Air Quality independently so an air-quality API hiccup NEVER blocks weather sync!
+    let pm10 = 24;
+    let pm25 = 12;
+    let airSourceLabel = '환경부 기준 · Open-Meteo CAMS';
+    try {
+      const aRes = await rawGet(airUrl, { Accept: 'application/json' }, 7500);
+      const aData = aRes.json as { current?: { pm10?: number; pm2_5?: number } } | undefined;
+      if (aRes.status >= 200 && aRes.status < 300 && aData?.current) {
+        if (typeof aData.current.pm10 === 'number') pm10 = Math.round(aData.current.pm10);
+        if (typeof aData.current.pm2_5 === 'number') pm25 = Math.round(aData.current.pm2_5);
+      } else {
+        const prev = getCachedWeatherSnapshot();
+        if (prev?.airQuality) {
+          pm10 = prev.airQuality.pm10;
+          pm25 = prev.airQuality.pm25;
+        }
+      }
+    } catch {
+      const prev = getCachedWeatherSnapshot();
+      if (prev?.airQuality) {
+        pm10 = prev.airQuality.pm10;
+        pm25 = prev.airQuality.pm25;
+      }
+      airSourceLabel = '환경부 기준 · 최근 측정 캐시';
+    }
+
+    const cur = wData.current;
+    const daily = wData.daily ?? {};
+    const currentMapped = mapWeatherCodeToKorean(cur.weather_code ?? 1);
+    const tomorrowMapped = mapWeatherCodeToKorean(daily.weather_code?.[1] ?? 1);
     const pm10Info = gradePm10(pm10);
     const pm25Info = gradePm25(pm25);
 
-    return {
+    const curTemp = cur.temperature_2m ?? 18;
+    const payload: WeatherPayload = {
       city,
       lat,
       lng,
       current: {
-        temp: Math.round(wData.current.temperature_2m),
-        feelsLike: Math.round(wData.current.apparent_temperature),
-        humidity: Math.round(wData.current.relative_humidity_2m),
-        windSpeed: Math.round(wData.current.wind_speed_10m * 10) / 10,
+        temp: Math.round(curTemp),
+        feelsLike: Math.round(cur.apparent_temperature ?? curTemp),
+        humidity: Math.round(cur.relative_humidity_2m ?? 50),
+        windSpeed: Math.round((cur.wind_speed_10m ?? 1.5) * 10) / 10,
         condition: currentMapped.label,
         iconKey: currentMapped.iconKey,
-        todayMin: Math.round(wData.daily.temperature_2m_min[0] ?? wData.current.temperature_2m - 3),
-        todayMax: Math.round(wData.daily.temperature_2m_max[0] ?? wData.current.temperature_2m + 4),
+        todayMin: Math.round(daily.temperature_2m_min?.[0] ?? curTemp - 3),
+        todayMax: Math.round(daily.temperature_2m_max?.[0] ?? curTemp + 4),
       },
       tomorrow: {
-        minTemp: Math.round(wData.daily.temperature_2m_min[1] ?? 8),
-        maxTemp: Math.round(wData.daily.temperature_2m_max[1] ?? 17),
-        rainChance: Math.round(wData.daily.precipitation_probability_max[1] ?? 10),
+        minTemp: Math.round(daily.temperature_2m_min?.[1] ?? 8),
+        maxTemp: Math.round(daily.temperature_2m_max?.[1] ?? 17),
+        rainChance: Math.round(daily.precipitation_probability_max?.[1] ?? 10),
         condition: tomorrowMapped.label,
         iconKey: tomorrowMapped.iconKey,
       },
@@ -463,10 +602,16 @@ export async function fetchWeatherUnified(
         pm25Grade: pm25Info.grade,
         pm25Level: pm25Info.level,
       },
+      weatherSource: weatherSourceLabel,
+      airSource: airSourceLabel,
+      syncIntervalMinutes: 10,
       updatedAt: new Date().toISOString(),
     };
+
+    saveCachedWeatherSnapshot(payload);
+    return payload;
   } catch {
-    return null;
+    return getCachedWeatherSnapshot();
   }
 }
 
@@ -588,21 +733,23 @@ export async function askAssistantUnified(params: {
   schedules: ScheduleItem[];
   photos?: PhotoItem[];
 }): Promise<AssistantInquiryResult> {
-  // Fast Multi-Photo Memory Search when user asks to find/show specific photos!
+  // Fast Multi-Photo Memory Search when user asks to find/show specific photos or locations!
   if (params.photos && params.photos.length > 0 && isPhotoSearchIntent(params.query)) {
-    const matched = searchPhotosSmart(params.photos, params.query, 40);
+    const matched = searchPhotosSmart(params.photos, params.query, 200);
     if (matched.length > 0) {
       const first = matched[0];
+      const uniqueLocs = Array.from(new Set(matched.map((p) => p.location).filter(Boolean))).slice(0, 4);
+      const locHeadline = uniqueLocs.length > 0 ? ` (${uniqueLocs.join(' · ')})` : '';
       return {
         category: 'photo_memories',
-        headline: `요청하신 추억 사진 ${matched.length}장을 모두 찾았습니다`,
+        headline: `요청하신 추억 사진 총 ${matched.length}장을 찾았습니다${locHeadline}`,
         spokenSummary:
           matched.length === 1
-            ? `찾으시는 "${first.title}" 사진 1장을 찾아 액자에 띄워드렸어요!`
-            : `찾으시는 사진 총 ${matched.length}장을 모두 찾아 메인 액자에서 연속으로 재생해 드릴게요! 첫 번째 사진은 ${first.date} "${first.title}"입니다.`,
+            ? `찾으시는 "${first.location}" 추억 사진 1장을 찾아 액자에 띄워드렸어요!`
+            : `찾으시는 사진 총 ${matched.length}장을 모두 찾아 메인 액자에서 연속으로 재생해 드릴게요! 첫 번째 사진은 ${first.date} "${first.location}"에서 찍은 "${first.title}"입니다.`,
         detailMarkdown: matched
-          .slice(0, 8)
-          .map((p, idx) => `${idx + 1}. **${p.title}** (${p.date} · ${p.location})`)
+          .slice(0, 12)
+          .map((p, idx) => `${idx + 1}. **${p.title}** (${p.date} · 📍${p.location})`)
           .join('\n'),
         matchedPhotos: matched,
       };
@@ -798,6 +945,16 @@ export async function askBunnyChatUnified(params: {
   isAutoFollowUpAfterSilence: boolean;
   activeFlashcardContext: { koreanWord: string; englishWord: string } | null;
   history: Array<{ role: 'user' | 'bunny'; text: string }>;
+  currentFramePhoto?: {
+    id: string;
+    title: string;
+    date: string;
+    location: string;
+    albumName: string;
+    tags: string[];
+    aiSummary: string;
+  } | null;
+  currentFrameThumbBase64?: string | null;
   photos: Array<{
     id: string;
     title: string;
@@ -843,9 +1000,9 @@ export async function askBunnyChatUnified(params: {
       trimmedMsg
     );
 
-  // Pre-compute smart multi-photo matches across ALL user photos (never limited to first 25!)
+  // Pre-compute smart multi-photo matches across ALL user photos (up to 200 photos!)
   const localPhotoMatches =
-    params.photos.length > 0 ? searchPhotosSmart(params.photos, trimmedMsg, 40) : [];
+    params.photos.length > 0 ? searchPhotosSmart(params.photos, trimmedMsg, 200) : [];
   const explicitPhotoIntent = isPhotoSearchIntent(trimmedMsg);
 
   // Try direct client-side Gemini if API key is saved
@@ -856,22 +1013,33 @@ export async function askBunnyChatUnified(params: {
         ? ['gemini-2.5-pro', 'gemini-2.5-flash']
         : ['gemini-2.5-flash'];
 
-    // Prioritize all locally matched candidate photos first + fill up to 65 total so Gemini sees the entire relevant pool!
+    // Prioritize all locally matched candidate photos first + fill up to 90 total so Gemini sees the entire relevant pool!
     const seenCatIds = new Set<string>();
     const candidatePool: typeof params.photos = [];
     for (const m of localPhotoMatches) {
-      if (!seenCatIds.has(m.id)) {
+      if (!seenCatIds.has(m.id) && candidatePool.length < 90) {
         seenCatIds.add(m.id);
         candidatePool.push(m);
       }
     }
     for (const p of params.photos) {
-      if (candidatePool.length >= 65) break;
+      if (candidatePool.length >= 90) break;
       if (!seenCatIds.has(p.id)) {
         seenCatIds.add(p.id);
         candidatePool.push(p);
       }
     }
+
+    // Build location count map across ALL photos so Gemini knows exact per-location counts
+    const locSummaryMap = new Map<string, number>();
+    for (const p of params.photos) {
+      if (p.location) locSummaryMap.set(p.location, (locSummaryMap.get(p.location) || 0) + 1);
+    }
+    const locSummaryLine = Array.from(locSummaryMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([loc, cnt]) => `${loc}(${cnt}장)`)
+      .join(', ');
 
     const photoCatalogText = candidatePool
       .map(
@@ -880,30 +1048,59 @@ export async function askBunnyChatUnified(params: {
       )
       .join('\n');
 
+    const currentPhotoBlock = params.currentFramePhoto
+      ? `[지금 아이 눈앞 디지털 액자에 크게 떠 있는 현재 사진]
+- 제목: "${params.currentFramePhoto.title}" | 촬영일: ${params.currentFramePhoto.date} | 장소: ${params.currentFramePhoto.location}
+- 사진 설명: ${params.currentFramePhoto.aiSummary || '따뜻한 가족 추억'} | 태그: ${(params.currentFramePhoto.tags || []).join(', ')}`
+      : '[현재 액자 사진: 준비 중]';
+
     const englishPromptRule = params.isAutoFollowUpAfterSilence
-      ? '(아이가 대답 대기 시간 동안 말이 없었어. 영어유도/단어카드는 모두 false로 하고 다정하게 새로운 한국어 질문을 건네줘!)'
+      ? '(아이가 대답 대기 시간 동안 말이 없었어. 영어유도/단어카드는 모두 false로 하고, 지금 액자에 떠 있는 사진을 보며 아이가 쉽게 대답할 수 있는 다정한 한국어 놀이 질문을 건네줘!)'
       : !allowEnglish
-      ? '(중요: 이번 대화 턴은 영어 쿨타임 또는 영어 끄기 모드야! replyText에 영어 단어를 섞지 말고 100% 자연스럽고 재미있는 한국어 반말로만 대화하며, shouldSuggestEnglishReask=false, shouldShowFlashcard=false 로 설정해!)'
-      : '(이번 턴에는 대화 소재와 어울리는 아주 쉬운 영어 표현 1개(shouldSuggestEnglishReask=true) 또는 큰 그림 단어카드(shouldShowFlashcard=true) 중 딱 하나만 자연스럽게 제안해도 좋아!)';
+      ? '(중요: 이번 대화 턴은 영어 쿨타임 또는 영어 끄기 모드야! replyText에 영어 단어를 섞지 말고 100% 자연스럽고 귀여운 한국어 반말로만 대화하며, shouldSuggestEnglishReask=false, shouldShowFlashcard=false 로 설정해!)'
+      : '(이번 턴에는 지금 보고 있는 사진 속 사물/배경 또는 대화 소재와 직결되는 아주 쉬운 영어 단어 1개(shouldSuggestEnglishReask=true) 또는 큰 그림 단어카드(shouldShowFlashcard=true) 중 딱 하나만 놀이처럼 자연스럽게 제안해줘!)';
+
+    const promptParts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+    if (params.currentFrameThumbBase64 && params.currentFrameThumbBase64.length > 64) {
+      const cleanThumb = params.currentFrameThumbBase64.includes(',')
+        ? params.currentFrameThumbBase64.slice(params.currentFrameThumbBase64.indexOf(',') + 1)
+        : params.currentFrameThumbBase64;
+      promptParts.push({
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: cleanThumb,
+        },
+      });
+    }
+
+    promptParts.push({
+      text: `${params.characterPersona || `너는 디지털 액자 속 귀엽고 사랑스러운 아기 동물 친구 "${name}"야.`}
+아이 성장 단계: ${params.childAgeStage} (모은 별: ${params.growthStars}개)
+현재 날씨: ${params.weatherCondition}
+${currentPhotoBlock}
+이전 대화: ${params.history.slice(-8).map((h) => `${h.role}: ${h.text}`).join(' / ')}
+아이의 방금 말: "${trimmedMsg}"
+${englishPromptRule}
+
+[장소별 보유 사진 수 요약 (전체 ${params.photos.length}장)]
+${locSummaryLine || '장소 분석 중'}
+
+[검색 후보 가족 사진 목록]
+${photoCatalogText}
+
+[자연스러운 아이 눈높이 대화 필수 규칙]
+1. 딱딱한 설명투를 버리고, 진짜 살아있는 귀여운 동물 인형 친구처럼 감탄사("우와아~!", "헤헤!", "콩콩!")와 다정한 맞장구를 담아 1~2문장의 한국어 반말(replyText)로 대답해줘!
+2. 아이가 "이 사진 뭐야?", "여기 어디야?"라고 묻거나 짧은 단어("바다!", "응!", "강아지!")만 말해도 첨부된 현재 액자 사진 이미지와 대화 흐름을 보고 다정하게 반응한 뒤, 아이가 신나게 이어 말할 수 있는 쉬운 꼬리 질문 1개를 덧붙여줘!
+3. 특히 특정 장소(예: 제주도, 강릉, 공원, 에버랜드)나 주제의 사진을 찾아달라는 요청이면:
+   - isPhotoMemoryQuery=true 로 설정하고,
+   - **절대로 최근 1개 사진만 고르지 말고**, 목록에서 해당 장소·주제에 맞는 **모든 사진의 ID를 빠짐없이 matchedPhotoIds 배열에 전부 담아줘!** (예: 제주도 사진이 15장이면 15개 ID 모두 포함하고, replyText에도 총 몇 장을 찾았는지 신나게 말해줘!)`,
+    });
 
     for (const modelName of modelCandidates) {
       try {
         const resp = await ai.models.generateContent({
           model: modelName,
-          contents: `${params.characterPersona || `너는 디지털 액자 속 다정한 동물 인형 친구 "${name}"야.`}
-아이 성장 단계: ${params.childAgeStage} (모은 별: ${params.growthStars}개)
-현재 날씨: ${params.weatherCondition}
-이전 대화: ${params.history.slice(-6).map((h) => `${h.role}: ${h.text}`).join(' / ')}
-아이의 방금 말: "${trimmedMsg}"
-${englishPromptRule}
-
-[등록된 가족 사진 목록]
-${photoCatalogText}
-
-진짜 살아있는 다정한 친구처럼 감탄사와 자연스러운 호흡을 담아 1~2문장의 한국어 반말(replyText)로 대답해줘!
-특히 사진/추억 찾아달라는 요청이면:
-- isPhotoMemoryQuery=true 로 설정하고,
-- **절대로 1개만 고르지 말고**, 목록에서 조건에 해당되는 **모든 사진의 ID를 빠짐없이 matchedPhotoIds 배열에 전부 담아줘!** (예: 관련 사진이 8장이면 8개 ID 모두 포함, replyText에도 몇 장 찾았는지 신나게 말해줘!)`,
+          contents: { parts: promptParts },
           config: {
             responseMimeType: 'application/json',
             responseSchema: {
@@ -973,10 +1170,23 @@ ${photoCatalogText}
     };
   }
 
+  // When user asks about the photo currently on screen ("이 사진 뭐야?", "여기 어디야?") in offline mode
+  if (params.currentFramePhoto && /이\s*사진|지금\s*사진|여기\s*어디|이게\s*뭐/.test(trimmedMsg)) {
+    const cp = params.currentFramePhoto;
+    return {
+      replyText: `우와~ 지금 보고 있는 사진은 ${cp.date} "${cp.location}"에서 찍은 "${cp.title}" 추억이야! ${cp.aiSummary || '표정이 정말 반짝반짝 행복해 보여!'} 이때 기억나?`,
+      isPhotoMemoryQuery: false,
+      matchedPhotoIds: [],
+      shouldSuggestEnglishReask: false,
+      shouldShowFlashcard: false,
+    };
+  }
+
   // Check photo memory query (returns ALL matching photos via searchPhotosSmart!)
   const looksLikePhotoQuery =
     explicitPhotoIntent ||
-    /언제|어디|사진|갔|보여|찾아|바다|해변|제주|숲|공원|캠핑|단풍|가을|봄|여름|겨울|벚꽃|꽃|소풍|딸기|놀이공원|에버랜드|회전목마|눈|썰매|눈사람|웃|행복|생일|케이크|강아지|동물|여행|추억|옛날|과거/i.test(
+    localPhotoMatches.length > 0 && /어디|언제|사진|갔|보여|찾아|추억|여행/.test(trimmedMsg) ||
+    /바다|해변|제주|강릉|속초|부산|경주|여수|전주|가평|춘천|숲|공원|캠핑|단풍|가을|봄|여름|겨울|벚꽃|꽃|소풍|딸기|놀이공원|에버랜드|롯데월드|회전목마|눈|썰매|눈사람|웃|행복|생일|케이크|강아지|동물|추억|옛날|과거/i.test(
       trimmedMsg
     );
 
@@ -1252,35 +1462,52 @@ export async function fetchSynologyFolderPhotos(params: {
   try {
     const syncCfg = getSavedPhotoSyncConfig();
     const targetMax = Math.max(10, Math.min(500, params.maxCount ?? syncCfg.maxPhotoFetchCount));
+    const desiredPool = Math.min(2000, Math.max(targetMax * 2, 600));
+    const pageLimit = 200;
 
-    const fileParams = new URLSearchParams({
-      api: 'SYNO.FileStation.List',
-      version: '2',
-      method: 'list',
-      folder_path: params.folderPath,
-      additional: '["time"]',
-      sort_by: 'mtime',
-      sort_direction: 'desc',
-      limit: String(Math.max(400, targetMax * 3)),
-      _sid: params.sid,
-    });
-    const url = `${params.cleanBase}/webapi/entry.cgi?${fileParams.toString()}`;
-    const res = Capacitor.isNativePlatform()
-      ? await CapacitorHttp.get({ url, connectTimeout: 8000, readTimeout: 8000 })
-      : await fetch(url).then(async (r) => ({ status: r.status, data: await r.json() }));
-
-    const json = (typeof res.data === 'string' ? JSON.parse(res.data) : res.data) as {
-      data?: {
-        files?: Array<{
-          name: string;
-          path: string;
-          isdir?: boolean;
-          additional?: { time?: { mtime?: number } };
-        }>;
-      };
+    type SynoFsFile = {
+      name: string;
+      path: string;
+      isdir?: boolean;
+      additional?: { time?: { mtime?: number } };
     };
+    const collectedFiles: SynoFsFile[] = [];
 
-    const imageFiles = (json?.data?.files ?? []).filter(
+    for (let offset = 0; offset < desiredPool; offset += pageLimit) {
+      const fileParams = new URLSearchParams({
+        api: 'SYNO.FileStation.List',
+        version: '2',
+        method: 'list',
+        folder_path: params.folderPath,
+        additional: '["time"]',
+        sort_by: 'mtime',
+        sort_direction: 'desc',
+        offset: String(offset),
+        limit: String(pageLimit),
+        _sid: params.sid,
+      });
+      const url = `${params.cleanBase}/webapi/entry.cgi?${fileParams.toString()}`;
+      const res = Capacitor.isNativePlatform()
+        ? await CapacitorHttp.get({ url, connectTimeout: 8000, readTimeout: 10000 })
+        : await fetch(url).then(async (r) => ({ status: r.status, data: await r.json() }));
+
+      const json = (typeof res.data === 'string' ? JSON.parse(res.data) : res.data) as {
+        data?: {
+          total?: number;
+          files?: SynoFsFile[];
+        };
+      };
+
+      const pageFiles = json?.data?.files ?? [];
+      if (pageFiles.length === 0) break;
+      collectedFiles.push(...pageFiles);
+      if (pageFiles.length < pageLimit) break;
+      if (typeof json?.data?.total === 'number' && offset + pageFiles.length >= json.data.total) {
+        break;
+      }
+    }
+
+    const imageFiles = collectedFiles.filter(
       (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(f.name)
     );
 
@@ -1376,63 +1603,112 @@ export async function fetchCloudProviderFolderPhotos(params: {
     const q = encodeURIComponent(
       `'${params.folderId}' in parents and mimeType contains 'image/' and trashed = false`
     );
-    const pageSize = Math.min(1000, Math.max(300, targetMax * 2));
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime%20desc&fields=files(id,name,createdTime,thumbnailLink)&pageSize=${pageSize}`,
-      { headers: { Authorization: `Bearer ${params.gdriveToken.trim()}` } }
-    );
-    if (res.ok) {
-      const data = (await res.json()) as {
-        files?: Array<{ id: string; name: string; createdTime?: string; thumbnailLink?: string }>;
+    type GDriveApiFile = {
+      id: string;
+      name: string;
+      createdTime?: string;
+      thumbnailLink?: string;
+      imageMediaMetadata?: {
+        time?: string;
+        location?: { latitude?: number; longitude?: number };
       };
-      const latest = selectLatestItems(data.files ?? [], {
+    };
+    const allFiles: GDriveApiFile[] = [];
+    let pageToken = '';
+    const desiredPool = Math.min(1500, Math.max(targetMax * 2, 600));
+
+    for (let page = 0; page < 8 && allFiles.length < desiredPool; page++) {
+      const tokenParam = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+      const res = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime%20desc&fields=nextPageToken,files(id,name,createdTime,thumbnailLink,imageMediaMetadata(time,location))&pageSize=200${tokenParam}`,
+        { headers: { Authorization: `Bearer ${params.gdriveToken.trim()}` } }
+      );
+      if (!res.ok) break;
+      const data = (await res.json()) as {
+        nextPageToken?: string;
+        files?: GDriveApiFile[];
+      };
+      if (data.files?.length) {
+        allFiles.push(...data.files);
+      }
+      if (!data.nextPageToken || !data.files?.length) break;
+      pageToken = data.nextPageToken;
+    }
+
+    if (allFiles.length > 0) {
+      const latest = selectLatestItems(allFiles, {
         maxCount: targetMax,
         getTimestampMs: (f) =>
           f.createdTime ? Date.parse(f.createdTime) : inferTimestampFromNameOrDate(f.name),
       });
-      return latest.map((f) => ({
-        id: buildStablePhotoId(params.albumId, f.id),
-        albumId: params.albumId,
-        albumName: params.albumName,
-        provider: 'google_drive',
-        src: f.thumbnailLink
-          ? f.thumbnailLink.replace(/=s\d+.*$/, '=s2560')
-          : `https://drive.google.com/thumbnail?id=${f.id}&sz=w2560`,
-        assetUrl: `https://lh3.googleusercontent.com/d/${f.id}=w2560`,
-        title: f.name.replace(/\.[^.]+$/, ''),
-        date: f.createdTime
-          ? new Date(f.createdTime).toLocaleDateString('ko-KR', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric',
-            })
-          : todayLabel,
-        location: params.albumName,
-        tags: ['구글드라이브', params.albumName],
-        aiSummary: `Google Drive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
-      }));
+      return latest.map((f) => {
+        const lat = f.imageMediaMetadata?.location?.latitude;
+        const lng = f.imageMediaMetadata?.location?.longitude;
+        const geo =
+          typeof lat === 'number' && typeof lng === 'number'
+            ? reverseGeocodeKoreaLatLng(lat, lng)
+            : null;
+        const locLabel = geo?.locationLabel || params.albumName;
+        return {
+          id: buildStablePhotoId(params.albumId, f.id),
+          albumId: params.albumId,
+          albumName: params.albumName,
+          provider: 'google_drive',
+          src: f.thumbnailLink
+            ? f.thumbnailLink.replace(/=s\d+.*$/, '=s2560')
+            : `https://drive.google.com/thumbnail?id=${f.id}&sz=w2560`,
+          assetUrl: `https://lh3.googleusercontent.com/d/${f.id}=w2560`,
+          title: f.name.replace(/\.[^.]+$/, ''),
+          date: f.createdTime
+            ? new Date(f.createdTime).toLocaleDateString('ko-KR', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+              })
+            : todayLabel,
+          location: locLabel,
+          gpsLat: lat,
+          gpsLng: lng,
+          tags: Array.from(new Set(['구글드라이브', params.albumName, ...(geo?.tags ?? [])])),
+          aiSummary: `Google Drive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+        };
+      });
     }
   }
 
   if (params.provider === 'onedrive' && params.onedriveToken?.trim()) {
-    const topSize = Math.min(999, Math.max(300, targetMax * 2));
-    const res = await fetch(
-      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(params.folderId)}/children?$top=${topSize}`,
-      { headers: { Authorization: `Bearer ${params.onedriveToken.trim()}` } }
-    );
-    if (res.ok) {
+    type OneDriveGraphFile = {
+      id: string;
+      name: string;
+      createdDateTime?: string;
+      photo?: { takenDateTime?: string };
+      location?: { latitude?: number; longitude?: number };
+      image?: Record<string, unknown>;
+      file?: { mimeType?: string };
+      '@microsoft.graph.downloadUrl'?: string;
+    };
+    const allOdItems: OneDriveGraphFile[] = [];
+    let nextUrl: string | undefined =
+      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(params.folderId)}/children?$top=200`;
+    const desiredPool = Math.min(1500, Math.max(targetMax * 2, 600));
+
+    for (let page = 0; page < 8 && nextUrl && allOdItems.length < desiredPool; page++) {
+      const res = await fetch(nextUrl, {
+        headers: { Authorization: `Bearer ${params.onedriveToken.trim()}` },
+      });
+      if (!res.ok) break;
       const data = (await res.json()) as {
-        value?: Array<{
-          id: string;
-          name: string;
-          createdDateTime?: string;
-          photo?: { takenDateTime?: string };
-          image?: Record<string, unknown>;
-          file?: { mimeType?: string };
-          '@microsoft.graph.downloadUrl'?: string;
-        }>;
+        '@odata.nextLink'?: string;
+        value?: OneDriveGraphFile[];
       };
-      const imgs = (data.value ?? []).filter(
+      if (data.value?.length) {
+        allOdItems.push(...data.value);
+      }
+      nextUrl = data['@odata.nextLink'];
+    }
+
+    if (allOdItems.length > 0) {
+      const imgs = allOdItems.filter(
         (item) =>
           Boolean(item['@microsoft.graph.downloadUrl']) &&
           (Boolean(item.image) ||
@@ -1446,24 +1722,34 @@ export async function fetchCloudProviderFolderPhotos(params: {
           return dt ? Date.parse(dt) : inferTimestampFromNameOrDate(it.name);
         },
       });
-      return latest.map((item) => ({
-        id: buildStablePhotoId(params.albumId, item.id || item.name),
-        albumId: params.albumId,
-        albumName: params.albumName,
-        provider: 'onedrive',
-        src: item['@microsoft.graph.downloadUrl'] || '',
-        title: item.name.replace(/\.[^.]+$/, ''),
-        date: item.photo?.takenDateTime
-          ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
-              year: 'numeric',
-              month: 'long',
-              day: 'numeric',
-            })
-          : todayLabel,
-        location: params.albumName,
-        tags: ['원드라이브', params.albumName],
-        aiSummary: `OneDrive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
-      }));
+      return latest.map((item) => {
+        const lat = item.location?.latitude;
+        const lng = item.location?.longitude;
+        const geo =
+          typeof lat === 'number' && typeof lng === 'number'
+            ? reverseGeocodeKoreaLatLng(lat, lng)
+            : null;
+        return {
+          id: buildStablePhotoId(params.albumId, item.id || item.name),
+          albumId: params.albumId,
+          albumName: params.albumName,
+          provider: 'onedrive',
+          src: item['@microsoft.graph.downloadUrl'] || '',
+          title: item.name.replace(/\.[^.]+$/, ''),
+          date: item.photo?.takenDateTime
+            ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric',
+              })
+            : todayLabel,
+          location: geo?.locationLabel || params.albumName,
+          gpsLat: lat,
+          gpsLng: lng,
+          tags: Array.from(new Set(['원드라이브', params.albumName, ...(geo?.tags ?? [])])),
+          aiSummary: `OneDrive "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+        };
+      });
     }
   }
 
@@ -1491,39 +1777,29 @@ export async function fetchCloudProviderFolderPhotos(params: {
         );
         const imageHrefs = hrefs.filter((h) => /\.(jpe?g|png|webp|gif|bmp)$/i.test(decodeURIComponent(h)));
         const latestHrefs = selectLatestItems(imageHrefs, {
-          maxCount: Math.min(targetMax, 120),
+          maxCount: targetMax,
           getTimestampMs: (h) => inferTimestampFromNameOrDate(decodeURIComponent(h)),
           assumeReverseChronologicalWhenNoTimestamp: false,
         });
-        const out: PhotoItem[] = [];
-        for (let i = 0; i < latestHrefs.length; i++) {
-          const href = latestHrefs[i];
-          const fullImgUrl = href.startsWith('http') ? href : `${origin}${href.startsWith('/') ? '' : '/'}${href}`;
-          const imgRes = await CapacitorHttp.get({
-            url: fullImgUrl,
-            headers: { Authorization: `Basic ${basic}` },
-            responseType: 'blob',
-          });
-          if (imgRes.status >= 200 && imgRes.status < 300 && typeof imgRes.data === 'string') {
-            const decodedName = decodeURIComponent(href.split('/').pop() || `photo_${i + 1}`);
-            const ext = decodedName.split('.').pop()?.toLowerCase() || 'jpg';
-            const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
-            const dataUri = imgRes.data.startsWith('data:') ? imgRes.data : `data:${mime};base64,${imgRes.data}`;
-            out.push({
-              id: buildStablePhotoId(params.albumId, href),
-              albumId: params.albumId,
-              albumName: params.albumName,
-              provider: 'synology_webdav',
-              src: dataUri,
-              title: decodedName.replace(/\.[^.]+$/, ''),
-              date: todayLabel,
-              location: params.albumName,
-              tags: ['WebDAV', params.albumName],
-              aiSummary: `시놀로지 WebDAV "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
-            });
-          }
-        }
-        return out;
+        return latestHrefs.map((href, i) => {
+          const fullImgUrl = href.startsWith('http')
+            ? href
+            : `${origin}${href.startsWith('/') ? '' : '/'}${href}`;
+          const decodedName = decodeURIComponent(href.split('/').pop() || `photo_${i + 1}`);
+          return {
+            id: buildStablePhotoId(params.albumId, href),
+            albumId: params.albumId,
+            albumName: params.albumName,
+            provider: 'synology_webdav',
+            src: fullImgUrl,
+            nativeHeaders: { Authorization: `Basic ${basic}` },
+            title: decodedName.replace(/\.[^.]+$/, ''),
+            date: todayLabel,
+            location: params.albumName,
+            tags: ['WebDAV', params.albumName],
+            aiSummary: `시놀로지 WebDAV "${params.albumName}" 폴더에서 불러온 실제 사진입니다.`,
+          };
+        });
       }
     } catch {
       // fall through
@@ -2051,13 +2327,19 @@ export async function extractPhotoBase64ForVision(
 }
 
 export async function refreshMartEventsUnified(city: string): Promise<string[]> {
+  const exactSchedule = computeKoreanMartHolidaySummary(city, new Date());
+  const exactHeaderLines = [
+    `[${exactSchedule.regionLabel} 대형마트 정확 휴무일] 이마트·롯데마트·홈플러스 이번 달 ${exactSchedule.thisMonthHolidayListText} 의무휴무 (${exactSchedule.thisSundayStatusText})`,
+    `[코스트코 정확 휴무일] ${exactSchedule.costcoNote} · 다음 달 마트 의무휴무: ${exactSchedule.nextMonthHolidayListText}`,
+  ];
+
   const backend = await tryBackendJson<{ items?: string[] }>('/api/gemini/mart-events', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ city }),
   }, 7000);
   if (backend.ok && backend.data.items && backend.data.items.length > 0) {
-    return backend.data.items;
+    return [...exactHeaderLines, ...backend.data.items.slice(0, 3)];
   }
 
   const ai = getClientGemini();
@@ -2065,7 +2347,9 @@ export async function refreshMartEventsUnified(city: string): Promise<string[]> 
     try {
       const resp = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `${city} 기준 한국의 대형마트(이마트, 롯데마트, 홈플러스, 코스트코) 의무휴무일 규칙(둘째·넷째 일요일 등)과 제철 가족 장보기 팁 4줄을 JSON { "items": ["..."] } 형식으로 작성해 주세요.`,
+        contents: `현재 지역: ${city}
+이번 달 확정 대형마트 의무휴무 날짜: ${exactSchedule.thisMonthHolidayListText} (${exactSchedule.ruleLabel}, ${exactSchedule.thisSundayStatusText})
+위 정확한 날짜를 반영해 부모님을 위한 주간 가족 장보기 제철 식재료·육아용품 쇼핑 팁 2줄을 JSON { "items": ["..."] } 형식으로 작성해 주세요.`,
         config: {
           responseMimeType: 'application/json',
           responseSchema: {
@@ -2077,17 +2361,18 @@ export async function refreshMartEventsUnified(city: string): Promise<string[]> 
         },
       });
       const parsed = JSON.parse((resp.text ?? '{}').trim()) as { items?: string[] };
-      if (parsed.items && parsed.items.length > 0) return parsed.items;
+      if (parsed.items && parsed.items.length > 0) {
+        return [...exactHeaderLines, ...parsed.items.slice(0, 2)];
+      }
     } catch {
       // fall through
     }
   }
 
   return [
-    `[${city} 대형마트] 이마트·롯데마트·홈플러스 매월 둘째·넷째 일요일 정기 의무휴무`,
-    `[코스트코 안내] 매월 둘째·넷째 일요일 정기 휴무 (방문 전 지점별 영업시간 확인)`,
-    `[주말 가족 장보기] 제철 과일·우리 아이 우유·간식 특가 코너 운영 중`,
-    `[전통시장·하나로마트] 연중무휴 정상 영업 매장 상시 이용 가능`,
+    ...exactHeaderLines,
+    `[주말 가족 장보기] 제철 과일·한우·우리 아이 우유·간식 주말 특가전 운영 중`,
+    `[하나로마트·전통시장] 의무휴무 적용 제외 매장은 주말에도 정상 영업 이용 가능`,
   ];
 }
 
@@ -2683,12 +2968,57 @@ export async function resolvePublicShareLinkUnified(params: {
     // Extract all genuine Google Photos shared media URLs (`lh3.googleusercontent.com/pw/...` or `.../AF1Qip...`)
     const urlSet = new Set<string>();
     const pwRegex = /https:\/\/lh3\.googleusercontent\.com\/pw\/[a-zA-Z0-9_-]{24,}/g;
-    for (const m of cleanedHtml.matchAll(pwRegex)) {
-      urlSet.add(m[0]);
-    }
     const afRegex = /https:\/\/lh3\.googleusercontent\.com\/(?:[a-zA-Z0-9_-]+\/)?AF1Qip[a-zA-Z0-9_-]{18,}/g;
-    for (const m of cleanedHtml.matchAll(afRegex)) {
-      urlSet.add(m[0]);
+    const collectGooglePhotosUrls = (txt: string) => {
+      for (const m of txt.matchAll(pwRegex)) urlSet.add(m[0]);
+      for (const m of txt.matchAll(afRegex)) urlSet.add(m[0]);
+    };
+    collectGooglePhotosUrls(cleanedHtml);
+
+    // Paginate Google Photos shared album continuation tokens (`batchexecute` `snAcKc`) when >100 photos requested!
+    if (urlSet.size > 0 && urlSet.size < targetMax * 1.3) {
+      try {
+        const resolvedPageUrl = page.url || rawUrl;
+        const albumIdMatch = resolvedPageUrl.match(/\/share\/([a-zA-Z0-9_-]{15,})/);
+        const keyMatch = resolvedPageUrl.match(/[?&]key=([a-zA-Z0-9_-]{10,})/);
+        const initTokenMatch = page.text.match(/"(C[a-zA-Z0-9_-]{45,260}={0,2})"/);
+
+        if (albumIdMatch?.[1] && keyMatch?.[1] && initTokenMatch?.[1]) {
+          const shareAlbumId = albumIdMatch[1];
+          const shareAuthKey = keyMatch[1];
+          let nextToken = initTokenMatch[1];
+          const seenTokens = new Set<string>();
+
+          for (let pageIdx = 0; pageIdx < 6 && nextToken && urlSet.size < Math.max(targetMax * 2, 550); pageIdx++) {
+            if (seenTokens.has(nextToken)) break;
+            seenTokens.add(nextToken);
+
+            const rpcInner = JSON.stringify([shareAlbumId, nextToken, null, shareAuthKey]);
+            const fReq = JSON.stringify([[['snAcKc', rpcInner, null, 'generic']]]);
+            const form = new URLSearchParams({ 'f.req': fReq });
+            const batchRes = await rawPost(
+              'https://photos.google.com/_/PhotosUi/data/batchexecute?rpcids=snAcKc&hl=ko',
+              form.toString(),
+              'application/x-www-form-urlencoded'
+            );
+            if (batchRes.status < 200 || batchRes.status >= 300 || !batchRes.text) break;
+
+            const unescapedBatch = decodeHtmlEntities(batchRes.text.replace(/\\"/g, '"'));
+            const beforeCount = urlSet.size;
+            collectGooglePhotosUrls(unescapedBatch);
+            if (urlSet.size === beforeCount) break;
+
+            const nextTokCandidates = Array.from(
+              unescapedBatch.matchAll(/"(C[a-zA-Z0-9_-]{45,260}={0,2})"/g)
+            ).map((m) => m[1]);
+            const freshTok = nextTokCandidates.find((t) => !seenTokens.has(t));
+            if (!freshTok) break;
+            nextToken = freshTok;
+          }
+        }
+      } catch {
+        // Keep already collected URLs safely
+      }
     }
 
     // Single-photo share fallback via og:image (exclude Google logo/avatar `/a/` URLs)
@@ -2822,8 +3152,8 @@ export async function resolvePublicShareLinkUnified(params: {
         // Continue to Strategy 2
       }
 
-      // Strategy 2: Main folder page HTML (`_DRIVE_ivd` / `data-id` extraction)
-      if (foundFiles.size === 0) {
+      // Strategy 2: Main folder page HTML (`_DRIVE_ivd` / `data-id` extraction) — also runs when Strategy 1 returned < targetMax!
+      if (foundFiles.size < targetMax) {
         try {
           const folderRes = await rawGet(`https://drive.google.com/drive/folders/${folderId}`);
           const unescaped = decodeHtmlEntities(folderRes.text);
@@ -2839,7 +3169,7 @@ export async function resolvePublicShareLinkUnified(params: {
           const ivdImgRegex =
             /\["([a-zA-Z0-9_-]{25,45})"\s*,\s*\["[a-zA-Z0-9_-]+"\]\s*,\s*"([^"]+)"\s*,\s*"image\/[a-zA-Z0-9.+-]+"/g;
           for (const m of unescaped.matchAll(ivdImgRegex)) {
-            if (m[1] !== folderId) {
+            if (m[1] !== folderId && !foundFiles.has(m[1])) {
               foundFiles.set(m[1], m[2]);
             }
           }
@@ -2934,19 +3264,23 @@ export async function resolvePublicShareLinkUnified(params: {
       file?: { mimeType?: string };
       image?: Record<string, unknown>;
       photo?: { takenDateTime?: string };
+      location?: { latitude?: number; longitude?: number };
       '@content.downloadUrl'?: string;
       thumbnails?: Array<{ large?: { url?: string } }>;
       children?: OneDriveItem[];
+      'children@odata.nextLink'?: string;
+      '@odata.nextLink'?: string;
     }
 
     const candidateUrls = Array.from(new Set([rawUrl, finalShareUrl]));
     let rootItem: OneDriveItem | null = null;
+    let activeOdHeaders: Record<string, string> = { Accept: 'application/json' };
 
     for (const candidate of candidateUrls) {
       const shareId = encodeOneDriveShareToken(candidate);
       const endpoints = [
-        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children($top=999;$expand=thumbnails)`,
-        `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($top=999;$expand=thumbnails)`,
+        `https://my.microsoftpersonalcontent.com/_api/v2.0/shares/${shareId}/driveItem?$expand=children($top=200;$expand=thumbnails)`,
+        `https://api.onedrive.com/v1.0/shares/${shareId}/driveItem?$expand=children($top=200;$expand=thumbnails)`,
       ];
 
       for (const ep of endpoints) {
@@ -2960,6 +3294,7 @@ export async function resolvePublicShareLinkUnified(params: {
           const data = r.json as OneDriveItem | undefined;
           if (r.status >= 200 && r.status < 300 && data && (data.children || data['@content.downloadUrl'])) {
             rootItem = data;
+            activeOdHeaders = headers;
             break;
           }
         } catch {
@@ -2971,7 +3306,32 @@ export async function resolvePublicShareLinkUnified(params: {
 
     if (rootItem) {
       const albumTitle = params.customTitle?.trim() || rootItem.name || 'OneDrive 공유 앨범';
-      const rawItems = Array.isArray(rootItem.children) && rootItem.children.length > 0 ? rootItem.children : [rootItem];
+      const rawItems: OneDriveItem[] =
+        Array.isArray(rootItem.children) && rootItem.children.length > 0
+          ? [...rootItem.children]
+          : [rootItem];
+
+      // Follow OneDrive OData pagination (`children@odata.nextLink` -> `@odata.nextLink`) so 500+ photo folders load completely!
+      let nextOdLink = rootItem['children@odata.nextLink'] || rootItem['@odata.nextLink'];
+      const desiredOdPool = Math.min(1500, Math.max(targetMax * 2, 600));
+      for (let page = 0; page < 8 && nextOdLink && rawItems.length < desiredOdPool; page++) {
+        try {
+          const nextRes = await rawGet(nextOdLink, activeOdHeaders);
+          const nextData = nextRes.json as {
+            value?: OneDriveItem[];
+            '@odata.nextLink'?: string;
+          } | undefined;
+          if (nextRes.status >= 200 && nextRes.status < 300 && Array.isArray(nextData?.value) && nextData.value.length > 0) {
+            rawItems.push(...nextData.value);
+            nextOdLink = nextData['@odata.nextLink'];
+          } else {
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+
       const imageItems = rawItems.filter((item) => {
         const dl = item['@content.downloadUrl'] || item.thumbnails?.[0]?.large?.url;
         if (!dl) return false;
@@ -2996,6 +3356,13 @@ export async function resolvePublicShareLinkUnified(params: {
           const primarySrc = isHeic && thumbLarge ? thumbLarge : directDl || thumbLarge;
           const backupSrc = isHeic ? directDl : thumbLarge || undefined;
 
+          const lat = item.location?.latitude;
+          const lng = item.location?.longitude;
+          const geo =
+            typeof lat === 'number' && typeof lng === 'number'
+              ? reverseGeocodeKoreaLatLng(lat, lng)
+              : null;
+
           const dateStr = item.photo?.takenDateTime
             ? new Date(item.photo.takenDateTime).toLocaleDateString('ko-KR', {
                 year: 'numeric',
@@ -3012,8 +3379,10 @@ export async function resolvePublicShareLinkUnified(params: {
             assetUrl: backupSrc,
             title: (item.name || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
             date: dateStr,
-            location: albumTitle,
-            tags: ['원드라이브', albumTitle],
+            location: geo?.locationLabel || albumTitle,
+            gpsLat: lat,
+            gpsLng: lng,
+            tags: Array.from(new Set(['원드라이브', albumTitle, ...(geo?.tags ?? [])])),
             aiSummary: `OneDrive "${albumTitle}" 공유 링크에서 불러온 실제 사진입니다.`,
           };
         });
@@ -3072,9 +3441,31 @@ export async function resolvePublicShareLinkUnified(params: {
     );
 
     let detectedAlbumTitle = params.customTitle?.trim() || '';
-    const listFetchLimit = String(Math.min(2000, Math.max(500, targetMax * 4)));
+    const desiredSynoPool = Math.min(2000, Math.max(targetMax * 2, 600));
 
-    // E-1: Try Synology Photos Public Share API (`SYNO.Foto.Sharing.*` + `SYNO.Foto.Browse.Item`)
+    type SynoFotoBrowseItem = {
+      id: number;
+      filename?: string;
+      type?: string;
+      time?: number;
+      additional?: {
+        thumbnail?: { cache_key?: string; xl?: string; m?: string };
+        address?: {
+          country?: string;
+          state?: string;
+          county?: string;
+          city?: string;
+          town?: string;
+          district?: string;
+          village?: string;
+          landmark?: string;
+        };
+      };
+    };
+
+    // E-1: Try Synology Photos Public Share API (`SYNO.Foto.Sharing.*` + paginated `SYNO.Foto.Browse.Item`)
+    // NOTE: Synology Photos caps a single `SYNO.Foto.Browse.Item` call at 100 items!
+    // We loop `offset = 0, 100, 200, ...` so 500-photo requests fetch all 500+ items cleanly!
     for (const entryUrl of entryEndpoints) {
       try {
         const loginBody = new URLSearchParams({
@@ -3108,40 +3499,90 @@ export async function resolvePublicShareLinkUnified(params: {
           if (fetchedName) detectedAlbumTitle = fetchedName;
         }
 
-        const listBody = new URLSearchParams({
-          api: 'SYNO.Foto.Browse.Item',
-          version: '1',
-          method: 'list',
-          offset: '0',
-          limit: listFetchLimit,
-          additional: '["thumbnail"]',
-          passphrase,
-        });
+        const pageSize = 100;
+        let workingVersion = '1';
+        let workingAdditional = '["thumbnail","address"]';
+        const allSynoItems: SynoFotoBrowseItem[] = [];
+        const seenSynoIds = new Set<number>();
 
-        let listRes = await rawPost(entryUrl, listBody.toString(), 'application/x-www-form-urlencoded', shareHeaders);
-        let listJson = listRes.json as {
-          success?: boolean;
-          error?: { code?: number };
-          data?: {
-            list?: Array<{
-              id: number;
-              filename?: string;
-              type?: string;
-              time?: number;
-              additional?: { thumbnail?: { cache_key?: string; xl?: string; m?: string } };
-            }>;
-          };
-        } | undefined;
+        for (let offset = 0; offset < desiredSynoPool; offset += pageSize) {
+          const makePageBody = (ver: string, addFields: string) =>
+            new URLSearchParams({
+              api: 'SYNO.Foto.Browse.Item',
+              version: ver,
+              method: 'list',
+              offset: String(offset),
+              limit: String(pageSize),
+              additional: addFields,
+              passphrase,
+            });
 
-        if (!listJson?.success) {
-          listBody.set('version', '2');
-          listRes = await rawPost(entryUrl, listBody.toString(), 'application/x-www-form-urlencoded', shareHeaders);
-          listJson = listRes.json as typeof listJson;
+          let listRes = await rawPost(
+            entryUrl,
+            makePageBody(workingVersion, workingAdditional).toString(),
+            'application/x-www-form-urlencoded',
+            shareHeaders
+          );
+          let listJson = listRes.json as {
+            success?: boolean;
+            data?: { list?: SynoFotoBrowseItem[] };
+          } | undefined;
+
+          if (!listJson?.success && offset === 0) {
+            // Try fallback without "address" or version 2 depending on DSM version
+            workingAdditional = '["thumbnail"]';
+            listRes = await rawPost(
+              entryUrl,
+              makePageBody('1', workingAdditional).toString(),
+              'application/x-www-form-urlencoded',
+              shareHeaders
+            );
+            listJson = listRes.json as typeof listJson;
+
+            if (!listJson?.success) {
+              workingVersion = '2';
+              listRes = await rawPost(
+                entryUrl,
+                makePageBody('2', '["thumbnail","address"]').toString(),
+                'application/x-www-form-urlencoded',
+                shareHeaders
+              );
+              listJson = listRes.json as typeof listJson;
+              if (listJson?.success) {
+                workingAdditional = '["thumbnail","address"]';
+              } else {
+                listRes = await rawPost(
+                  entryUrl,
+                  makePageBody('2', '["thumbnail"]').toString(),
+                  'application/x-www-form-urlencoded',
+                  shareHeaders
+                );
+                listJson = listRes.json as typeof listJson;
+              }
+            }
+          }
+
+          if (!listJson?.success || !Array.isArray(listJson.data?.list) || listJson.data.list.length === 0) {
+            break;
+          }
+
+          let newAddedOnPage = 0;
+          for (const item of listJson.data.list) {
+            if (!seenSynoIds.has(item.id)) {
+              seenSynoIds.add(item.id);
+              allSynoItems.push(item);
+              newAddedOnPage += 1;
+            }
+          }
+
+          if (listJson.data.list.length < pageSize || newAddedOnPage === 0) {
+            break;
+          }
         }
 
-        if (listJson?.success && Array.isArray(listJson.data?.list) && listJson.data.list.length > 0) {
+        if (allSynoItems.length > 0) {
           const albumTitle = detectedAlbumTitle || 'Synology Photos 공유 앨범';
-          const photoItems = listJson.data.list.filter((it) => it.type !== 'video');
+          const photoItems = allSynoItems.filter((it) => it.type !== 'video');
           if (photoItems.length > 0) {
             const latestSyno = selectLatestItems(photoItems, {
               maxCount: targetMax,
@@ -3153,6 +3594,19 @@ export async function resolvePublicShareLinkUnified(params: {
               const thumbInfo = item.additional?.thumbnail;
               const cacheKey = thumbInfo?.cache_key || `${item.id}_0`;
               const xlReady = !thumbInfo?.xl || thumbInfo.xl === 'ready';
+
+              const addr = item.additional?.address;
+              const addrParts = [
+                addr?.state,
+                addr?.city || addr?.county,
+                addr?.district || addr?.town || addr?.village,
+                addr?.landmark,
+              ]
+                .map((s) => (s || '').trim())
+                .filter(Boolean);
+              const dedupAddrParts = Array.from(new Set(addrParts));
+              const synoLocationLabel =
+                dedupAddrParts.length > 0 ? dedupAddrParts.slice(0, 2).join(' ') : albumTitle;
 
               const makeSynoThumbUrl = (ver: string, size: string) => {
                 const p = new URLSearchParams({
@@ -3177,6 +3631,7 @@ export async function resolvePublicShareLinkUnified(params: {
                 passphrase,
               });
 
+              // Keep raw original JPEG download in fallbackUrls AND allow NativePhotoOptimizer to extract EXIF!
               const orderedCandidates = xlReady
                 ? [
                     makeSynoThumbUrl('2', 'xl'),
@@ -3213,9 +3668,10 @@ export async function resolvePublicShareLinkUnified(params: {
                 },
                 title: (item.filename || `사진 #${idx + 1}`).replace(/\.[^.]+$/, ''),
                 date: dateStr,
-                location: albumTitle,
-                tags: ['시놀로지포토', albumTitle],
-                aiSummary: `Synology Photos "${albumTitle}" 공유 앨범에서 불러온 실제 사진입니다.`,
+                takenTimestampMs: item.time ? item.time * 1000 : undefined,
+                location: synoLocationLabel,
+                tags: Array.from(new Set(['시놀로지포토', albumTitle, ...dedupAddrParts])),
+                aiSummary: `Synology Photos "${albumTitle}" 공유 앨범(${synoLocationLabel})에서 불러온 실제 사진입니다.`,
               };
             });
 
@@ -3232,7 +3688,7 @@ export async function resolvePublicShareLinkUnified(params: {
       }
     }
 
-    // E-2: Try Synology DSM File Station Folder/File Share API (`SYNO.Core.Sharing.Login` + `SYNO.FolderSharing.List`)
+    // E-2: Try Synology DSM File Station Folder/File Share API (`SYNO.Core.Sharing.Login` + paginated `SYNO.FolderSharing.List`)
     try {
       const dsmEntry = `${origin}/webapi/entry.cgi`;
       const fsLogin = new URLSearchParams({
@@ -3251,38 +3707,56 @@ export async function resolvePublicShareLinkUnified(params: {
       } | undefined;
 
       const sharingSid = loginJson?.data?.sharing_sid || '';
-      const fsListParams = new URLSearchParams({
-        api: 'SYNO.FolderSharing.List',
-        version: '2',
-        method: 'list',
-        sharing_id: passphrase,
-        offset: '0',
-        limit: listFetchLimit,
-        sort_by: 'mtime',
-        sort_direction: 'desc',
-        additional: '["time"]',
-      });
-      if (sharingSid) fsListParams.set('_sharing_sid', sharingSid);
+      type SynoSharedFile = {
+        name: string;
+        path: string;
+        isdir?: boolean;
+        additional?: { time?: { mtime?: number } };
+      };
+      const allSharedFiles: SynoSharedFile[] = [];
+      const fsPageSize = 200;
 
-      const fsListRes = await rawPost(
-        dsmEntry,
-        fsListParams.toString(),
-        'application/x-www-form-urlencoded',
-        shareHeaders
-      );
-      const fsListJson = fsListRes.json as {
-        success?: boolean;
-        data?: {
-          files?: Array<{
-            name: string;
-            path: string;
-            isdir?: boolean;
-            additional?: { time?: { mtime?: number } };
-          }>;
-        };
-      } | undefined;
+      for (let offset = 0; offset < desiredSynoPool; offset += fsPageSize) {
+        const fsListParams = new URLSearchParams({
+          api: 'SYNO.FolderSharing.List',
+          version: '2',
+          method: 'list',
+          sharing_id: passphrase,
+          offset: String(offset),
+          limit: String(fsPageSize),
+          sort_by: 'mtime',
+          sort_direction: 'desc',
+          additional: '["time"]',
+        });
+        if (sharingSid) fsListParams.set('_sharing_sid', sharingSid);
 
-      const imageFiles = (fsListJson?.data?.files ?? []).filter(
+        const fsListRes = await rawPost(
+          dsmEntry,
+          fsListParams.toString(),
+          'application/x-www-form-urlencoded',
+          shareHeaders
+        );
+        const fsListJson = fsListRes.json as {
+          success?: boolean;
+          data?: {
+            total?: number;
+            files?: SynoSharedFile[];
+          };
+        } | undefined;
+
+        const batchFiles = fsListJson?.data?.files ?? [];
+        if (batchFiles.length === 0) break;
+        allSharedFiles.push(...batchFiles);
+        if (batchFiles.length < fsPageSize) break;
+        if (
+          typeof fsListJson?.data?.total === 'number' &&
+          offset + batchFiles.length >= fsListJson.data.total
+        ) {
+          break;
+        }
+      }
+
+      const imageFiles = allSharedFiles.filter(
         (f) => !f.isdir && /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(f.name)
       );
 

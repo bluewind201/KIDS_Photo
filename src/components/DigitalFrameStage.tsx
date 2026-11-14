@@ -7,6 +7,8 @@ import {
   FolderPlus,
   Layers,
   Loader2,
+  MapPin,
+  MessageCircleHeart,
   Mic,
   Pause,
   Play,
@@ -20,6 +22,7 @@ import { PROVIDER_LABELS } from '../data/initialAlbums';
 import { FrameTransitionMode, PhotoAnalysisProgress, PhotoItem } from '../types';
 import {
   getVaultDisplayObjectUrl,
+  invalidateVaultObjectUrl,
   optimizeAndCachePhotoToVault,
   peekVaultObjectUrlSync,
 } from '../utils/photoCacheDb';
@@ -37,6 +40,9 @@ interface DigitalFrameStageProps {
   albumPasswords?: Record<string, string>;
   photoAnalysisProgress?: PhotoAnalysisProgress | null;
   matchedPlaylistInfo?: { label: string; count: number } | null;
+  discoveredLocations?: Array<{ location: string; count: number }>;
+  onSelectLocationFilter?: (location: string) => void;
+  onTalkAboutCurrentPhoto?: (photo: PhotoItem) => void;
   onExitMatchedPlaylist?: () => void;
   onRequestRefreshAlbum?: (albumId: string) => Promise<boolean>;
   onPrev: () => void;
@@ -68,6 +74,9 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   albumPasswords,
   photoAnalysisProgress,
   matchedPlaylistInfo,
+  discoveredLocations = [],
+  onSelectLocationFilter,
+  onTalkAboutCurrentPhoto,
   onExitMatchedPlaylist,
   onRequestRefreshAlbum,
   onPrev,
@@ -87,6 +96,7 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
   const prevSrcByPhotoIdRef = useRef<Record<string, string>>({});
   const [quickPrompt, setQuickPrompt] = useState('');
   const [showAskInput, setShowAskInput] = useState(false);
+  const [showLocationMenu, setShowLocationMenu] = useState(false);
 
   const currentPhoto = photos[currentIndex] ?? null;
   const secondaryPhoto = photos.length > 1 ? photos[(currentIndex + 1) % photos.length] : null;
@@ -312,7 +322,15 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
         resolvedBlobUrl,
         `${photo.id}-blob`,
         photo,
-        compact
+        compact,
+        () => {
+          invalidateVaultObjectUrl(photo.id);
+          setNativeBlobUrls((prev) => {
+            const next = { ...prev };
+            delete next[photo.id];
+            return next;
+          });
+        }
       );
     }
 
@@ -492,14 +510,74 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
           </button>
 
           {!showAskInput ? (
-            <button
-              type="button"
-              onClick={() => setShowAskInput(true)}
-              className="inline-flex items-center gap-1.5 rounded-full bg-white/95 hover:bg-white text-[#141519] px-3 py-1.5 text-xs font-medium shadow-sm transition-colors whitespace-nowrap"
-            >
-              <Search className="w-3.5 h-3.5 text-zinc-600" />
-              <span>{isAssistantLoading ? '확인 중...' : '사진 찾기 · 날씨 · 길안내'}</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setShowAskInput(true)}
+                className="inline-flex items-center gap-1.5 rounded-full bg-white/95 hover:bg-white text-[#141519] px-3 py-1.5 text-xs font-medium shadow-sm transition-colors whitespace-nowrap"
+              >
+                <Search className="w-3.5 h-3.5 text-zinc-600" />
+                <span>{isAssistantLoading ? '확인 중...' : '장소별 사진 찾기 · 질문'}</span>
+              </button>
+
+              {onTalkAboutCurrentPhoto && currentPhoto && (
+                <button
+                  type="button"
+                  onClick={() => onTalkAboutCurrentPhoto(currentPhoto)}
+                  title="지금 화면에 보이는 사진을 동물 친구와 함께 이야기하고 영어 단어도 배워요!"
+                  className="hidden md:inline-flex items-center gap-1.5 rounded-full bg-rose-500/95 hover:bg-rose-600 text-white px-3 py-1.5 text-xs font-bold shadow-sm transition-colors whitespace-nowrap"
+                >
+                  <MessageCircleHeart className="w-3.5 h-3.5 text-amber-200" />
+                  <span>이 사진 이야기하기</span>
+                </button>
+              )}
+
+              {discoveredLocations.length > 0 && onSelectLocationFilter && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowLocationMenu((v) => !v)}
+                    className="hidden lg:inline-flex items-center gap-1 rounded-full bg-white/95 hover:bg-white text-[#141519] px-3 py-1.5 text-xs font-semibold shadow-sm transition-colors whitespace-nowrap"
+                    title="촬영된 장소·지역별로 추억 사진을 모아봅니다"
+                  >
+                    <MapPin className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>장소별 ({discoveredLocations.length})</span>
+                  </button>
+                  {showLocationMenu && (
+                    <div className="absolute left-0 top-10 z-40 w-64 max-h-72 overflow-y-auto rounded-2xl bg-white/98 backdrop-blur-md border border-black/10 p-2 shadow-xl">
+                      <div className="px-2.5 py-1 text-[11px] font-bold text-zinc-500 flex items-center justify-between">
+                        <span>📍 장소별 우리 가족 추억</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowLocationMenu(false)}
+                          className="text-zinc-400 hover:text-zinc-700"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="mt-1 space-y-1">
+                        {discoveredLocations.map((locItem) => (
+                          <button
+                            key={locItem.location}
+                            type="button"
+                            onClick={() => {
+                              setShowLocationMenu(false);
+                              onSelectLocationFilter(locItem.location);
+                            }}
+                            className="w-full flex items-center justify-between rounded-xl px-2.5 py-1.5 text-xs font-medium text-[#141519] hover:bg-indigo-50 transition-colors text-left"
+                          >
+                            <span className="truncate">📍 {locItem.location}</span>
+                            <span className="font-mono text-[11px] font-bold text-indigo-600 shrink-0 ml-2">
+                              {locItem.count}장
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           ) : (
             <form
               onSubmit={handleQuickSubmit}

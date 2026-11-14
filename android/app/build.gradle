@@ -1,8 +1,22 @@
 apply plugin: 'com.android.application'
 
+def localSigningProps = new Properties()
+def localSigningPropsFile = file("C:/BuildToolset/signing/signing.properties")
+if (localSigningPropsFile.exists()) {
+    localSigningPropsFile.withInputStream { localSigningProps.load(it) }
+}
+def localVc = 215
+def vcFile = file("C:/BuildToolset/signing/version-codes.json")
+if (vcFile.exists()) {
+    def m = (vcFile.text =~ /"KIDS_Photo"\s*:\s*(\d+)/)
+    if (m.find()) { localVc = Math.max(215, m.group(1).toInteger()) }
+}
+def envVc = System.getenv("KIDSPHOTO_VERSION_CODE")
 def ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")
-def computedVersionCode = ciRunNumber ? (100 + ciRunNumber.toInteger()) : 1
-def releaseKeystorePath = System.getenv("KIDSPHOTO_KEYSTORE")
+def computedVersionCode = envVc ? envVc.toInteger() : (ciRunNumber ? (100 + ciRunNumber.toInteger()) : localVc)
+def releaseKeystorePath = System.getenv("KIDSPHOTO_KEYSTORE") ?: localSigningProps.getProperty("KIDSPHOTO_KEYSTORE")
+def releaseKeystorePw = System.getenv("KIDSPHOTO_KEYSTORE_PASSWORD") ?: localSigningProps.getProperty("KEYSTORE_PASSWORD")
+def releaseKeystoreAlias = System.getenv("KIDSPHOTO_KEY_ALIAS") ?: localSigningProps.getProperty("KIDSPHOTO_KEY_ALIAS") ?: "kidsphoto"
 def releaseKeystoreFile = releaseKeystorePath ? file(releaseKeystorePath) : null
 
 android {
@@ -28,12 +42,12 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
-        if (releaseKeystoreFile != null && releaseKeystoreFile.exists()) {
+        if (releaseKeystoreFile != null && releaseKeystoreFile.exists() && releaseKeystorePw) {
             release {
                 storeFile releaseKeystoreFile
-                storePassword System.getenv("KIDSPHOTO_KEYSTORE_PASSWORD")
-                keyAlias(System.getenv("KIDSPHOTO_KEY_ALIAS") ?: "kidsphoto")
-                keyPassword System.getenv("KIDSPHOTO_KEYSTORE_PASSWORD")
+                storePassword releaseKeystorePw
+                keyAlias releaseKeystoreAlias
+                keyPassword releaseKeystorePw
             }
         }
     }

@@ -52,6 +52,11 @@ export interface PhotoItem {
   mood?: string;
   people?: string;
   objects?: string[];
+  /** Extracted EXIF / cloud GPS coordinates for real geographic place search */
+  gpsLat?: number;
+  gpsLng?: number;
+  /** Exact EXIF / cloud shooting timestamp (ms) for trip clustering & chronological sorting */
+  takenTimestampMs?: number;
 }
 
 export interface DigitalAlbum {
@@ -115,6 +120,10 @@ export interface WeatherPayload {
     pm25Level: 'good' | 'normal' | 'bad' | 'very-bad';
   };
   updatedAt: string;
+  /** Explicit data provider attribution displayed on the weather card */
+  weatherSource?: string;
+  airSource?: string;
+  syncIntervalMinutes?: number;
 }
 
 export type CalendarSourceType = 'android_device' | 'ics_url' | 'kr_holidays';
@@ -145,9 +154,11 @@ export interface ScheduleItem {
 
 export interface MartTickerItem {
   id: string;
-  category: '휴무일' | '세일·행사';
+  category: '휴무일' | '세일·행사' | 'AD·혜택';
   storeName: string;
   content: string;
+  isSponsorAd?: boolean;
+  landingUrl?: string;
 }
 
 export type BunnyId = string;
@@ -183,7 +194,7 @@ export type BunnyToyType = 'ball' | 'pinwheel' | 'blocks' | 'car' | 'bubbles';
 
 export type EnglishFrequencyMode = 'off' | 'rare' | 'normal' | 'often';
 
-export type GeminiVoiceMode = 'gemini_live' | 'pro_model' | 'standard';
+export type GeminiVoiceMode = 'elevenlabs' | 'gemini_live' | 'pro_model' | 'standard';
 
 export interface BunnyCharacterConfig {
   id: BunnyId;
@@ -201,6 +212,8 @@ export interface BunnyCharacterConfig {
   accessory: BunnyAccessoryType;
   favoriteToy: BunnyToyType;
   voiceSpeaker: BunnyVoiceSpeaker;
+  /** Optional specific ElevenLabs Voice ID assigned to this character */
+  elevenLabsVoiceId?: string;
   enabled: boolean;
 }
 

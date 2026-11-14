@@ -112,50 +112,48 @@ public final class EdgeNeuralTtsClient {
     }
 
     /**
-     * Maps each bunny character to a distinct, natural human-sounding Neural voice.
-     * Uses gentle Hz/rate prosody so there is ZERO metallic or robotic pitch distortion!
+     * Maps each plush animal character to an adorable, bright, child-friendly Korean/English Neural voice!
+     * Uses native Korean `ko-KR-SunHiNeural` with lively cartoon-character prosody and `en-US-AnaNeural` (real child voice) for English!
      */
     public static NeuralVoiceSpec resolveVoiceSpec(String speakerKey, boolean isEnglish) {
         String key = speakerKey != null ? speakerKey.trim().toLowerCase(Locale.ROOT) : "assistant";
         if (isEnglish) {
             switch (key) {
                 case "tosuni":
-                    return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+2Hz", "-6%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+2Hz", "-4%", "en-US");
                 case "tosili":
-                    // Real American child neural voice for bright kid English coaching!
-                    return new NeuralVoiceSpec("en-US-AnaNeural", "+0Hz", "-4%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+8Hz", "+2%", "en-US");
                 case "toddungi":
-                    return new NeuralVoiceSpec("en-US-AnaNeural", "-2Hz", "-7%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+4Hz", "-5%", "en-US");
                 case "tobyeori":
-                    return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+2Hz", "-6%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+6Hz", "-3%", "en-US");
                 case "togureum":
-                    return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+2Hz", "-5%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+0Hz", "+0%", "en-US");
                 default:
-                    return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+0Hz", "-5%", "en-US");
+                    return new NeuralVoiceSpec("en-US-AnaNeural", "+2Hz", "-3%", "en-US");
             }
         }
 
-        // Next-Gen Conversational MultilingualNeural v2 Human Voices (replaces stiff navigation SunHiNeural)
-        // Each character has a distinct, warm, conversational human voice actor with zero vocoder pitch warp!
+        // Cute, animated Korean character prosody on native Korean neural pronunciation (no adult male or foreign-accent voices!)
         switch (key) {
             case "tosuni":
-                // 다정하고 포근한 첫째 언니 톤 (자연 대화형 여성 보이스 Ava Multilingual v2)
-                return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "+1Hz", "+0%", "ko-KR");
+                // 다정하고 사랑스러운 아기 토끼 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+22Hz", "+5%", "ko-KR");
             case "tosili":
-                // 밝고 생동감 있는 단짝 친구 톤 (생기 있는 대화형 여성 보이스 Emma Multilingual v2)
-                return new NeuralVoiceSpec("en-US-EmmaMultilingualNeural", "+2Hz", "+3%", "ko-KR");
+                // 통통 튀고 신나는 장난꾸러기 단짝 인형 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+30Hz", "+10%", "ko-KR");
             case "toddungi":
-                // 포근하고 부드러운 단짝 친구 톤 (자연 한국어 대화형 보이스 Hyunsu Multilingual v2)
-                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+2Hz", "-1%", "ko-KR");
+                // 포근하고 말랑말랑한 막내 곰돌이·햄스터 인형 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+25Hz", "+2%", "ko-KR");
             case "tobyeori":
-                // 맑고 차분한 동화 구연 톤 (부드러운 한국어 성우 톤)
-                return new NeuralVoiceSpec("en-US-AvaMultilingualNeural", "-1Hz", "-4%", "ko-KR");
+                // 맑고 방울방울 귀여운 동화 요정 인형 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+27Hz", "+4%", "ko-KR");
             case "togureum":
-                // 씩씩하고 명랑한 소년 대장 톤 (밝은 대화형 보이스 Brian Multilingual v2)
-                return new NeuralVoiceSpec("en-US-BrianMultilingualNeural", "+2Hz", "+2%", "ko-KR");
+                // 씩씩하고 해맑은 꼬마 대장 인형 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+18Hz", "+8%", "ko-KR");
             default:
-                // 스마트 액자 AI 비서 (자연스러운 대화형 보이스)
-                return new NeuralVoiceSpec("ko-KR-HyunsuMultilingualNeural", "+0Hz", "+0%", "ko-KR");
+                // 다정하고 친근한 스마트 가족 도우미 톤
+                return new NeuralVoiceSpec("ko-KR-SunHiNeural", "+12Hz", "+3%", "ko-KR");
         }
     }
 
