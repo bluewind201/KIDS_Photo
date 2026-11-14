@@ -3,6 +3,7 @@ import { BunnyVoiceSpeaker } from '../types';
 import { getSavedElevenLabsApiKey, synthesizeViaElevenLabsMp3 } from './elevenLabsTts';
 import { getSavedGeminiApiKey, tryBackendJson } from './standaloneApi';
 import { trySynthesizeSupertonicWavUrl } from './supertonicTts';
+import { isVoiceStudioReady, synthesizeViaVoiceStudio } from './voiceStudioTts';
 
 export type SpeechSpeakerKey = 'assistant' | BunnyVoiceSpeaker;
 
@@ -557,18 +558,19 @@ async function synthesizeViaGeminiNativeLiveOnce(
   return null;
 }
 
-async function playMp3ArrayBufferReliably(
-  mp3Buf: ArrayBuffer,
+async function playBinaryAudioReliably(
+  audioBuf: ArrayBuffer,
+  ext: 'mp3' | 'wav',
   speechToken: number
 ): Promise<boolean> {
   if (speechToken !== currentSpeechToken) return true;
-  const mp3Bytes = new Uint8Array(mp3Buf);
+  const audioBytes = new Uint8Array(audioBuf);
 
-  // 1) Native Android MediaPlayer (`playBase64Audio` with `mp3` ext — rock-solid hardware STREAM_MUSIC)
+  // 1) Native Android MediaPlayer (`playBase64Audio` with `mp3` or `wav` ext — rock-solid hardware STREAM_MUSIC)
   const bridge = getAndroidSpeechBridge();
   if (bridge?.playBase64Audio) {
-    const b64 = uint8ToBase64(mp3Bytes);
-    const uttId = `el-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const b64 = uint8ToBase64(audioBytes);
+    const uttId = `au-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const nativePlayed = await new Promise<boolean>((resolve) => {
       let settled = false;
       const finish = (ok: boolean) => {
@@ -584,10 +586,10 @@ async function playMp3ArrayBufferReliably(
         if (d.type === 'done') finish(true);
         else if (d.type === 'error') finish(false);
       };
-      const timer = window.setTimeout(() => finish(true), 22000);
+      const timer = window.setTimeout(() => finish(true), 24000);
       window.addEventListener('nativeTtsEvent', onEv as EventListener);
       try {
-        bridge.playBase64Audio!(b64, 'mp3', uttId);
+        bridge.playBase64Audio!(b64, ext, uttId);
       } catch {
         finish(false);
       }
@@ -602,7 +604,7 @@ async function playMp3ArrayBufferReliably(
       if (ctx.state === 'suspended') {
         await ctx.resume().catch(() => {});
       }
-      const decoded = await ctx.decodeAudioData(mp3Buf.slice(0));
+      const decoded = await ctx.decodeAudioData(audioBuf.slice(0));
       if (speechToken !== currentSpeechToken) return true;
       return await new Promise<boolean>((resolve) => {
         const src = ctx.createBufferSource();
@@ -625,13 +627,35 @@ async function playMp3ArrayBufferReliably(
     }
   }
 
-  const blobUrl = URL.createObjectURL(new Blob([mp3Buf.slice(0)], { type: 'audio/mpeg' }));
+  const mime = ext === 'wav' ? 'audio/wav' : 'audio/mpeg';
+  const blobUrl = URL.createObjectURL(new Blob([audioBuf.slice(0)], { type: mime }));
   return await playAudioDataUrl(blobUrl, speechToken);
 }
 
 /**
- * Tier 0: ElevenLabs (`eleven_flash_v2_5` ~75ms latency) Ultra-Natural Cute Character Voice Engine!
- * Runs FIRST whenever user configured an ElevenLabs API key (`Gigi` / `Mimi` / `Jessica` / custom Korean voice).
+ * Tier 0A: GitHub Open-Source `VoiceStudio` (`debpalash/VoiceStudio` :3900) / `Voicebox` (:17493) Local AI Voice Engine!
+ * Free, zero-API-fee local Qwen3-TTS / OmniVoice voice cloning when enabled!
+ */
+async function trySpeakWithVoiceStudio(
+  text: string,
+  speaker: SpeechSpeakerKey,
+  lang: 'ko-KR' | 'en-US',
+  speechToken: number,
+  explicitVoiceId?: string
+): Promise<boolean> {
+  if (!isVoiceStudioReady()) return false;
+  const res = await synthesizeViaVoiceStudio(text, speaker, {
+    explicitVoiceId,
+    isEnglish: lang === 'en-US',
+  });
+  if (speechToken !== currentSpeechToken) return true;
+  if (!res) return false;
+  return await playBinaryAudioReliably(res.buffer, res.ext, speechToken);
+}
+
+/**
+ * Tier 0B: ElevenLabs (`eleven_flash_v2_5` ~75ms latency) Ultra-Natural Cute Character Voice Engine!
+ * Runs whenever user configured an ElevenLabs API key (`Gigi` / `Mimi` / `Jessica` / custom Korean voice).
  */
 async function trySpeakWithElevenLabs(
   text: string,
@@ -647,7 +671,7 @@ async function trySpeakWithElevenLabs(
   });
   if (speechToken !== currentSpeechToken) return true;
   if (!mp3Buf) return false;
-  return await playMp3ArrayBufferReliably(mp3Buf, speechToken);
+  return await playBinaryAudioReliably(mp3Buf, 'mp3', speechToken);
 }
 
 /**
@@ -943,7 +967,8 @@ async function runUnifiedSpeechPipeline(
   lang: 'ko-KR' | 'en-US',
   enabled: boolean,
   onSpeakingChange?: (speaking: boolean) => void,
-  explicitElevenLabsVoiceId?: string
+  explicitElevenLabsVoiceId?: string,
+  explicitVoiceStudioVoiceId?: string
 ): Promise<void> {
   const cleanedText = sanitizeTextForSpeech(rawText);
   if (!enabled || !cleanedText) {
@@ -960,7 +985,17 @@ async function runUnifiedSpeechPipeline(
   onSpeakingChange?.(true);
 
   try {
-    // 0) Expressive Cute Character Voice Engine: ElevenLabs (`eleven_flash_v2_5` ~75ms Gigi/Mimi/Jessica/Custom)!
+    // 0A) Open-Source GitHub `VoiceStudio` (:3900) / `Voicebox` (:17493) Local AI Voice Engine (0 KRW Free!)
+    const voiceStudioPlayed = await trySpeakWithVoiceStudio(
+      cleanedText,
+      speaker,
+      lang,
+      myToken,
+      explicitVoiceStudioVoiceId
+    );
+    if (voiceStudioPlayed || myToken !== currentSpeechToken) return;
+
+    // 0B) Expressive Cute Character Voice Engine: ElevenLabs (`eleven_flash_v2_5` ~75ms Gigi/Mimi/Jessica/Custom)!
     const elevenPlayed = await trySpeakWithElevenLabs(
       cleanedText,
       speaker,
@@ -1048,7 +1083,8 @@ export async function speakText(
   speaker: SpeechSpeakerKey,
   enabled = true,
   onSpeakingChange?: (speaking: boolean) => void,
-  explicitElevenLabsVoiceId?: string
+  explicitElevenLabsVoiceId?: string,
+  explicitVoiceStudioVoiceId?: string
 ): Promise<void> {
   await runUnifiedSpeechPipeline(
     text,
@@ -1056,7 +1092,8 @@ export async function speakText(
     'ko-KR',
     enabled,
     onSpeakingChange,
-    explicitElevenLabsVoiceId
+    explicitElevenLabsVoiceId,
+    explicitVoiceStudioVoiceId
   );
 }
 
@@ -1069,7 +1106,8 @@ export async function speakEnglishPhrase(
   speaker: SpeechSpeakerKey = 'tosuni',
   enabled = true,
   onSpeakingChange?: (speaking: boolean) => void,
-  explicitElevenLabsVoiceId?: string
+  explicitElevenLabsVoiceId?: string,
+  explicitVoiceStudioVoiceId?: string
 ): Promise<void> {
   await runUnifiedSpeechPipeline(
     englishText,
@@ -1077,6 +1115,7 @@ export async function speakEnglishPhrase(
     'en-US',
     enabled,
     onSpeakingChange,
-    explicitElevenLabsVoiceId
+    explicitElevenLabsVoiceId,
+    explicitVoiceStudioVoiceId
   );
 }

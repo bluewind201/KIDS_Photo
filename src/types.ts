@@ -194,7 +194,12 @@ export type BunnyToyType = 'ball' | 'pinwheel' | 'blocks' | 'car' | 'bubbles';
 
 export type EnglishFrequencyMode = 'off' | 'rare' | 'normal' | 'often';
 
-export type GeminiVoiceMode = 'elevenlabs' | 'gemini_live' | 'pro_model' | 'standard';
+export type GeminiVoiceMode =
+  | 'elevenlabs'
+  | 'voicestudio'
+  | 'gemini_live'
+  | 'pro_model'
+  | 'standard';
 
 export interface BunnyCharacterConfig {
   id: BunnyId;
@@ -214,6 +219,8 @@ export interface BunnyCharacterConfig {
   voiceSpeaker: BunnyVoiceSpeaker;
   /** Optional specific ElevenLabs Voice ID assigned to this character */
   elevenLabsVoiceId?: string;
+  /** Optional specific VoiceStudio / Voicebox profile ID assigned to this character */
+  voiceStudioVoiceId?: string;
   enabled: boolean;
 }
 

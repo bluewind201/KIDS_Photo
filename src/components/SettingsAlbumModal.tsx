@@ -64,6 +64,22 @@ import {
   saveElevenLabsConfig,
   SPEAKER_DEFAULT_ELEVENLABS_VOICE,
 } from '../utils/elevenLabsTts';
+import {
+  getInstalledAppVersionInfo,
+  getNativeUpdaterBridge,
+  setAutoUpdatePreference,
+  triggerDownloadAndInstallUpdate,
+  triggerGitHubUpdateCheck,
+  UpdateCheckResult,
+} from '../utils/appUpdater';
+import {
+  DEFAULT_VOICESTUDIO_VOICES,
+  fetchVoiceStudioVoices,
+  loadVoiceStudioConfig,
+  saveVoiceStudioConfig,
+  VoiceStudioConfig,
+  VoiceStudioRemoteVoice,
+} from '../utils/voiceStudioTts';
 import { reverseGeocodeKoreaLatLng } from '../utils/koreaLocations';
 import {
   buildExactDateMartTickers,
@@ -259,6 +275,33 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
     error?: string;
   } | null>(null);
   const [isCheckingElevenAccount, setIsCheckingElevenAccount] = useState(false);
+
+  // GitHub Open-Source VoiceStudio (:3900) / Voicebox (:17493) Local AI Voice State
+  const [vsCfg, setVsCfg] = useState<VoiceStudioConfig>(() => loadVoiceStudioConfig());
+  const [vsServerDraft, setVsServerDraft] = useState<string>(() => loadVoiceStudioConfig().serverUrl);
+  const [vsVoices, setVsVoices] = useState<VoiceStudioRemoteVoice[]>(DEFAULT_VOICESTUDIO_VOICES);
+  const [vsStatusMsg, setVsStatusMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [isProbingVs, setIsProbingVs] = useState(false);
+
+  // GitHub Auto-Updater State
+  const [appVerInfo, setAppVerInfo] = useState(() => getInstalledAppVersionInfo());
+  const [updateEvent, setUpdateEvent] = useState<UpdateCheckResult | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+
+  useEffect(() => {
+    const onUpdaterEv = (ev: Event) => {
+      const detail = (ev as CustomEvent<UpdateCheckResult>).detail;
+      if (!detail) return;
+      setUpdateEvent((prev) => ({ ...(prev || {}), ...detail }));
+      if (detail.phase === 'check_result' || detail.phase === 'error' || detail.phase === 'installing') {
+        setIsCheckingUpdate(false);
+      }
+      setAppVerInfo(getInstalledAppVersionInfo());
+    };
+    window.addEventListener('nativeUpdaterEvent', onUpdaterEv as EventListener);
+    return () => window.removeEventListener('nativeUpdaterEvent', onUpdaterEv as EventListener);
+  }, []);
+
   const [isResyncingAllToMax, setIsResyncingAllToMax] = useState(false);
   const [newSponsorTitle, setNewSponsorTitle] = useState('');
   const [newSponsorBrand, setNewSponsorBrand] = useState('');
@@ -1308,8 +1351,8 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
         <div className="flex flex-wrap items-center gap-1.5 px-4 sm:px-6 py-2.5 border-b border-zinc-100 bg-[#F9FAFB] shrink-0">
           {[
             { id: 'characters', label: `🐾 동물친구 · 인형커스텀 · 영어 (${enabledCharCount}/${characters.length})` },
-            { id: 'voice', label: '⚡ Gemini 실시간음성 · 구독연동' },
-            { id: 'power', label: '절전 · 예약 켜짐' },
+            { id: 'voice', label: '⚡ 보이스스튜디오 · 일레븐랩스 · Gemini 음성' },
+            { id: 'power', label: `🔄 자동업데이트 · 절전 (v${appVerInfo.versionName})` },
             { id: 'layout', label: '화면 배치 · 날씨 효과' },
             { id: 'cloud', label: '클라우드 · 시놀로지 연동' },
             { id: 'albums', label: `디지털 앨범 (${albums.length})` },
@@ -2303,10 +2346,131 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
           )}
 
           {/* ===============================================================
-              TAB: POWER-SAVING SCHEDULE & AWAY SCREEN OFF
+              TAB: GITHUB AUTO-UPDATE & POWER-SAVING SCHEDULE
           =============================================================== */}
           {activeTab === 'power' && (
             <div className="space-y-5">
+              {/* 1. GitHub Release File Verification & Auto-Updater Card */}
+              <div className="rounded-2xl bg-gradient-to-br from-indigo-950 via-[#181B26] to-indigo-950 border border-indigo-400/30 p-5 text-white space-y-4 shadow-sm">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 max-w-xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <RefreshCw
+                        className={`w-4 h-4 text-emerald-400 shrink-0 ${
+                          isCheckingUpdate || updateEvent?.phase === 'downloading'
+                            ? 'animate-spin'
+                            : ''
+                        }`}
+                      />
+                      <h3 className="text-sm font-bold text-white">
+                        🔄 GitHub 자동 업데이트 (새 APK 업로드 여부 확인 &amp; 자동 설치)
+                      </h3>
+                      <span className="rounded-full bg-white/15 px-2.5 py-0.5 text-[10px] font-bold text-indigo-100 tabular-nums">
+                        현재 설치: v{appVerInfo.versionName} (#{appVerInfo.versionCode})
+                      </span>
+                    </div>
+                    <p className="text-xs text-indigo-100/80 leading-relaxed">
+                      GitHub 릴리스(<code>bluewind201/KIDS_Photo</code>)에 새 버전 APK 파일이 올라왔는지 앱 시작 시 및 30분마다 파일 존재·해시까지 자동 검증하며, 새 버전 발견 시 자동으로 내려받아 업데이트합니다.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={isCheckingUpdate || updateEvent?.phase === 'downloading'}
+                      onClick={() => {
+                        setIsCheckingUpdate(true);
+                        void triggerGitHubUpdateCheck();
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-white hover:bg-zinc-100 disabled:opacity-60 px-3.5 py-2 text-xs font-extrabold text-[#141519] whitespace-nowrap"
+                    >
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${isCheckingUpdate ? 'animate-spin' : ''}`}
+                      />
+                      {isCheckingUpdate ? 'GitHub 파일 확인 중...' : '지금 GitHub 새 버전 확인'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = !appVerInfo.autoUpdateEnabled;
+                        setAutoUpdatePreference(next);
+                        setAppVerInfo((prev) => ({ ...prev, autoUpdateEnabled: next }));
+                      }}
+                      className={`rounded-full px-4 py-2 text-xs font-extrabold transition-colors whitespace-nowrap ${
+                        appVerInfo.autoUpdateEnabled
+                          ? 'bg-emerald-500 text-[#141519]'
+                          : 'bg-white/15 text-zinc-300'
+                      }`}
+                    >
+                      {appVerInfo.autoUpdateEnabled ? '자동 업데이트 켜짐' : '자동 업데이트 꺼짐'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Android 8+ Unknown Sources Permission Quick Helper */}
+                {getNativeUpdaterBridge() && !appVerInfo.canInstallPackages && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-amber-500/20 border border-amber-400/40 px-3.5 py-2.5 text-xs">
+                    <span className="text-amber-200 font-semibold">
+                      ⚠️ 원클릭 자동 업데이트를 위해 <strong>'이 출처의 앱 허용'</strong> 스위치를 최초 1회 켜주세요.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => getNativeUpdaterBridge()?.openInstallPermissionSettings()}
+                      className="rounded-full bg-amber-300 hover:bg-amber-200 px-3 py-1 text-[11px] font-extrabold text-[#141519]"
+                    >
+                      설치 권한 허용 열기
+                    </button>
+                  </div>
+                )}
+
+                {/* Update Check / Download Progress Status Box */}
+                {updateEvent && (
+                  <div className="rounded-xl bg-white/10 border border-white/15 p-3.5 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-bold text-white">
+                        {updateEvent.message ||
+                          (updateEvent.hasUpdate
+                            ? `🚀 새 버전 v${updateEvent.latestVersionName} 파일 확인됨!`
+                            : `✅ 최신 버전 사용 중`)}
+                      </div>
+                      {updateEvent.hasUpdate &&
+                        updateEvent.downloadUrl &&
+                        updateEvent.phase !== 'downloading' && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              triggerDownloadAndInstallUpdate({
+                                downloadUrl: updateEvent.downloadUrl!,
+                                size: updateEvent.size,
+                                sha256: updateEvent.sha256,
+                                versionName: updateEvent.latestVersionName,
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-full bg-emerald-400 hover:bg-emerald-300 px-4 py-1.5 text-xs font-extrabold text-[#141519] shadow-sm"
+                          >
+                            <Upload className="w-3.5 h-3.5 rotate-180" />
+                            새 버전 v{updateEvent.latestVersionName} 지금 다운로드 · 설치
+                          </button>
+                        )}
+                    </div>
+
+                    {(updateEvent.phase === 'downloading' ||
+                      updateEvent.phase === 'verifying' ||
+                      updateEvent.phase === 'installing') && (
+                      <div className="space-y-1">
+                        <div className="h-2 w-full rounded-full bg-white/15 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-sky-400 transition-all duration-200"
+                            style={{ width: `${Math.max(5, updateEvent.percent ?? 15)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-2xl bg-[#F7F8FA] border border-zinc-200/80 p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -3740,14 +3904,19 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                   </div>
                 </div>
 
-                {/* 4-Way Voice Mode Selector */}
+                {/* 5-Way Voice Mode Selector */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {(
                     [
                       {
+                        id: 'voicestudio',
+                        title: '🖥️ GitHub 오픈소스 VoiceStudio (무료 로컬 AI · API 요금 0원)',
+                        desc: '집 PC/서버에 띄운 오픈소스 VoiceStudio(:3900) / Voicebox(:17493) Qwen3-TTS 복제 보이스로 무제한 무료 대화',
+                      },
+                      {
                         id: 'elevenlabs',
-                        title: '🎀 일레븐랩스(ElevenLabs) 귀여운 캐릭터 보이스 (강력 추천!)',
-                        desc: '기계음 없이 디즈니·애니메이션 아기 동물처럼 통통 튀고 사랑스러운 초자연 캐릭터 목소리 (~75ms 초고속)',
+                        title: '🎀 일레븐랩스(ElevenLabs) 귀여운 캐릭터 보이스 (클라우드 최고 음질)',
+                        desc: '별도 PC 없이 디즈니·애니메이션 아기 동물처럼 통통 튀고 사랑스러운 초자연 캐릭터 목소리 (~75ms 초고속)',
                       },
                       {
                         id: 'gemini_live',
@@ -3757,12 +3926,12 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       {
                         id: 'pro_model',
                         title: '🧠 Gemini 2.5 Pro 고성능 대화',
-                        desc: '구독급 Pro 추론 두뇌로 사진·일정을 깊이 있게 대화 + 일레븐랩스/네이티브 음성 출력',
+                        desc: '구독급 Pro 추론 두뇌로 사진·일정을 깊이 있게 대화 + 연결된 보이스 스튜디오 출력',
                       },
                       {
                         id: 'standard',
-                        title: '🔊 기본 귀여운 신경망 음성 (무료·키 불필요)',
-                        desc: 'API 키 없이 동작하는 아기 동물 하이톤 한국어 신경망(SunHi +24Hz) & 어린이 영어(Ana) 보이스',
+                        title: '🔊 기본 귀여운 신경망 음성 (무료·단독 동작)',
+                        desc: 'PC·API 키 없이 액자 단독 동작하는 아기 동물 하이톤 한국어 신경망(SunHi +24Hz) & 어린이 영어(Ana) 보이스',
                       },
                     ] as const
                   ).map((m) => {
@@ -3792,6 +3961,205 @@ export const SettingsAlbumModal: React.FC<SettingsAlbumModalProps> = ({
                       </button>
                     );
                   })}
+                </div>
+
+                {/* GitHub Open-Source VoiceStudio (:3900) / Voicebox (:17493) Local AI Voice Server Card */}
+                <div className="rounded-xl bg-gradient-to-br from-emerald-500/20 via-teal-500/15 to-cyan-500/15 border border-emerald-300/40 p-4 space-y-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm">🖥️</span>
+                      <div className="text-xs font-extrabold text-emerald-200">
+                        GitHub 오픈소스 VoiceStudio / Voicebox 무료 로컬 AI 보이스 스튜디오 연동
+                      </div>
+                      {vsCfg.enabled && vsCfg.serverUrl && (
+                        <span className="rounded-full bg-emerald-500 text-[#141519] px-2 py-0.5 text-[10px] font-extrabold">
+                          로컬 스튜디오 활성
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => openExternalUrlSafe('https://github.com/debpalash/VoiceStudio')}
+                      className="inline-flex items-center gap-1 rounded-full bg-emerald-300 hover:bg-emerald-200 px-3 py-1 text-[11px] font-extrabold text-[#141519] transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      GitHub VoiceStudio 열기
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-indigo-100/90 leading-relaxed">
+                    <strong>VoiceStudio(<code>debpalash/VoiceStudio</code>, 포트 <code>3900</code>)</strong> 또는{' '}
+                    <strong>Voicebox(<code>jamiepine/voicebox</code>, 포트 <code>17493</code>)</strong>를 집 PC(NVIDIA GPU 권장)에 실행해 두면,{' '}
+                    <strong>Qwen3-TTS / OmniVoice</strong> 모델과 3초 음성 복제(Voice Cloning)로 일레븐랩스 구독료 없이 아주 자연스러운 귀여운 캐릭터 목소리를 평생 무료로 쓸 수 있습니다! (GPU PC에서 약 0.5~1.2초 응답)
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                    <input
+                      type="url"
+                      value={vsServerDraft}
+                      onChange={(e) => setVsServerDraft(e.target.value)}
+                      placeholder="PC VoiceStudio 주소 (예: http://192.168.0.10:3900 또는 :17493)"
+                      className="sm:col-span-6 rounded-xl bg-white px-3.5 py-2 text-xs text-[#141519] placeholder:text-zinc-400 focus:outline-none"
+                    />
+                    <select
+                      value={vsCfg.protocol}
+                      onChange={(e) => {
+                        const next = saveVoiceStudioConfig({
+                          protocol: e.target.value as VoiceStudioConfig['protocol'],
+                        });
+                        setVsCfg(next);
+                      }}
+                      className="sm:col-span-3 rounded-xl bg-white px-2.5 py-2 text-xs font-bold text-[#141519] focus:outline-none"
+                    >
+                      <option value="auto">프로토콜 자동감지</option>
+                      <option value="voicestudio_openai">VoiceStudio (:3900)</option>
+                      <option value="voicebox">Voicebox (:17493)</option>
+                    </select>
+                    <select
+                      value={vsCfg.modelId}
+                      onChange={(e) => {
+                        const next = saveVoiceStudioConfig({ modelId: e.target.value });
+                        setVsCfg(next);
+                      }}
+                      className="sm:col-span-3 rounded-xl bg-white px-2.5 py-2 text-xs font-bold text-[#141519] focus:outline-none"
+                    >
+                      <option value="qwen3-tts">Qwen3-TTS (자연스러움 권장)</option>
+                      <option value="tts-1">OpenAI 호환 (tts-1)</option>
+                      <option value="omnivoice">OmniVoice 기본엔진</option>
+                    </select>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-[11px] text-emerald-100">
+                      <span>말하기 속도 ({vsCfg.speed.toFixed(2)}x)</span>
+                      <input
+                        type="range"
+                        min={0.85}
+                        max={1.25}
+                        step={0.05}
+                        value={vsCfg.speed}
+                        onChange={(e) => {
+                          const next = saveVoiceStudioConfig({ speed: Number(e.target.value) });
+                          setVsCfg(next);
+                        }}
+                        className="w-28 accent-emerald-400"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {vsCfg.enabled && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = saveVoiceStudioConfig({ enabled: false });
+                            setVsCfg(next);
+                            setVsStatusMsg({ ok: false, text: 'VoiceStudio 연동이 일시 중지되었습니다.' });
+                          }}
+                          className="rounded-full bg-white/15 hover:bg-white/25 px-3 py-1.5 text-[11px] font-bold text-white"
+                        >
+                          사용 끄기
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isProbingVs}
+                        onClick={async () => {
+                          setIsProbingVs(true);
+                          const probe = await fetchVoiceStudioVoices(
+                            vsServerDraft,
+                            vsCfg.protocol,
+                            vsCfg.apiKey
+                          );
+                          setIsProbingVs(false);
+                          setVsVoices(probe.voices);
+                          setVsStatusMsg({ ok: probe.ok, text: probe.message });
+                          const saved = saveVoiceStudioConfig({
+                            serverUrl: vsServerDraft,
+                            enabled: probe.ok && vsServerDraft.trim().length > 4,
+                          });
+                          setVsCfg(saved);
+                          if (probe.ok) {
+                            onChangeGeminiVoiceMode('voicestudio');
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-emerald-400 hover:bg-emerald-300 disabled:opacity-60 px-4 py-1.5 text-xs font-extrabold text-[#141519]"
+                      >
+                        {isProbingVs && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        서버 연결 확인 · 복제 보이스 불러오기
+                      </button>
+                    </div>
+                  </div>
+
+                  {vsStatusMsg && (
+                    <div
+                      className={`rounded-xl px-3 py-2 text-[11px] font-semibold ${
+                        vsStatusMsg.ok
+                          ? 'bg-emerald-950/60 text-emerald-200 border border-emerald-400/30'
+                          : 'bg-amber-950/60 text-amber-200 border border-amber-400/30'
+                      }`}
+                    >
+                      {vsStatusMsg.text}
+                    </div>
+                  )}
+
+                  {/* Per-Character VoiceStudio Voice Assignment & Instant Preview */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[11px] font-bold text-emerald-100">
+                      🐾 동물친구별 VoiceStudio 복제 프로필 지정 &amp; 테스트 듣기
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {characters.map((c) => {
+                        const curVsId = c.voiceStudioVoiceId || 'default';
+                        return (
+                          <div
+                            key={`vs-char-${c.id}`}
+                            className="flex items-center justify-between gap-2 rounded-xl bg-white/10 border border-white/15 px-3 py-2"
+                          >
+                            <div className="text-xs font-extrabold text-white truncate">
+                              {SPECIES_EMOJIS[c.species || 'bunny']} {c.name}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <select
+                                value={curVsId}
+                                onChange={(e) => {
+                                  const vid = e.target.value;
+                                  onUpdateCharacters(
+                                    characters.map((item) =>
+                                      item.id === c.id ? { ...item, voiceStudioVoiceId: vid } : item
+                                    )
+                                  );
+                                }}
+                                className="max-w-[155px] rounded-lg bg-white px-2 py-1 text-[11px] font-bold text-[#141519] focus:outline-none"
+                              >
+                                {vsVoices.map((vv) => (
+                                  <option key={vv.voiceId} value={vv.voiceId}>
+                                    {vv.name}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void speakText(
+                                    c.greeting || `안녕! 나는 ${c.name}야! 보이스스튜디오 목소리로 인사해!`,
+                                    c.voiceSpeaker,
+                                    true,
+                                    undefined,
+                                    c.elevenLabsVoiceId,
+                                    curVsId
+                                  );
+                                }}
+                                className="inline-flex items-center gap-1 rounded-lg bg-emerald-300 hover:bg-emerald-200 px-2 py-1 text-[10px] font-extrabold text-[#141519]"
+                              >
+                                <Play className="w-2.5 h-2.5" />
+                                듣기
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
 
                 {/* ElevenLabs Expressive Cute Character Voice Studio Card */}

@@ -34,6 +34,10 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false" />
     </application>
 
     <!-- Android 11+ (API 30+) Package Visibility for System TTS, Speech Recognition & Official Google Gemini App -->
@@ -60,4 +64,7 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Self-update from verified GitHub Releases (no SYSTEM_ALERT_WINDOW used) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 </manifest>

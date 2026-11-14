@@ -65,6 +65,7 @@ public class MainActivity extends BridgeActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService neuralTtsExecutor = Executors.newFixedThreadPool(2);
     private final ExecutorService photoOptExecutor = Executors.newFixedThreadPool(3);
+    private final ExecutorService updaterExecutor = Executors.newSingleThreadExecutor();
     private final ConcurrentHashMap<String, String> completedPhotoPayloads = new ConcurrentHashMap<>();
     private final AtomicLong activeSpeechGeneration = new AtomicLong(0L);
     private MediaPlayer activeNeuralPlayer = null;
@@ -124,10 +125,11 @@ public class MainActivity extends BridgeActivity {
             webCookieManager.setAcceptCookie(true);
             webCookieManager.setAcceptThirdPartyCookies(webView, true);
 
-            // Expose Native Android TTS + SpeechRecognizer + Fast Photo Optimizer + Device Calendar Bridge directly to JS
+            // Expose Native Android TTS + SpeechRecognizer + Fast Photo Optimizer + Device Calendar + Auto-Updater Bridge directly to JS
             webView.addJavascriptInterface(new AndroidSpeechBridge(), "AndroidSpeechBridge");
             webView.addJavascriptInterface(new AndroidPhotoBridge(), "AndroidPhotoBridge");
             webView.addJavascriptInterface(new AndroidCalendarBridge(), "AndroidCalendarBridge");
+            webView.addJavascriptInterface(new AndroidUpdaterBridge(), "AndroidUpdaterBridge");
 
             // Allow home Synology NAS self-signed SSL certificates for image streaming in WebView
             webView.setWebViewClient(new BridgeWebViewClient(getBridge()) {
@@ -1188,6 +1190,88 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    private void dispatchJsUpdaterEvent(JSONObject eventPayload) {
+        if (eventPayload == null) return;
+        mainHandler.post(() -> {
+            if (getBridge() == null || getBridge().getWebView() == null) return;
+            try {
+                String js =
+                    "window.dispatchEvent(new CustomEvent('nativeUpdaterEvent', { detail: " +
+                    eventPayload.toString() +
+                    " }));";
+                getBridge().getWebView().evaluateJavascript(js, null);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    public class AndroidUpdaterBridge {
+        @JavascriptInterface
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public String getVersionInfo() {
+            return AppUpdater.getVersionInfoJson(MainActivity.this).toString();
+        }
+
+        @JavascriptInterface
+        public void setAutoUpdateEnabled(boolean enabled) {
+            AppUpdater.setAutoUpdateEnabled(MainActivity.this, enabled);
+        }
+
+        @JavascriptInterface
+        public boolean isAutoUpdateEnabled() {
+            return AppUpdater.isAutoUpdateEnabled(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void checkForUpdateAsync() {
+            updaterExecutor.execute(() -> {
+                JSONObject res = AppUpdater.checkForUpdate(getApplicationContext());
+                try {
+                    res.put("phase", "check_result");
+                } catch (Exception ignored) {}
+                dispatchJsUpdaterEvent(res);
+            });
+        }
+
+        @JavascriptInterface
+        public void downloadAndInstallAsync(
+            String downloadUrl,
+            long expectedSize,
+            String expectedSha256,
+            String versionLabel
+        ) {
+            updaterExecutor.execute(() -> {
+                AppUpdater.downloadAndInstall(
+                    getApplicationContext(),
+                    downloadUrl,
+                    expectedSize,
+                    expectedSha256,
+                    versionLabel,
+                    MainActivity.this::dispatchJsUpdaterEvent
+                );
+            });
+        }
+
+        @JavascriptInterface
+        public void openInstallPermissionSettings() {
+            mainHandler.post(() -> AppUpdater.openUnknownSourcesSettings(MainActivity.this));
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        updaterExecutor.execute(() -> {
+            AppUpdater.tryResumePendingInstall(
+                getApplicationContext(),
+                MainActivity.this::dispatchJsUpdaterEvent
+            );
+        });
+    }
+
     @Override
     public void onDestroy() {
         activeSpeechGeneration.incrementAndGet();
@@ -1198,6 +1282,9 @@ public class MainActivity extends BridgeActivity {
         try {
             photoOptExecutor.shutdownNow();
             completedPhotoPayloads.clear();
+        } catch (Exception ignored) {}
+        try {
+            updaterExecutor.shutdownNow();
         } catch (Exception ignored) {}
 
         try {

@@ -55,6 +55,12 @@ import {
   testAndPreviewIcsCalendar,
 } from './utils/calendarSync';
 import { hasElevenLabsApiKey } from './utils/elevenLabsTts';
+import {
+  getInstalledAppVersionInfo,
+  triggerDownloadAndInstallUpdate,
+  triggerGitHubUpdateCheck,
+  UpdateCheckResult,
+} from './utils/appUpdater';
 import { GeminiLiveVoiceController } from './utils/geminiLiveSession';
 import {
   buildExactDateMartTickers,
@@ -1007,6 +1013,74 @@ export default function App() {
     installGlobalAudioUnlock();
   }, []);
 
+  // GitHub Release Auto-Update Watcher (Checks file existence on launch + every 30m + wakeup)
+  const [autoUpdateBanner, setAutoUpdateBanner] = useState<UpdateCheckResult | null>(null);
+  const autoTriggeredVcRef = useRef<number>(0);
+  const lastUpdateCheckMsRef = useRef<number>(0);
+
+  useEffect(() => {
+    const onUpdaterEv = (ev: Event) => {
+      const detail = (ev as CustomEvent<UpdateCheckResult>).detail;
+      if (!detail) return;
+
+      if (detail.phase === 'check_result') {
+        if (detail.hasUpdate && detail.assetVerified && detail.downloadUrl) {
+          setAutoUpdateBanner(detail);
+          const info = getInstalledAppVersionInfo();
+          const targetVc = detail.latestVersionCode ?? 0;
+          if (info.autoUpdateEnabled && targetVc > 0 && autoTriggeredVcRef.current !== targetVc) {
+            autoTriggeredVcRef.current = targetVc;
+            triggerDownloadAndInstallUpdate({
+              downloadUrl: detail.downloadUrl,
+              size: detail.size,
+              sha256: detail.sha256,
+              versionName: detail.latestVersionName,
+            });
+          }
+        }
+        return;
+      }
+
+      if (
+        detail.phase === 'downloading' ||
+        detail.phase === 'verifying' ||
+        detail.phase === 'installing' ||
+        detail.phase === 'need_permission' ||
+        detail.phase === 'error'
+      ) {
+        setAutoUpdateBanner((prev) => ({ ...(prev || {}), ...detail }));
+      }
+    };
+
+    window.addEventListener('nativeUpdaterEvent', onUpdaterEv as EventListener);
+
+    const runCheckIfAllowed = () => {
+      const info = getInstalledAppVersionInfo();
+      if (!info.autoUpdateEnabled) return;
+      lastUpdateCheckMsRef.current = Date.now();
+      void triggerGitHubUpdateCheck();
+    };
+
+    const bootTimer = window.setTimeout(runCheckIfAllowed, 4000);
+    const periodicTimer = window.setInterval(runCheckIfAllowed, 30 * 60 * 1000);
+    const onVisOrOnline = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - lastUpdateCheckMsRef.current >= 5 * 60 * 1000) {
+        runCheckIfAllowed();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisOrOnline);
+    window.addEventListener('online', onVisOrOnline);
+
+    return () => {
+      window.removeEventListener('nativeUpdaterEvent', onUpdaterEv as EventListener);
+      window.clearTimeout(bootTimer);
+      window.clearInterval(periodicTimer);
+      document.removeEventListener('visibilitychange', onVisOrOnline);
+      window.removeEventListener('online', onVisOrOnline);
+    };
+  }, []);
+
   // Track household presence activity (touch, click, keyboard) for idle power-saving
   useEffect(() => {
     const markActive = () => {
@@ -1813,7 +1887,8 @@ export default function App() {
             charCfg?.voiceSpeaker ?? 'tosuni',
             ttsEnabled,
             undefined,
-            charCfg?.elevenLabsVoiceId
+            charCfg?.elevenLabsVoiceId,
+            charCfg?.voiceStudioVoiceId
           );
           return;
         }
@@ -2107,11 +2182,13 @@ export default function App() {
                 charCfg?.voiceSpeaker ?? 'tosuni',
                 true,
                 (enSpk) => setBunnySpeakingFlag(bunnyId, enSpk),
-                charCfg?.elevenLabsVoiceId
+                charCfg?.elevenLabsVoiceId,
+                charCfg?.voiceStudioVoiceId
               );
             }
           },
-          charCfg?.elevenLabsVoiceId
+          charCfg?.elevenLabsVoiceId,
+          charCfg?.voiceStudioVoiceId
         );
       } catch {
         const fallback = '앗, 잠깐 귀가 간지러웠어! 한 번만 다시 말해줄래~?';
@@ -2129,7 +2206,8 @@ export default function App() {
           charCfg?.voiceSpeaker ?? 'tosuni',
           true,
           (speaking) => setBunnySpeakingFlag(bunnyId, speaking),
-          charCfg?.elevenLabsVoiceId
+          charCfg?.elevenLabsVoiceId,
+          charCfg?.voiceStudioVoiceId
         );
       }
     },
@@ -3562,6 +3640,60 @@ export default function App() {
             {voiceToast && (
               <div className="pointer-events-none absolute left-1/2 top-14 -translate-x-1/2 z-40 rounded-full bg-[#141519] px-4 py-1.5 text-xs font-semibold text-white shadow-lg whitespace-nowrap">
                 {voiceToast}
+              </div>
+            )}
+
+            {autoUpdateBanner && (
+              <div className="absolute right-3 top-3 z-40 max-w-sm rounded-2xl bg-[#141519]/95 backdrop-blur-md border border-emerald-400/40 px-4 py-3 text-white shadow-xl space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-extrabold text-emerald-300 truncate">
+                    🚀 {autoUpdateBanner.message || `새 업데이트 v${autoUpdateBanner.latestVersionName} 감지!`}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAutoUpdateBanner(null)}
+                    className="text-[11px] text-zinc-400 hover:text-white shrink-0"
+                  >
+                    닫기
+                  </button>
+                </div>
+                {(autoUpdateBanner.phase === 'downloading' ||
+                  autoUpdateBanner.phase === 'verifying' ||
+                  autoUpdateBanner.phase === 'installing') && (
+                  <div className="h-1.5 w-full rounded-full bg-white/15 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-sky-400 transition-all duration-200"
+                      style={{ width: `${Math.max(8, autoUpdateBanner.percent ?? 20)}%` }}
+                    />
+                  </div>
+                )}
+                {autoUpdateBanner.hasUpdate &&
+                  autoUpdateBanner.downloadUrl &&
+                  autoUpdateBanner.phase !== 'downloading' && (
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSettingsModalTab('power')}
+                        className="rounded-full bg-white/15 hover:bg-white/25 px-3 py-1 text-[11px] font-bold text-white"
+                      >
+                        설정 보기
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          triggerDownloadAndInstallUpdate({
+                            downloadUrl: autoUpdateBanner.downloadUrl!,
+                            size: autoUpdateBanner.size,
+                            sha256: autoUpdateBanner.sha256,
+                            versionName: autoUpdateBanner.latestVersionName,
+                          })
+                        }
+                        className="rounded-full bg-emerald-400 hover:bg-emerald-300 px-3.5 py-1 text-[11px] font-extrabold text-[#141519]"
+                      >
+                        지금 업데이트 설치
+                      </button>
+                    </div>
+                  )}
               </div>
             )}
           </div>
