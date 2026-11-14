@@ -675,7 +675,6 @@ export default function App() {
                 fallbackUrls: fresh.fallbackUrls,
                 nativeHeaders: fresh.nativeHeaders ?? prior.nativeHeaders,
                 date: prior.date || fresh.date,
-                isNostalgiaPick: fresh.isNostalgiaPick ?? prior.isNostalgiaPick,
                 vaultCached: alreadyInVault,
                 optimizedBytes: prior.optimizedBytes,
                 // Preserve Gemini Vision structured index if already analyzed!

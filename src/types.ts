@@ -52,8 +52,6 @@ export interface PhotoItem {
   mood?: string;
   people?: string;
   objects?: string[];
-  /** True when sampled from the 10% historical throwback pool for reminiscing */
-  isNostalgiaPick?: boolean;
 }
 
 export interface DigitalAlbum {

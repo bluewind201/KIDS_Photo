@@ -635,11 +635,6 @@ export const DigitalFrameStage: React.FC<DigitalFrameStageProps> = ({
               <h2 className="text-base md:text-lg font-semibold text-white tracking-tight truncate">
                 {currentPhoto.title}
               </h2>
-              {currentPhoto.isNostalgiaPick && (
-                <span className="inline-flex items-center rounded-full bg-amber-400/90 text-[#141519] px-2 py-0.5 text-[10px] font-bold shrink-0">
-                  🕰️ 추억 회상
-                </span>
-              )}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-zinc-200">
               <span>{currentPhoto.date}</span>
